@@ -1,0 +1,14 @@
+{
+    "editor.formatOnSave": true,
+    "python.envFile": "${workspaceFolder}/.env",
+    "[python]": {
+        "editor.formatOnType": false,
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-python.black-formatter"
+    },
+    "black-formatter.args": [
+        "--line-length",
+        "100"
+    ],
+    "autoDocstring.docstringFormat": "numpy"
+}
