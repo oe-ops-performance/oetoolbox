@@ -12,14 +12,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from ..utils import oemeta, oepaths
-from ..dataquery.external import query_DTN
-
-
-mdata_keys = ["SystemSize", "COD", "TZ", "LatLong", "Equip", "Altitude", "Losses"]
-(dict_SystemSize, dict_COD, dict_TZ, dict_LatLong, dict_Equip, dict_Altitude, dict_Losses) = [
-    oemeta.data[k] for k in mdata_keys
-]
+from oetoolbox.utils import oemeta, oepaths
+from oetoolbox.dataquery.external import query_DTN
 
 
 def get_site_model_losses(site, q=True):
@@ -182,12 +176,9 @@ def prepare_project_meteo_DF(sitename, DF_Met, printouts):
     meteo["Month"] = meteo.index.month
     meteo["Year"] = meteo.index.year
 
-    ### Load Project System Losses ###
-    system_losses_Array, system_losses_DC, system_losses_AC = get_site_model_losses(
-        sitename, q=(not printouts)
-    )
-    meteo["effective_irradiance"] = meteo["effective_irradiance"].copy().mul(system_losses_Array)
-    meteo["effective_irradiance"] = meteo["effective_irradiance"].copy().mul(system_losses_DC)
+    losses_array, losses_dc, _ = get_site_model_losses(sitename)
+    meteo["effective_irradiance"] = meteo["effective_irradiance"].copy().mul(losses_array)
+    meteo["effective_irradiance"] = meteo["effective_irradiance"].copy().mul(losses_dc)
 
     meteo = meteo[
         ~meteo.index.duplicated(keep="first")
@@ -228,9 +219,10 @@ def prepare_project_meteo_DF(sitename, DF_Met, printouts):
         keep_cols.append("POA_all_bad")
     meteo = meteo[keep_cols].copy()
 
-    Lat, Long = dict_LatLong[sitename]
-    tz, Altitude = dict_TZ[sitename], dict_Altitude[sitename]
-    location = pvlib.location.Location(Lat, Long, tz, Altitude, sitename)
+    tz = oemeta.data["TZ"].get(sitename)
+    lat, lon = oemeta.data["LatLong"].get(sitename)
+    alt = oemeta.data["Altitude"].get(sitename)
+    location = pvlib.location.Location(lat, lon, tz, alt, sitename)
     solar_position = location.get_solarposition(meteo.index)
 
     meteo = pd.merge(solar_position, meteo, left_index=True, right_index=True)
@@ -311,7 +303,7 @@ def run_pvlib_model(
         racking_type,
         racking_tilt,
         racking_gcr,
-    ) = [dict_Equip[key].get(sitename) for key in equip_keys]
+    ) = [oemeta.data["Equip"][key].get(sitename) for key in equip_keys]
 
     # pull equipment data
     CEC_modules = pvlib.pvsystem.retrieve_sam("CECmod")
