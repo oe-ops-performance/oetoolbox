@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ..utils import oemeta, oepaths
+from ..dataquery.external import query_DTN
 
 
 mdata_keys = ["SystemSize", "COD", "TZ", "LatLong", "Equip", "Altitude", "Losses"]
@@ -21,35 +22,36 @@ mdata_keys = ["SystemSize", "COD", "TZ", "LatLong", "Equip", "Altitude", "Losses
 ]
 
 
-def get_site_model_losses(sitename, q=True):
-    system_loss_df = pd.DataFrame()
-    system_loss_degradation = round(
-        (100 - ((dt.date.today().year - dict_COD[sitename]) * dict_Losses["Degradation"][sitename]))
-        / 100,
-        2,
+def get_site_model_losses(site, q=True):
+    losses = oemeta.data["Losses"].get(site)
+
+    current_year = dt.date.today().year
+    site_cod = oemeta.data["COD"].get(site)
+    degradation = oemeta.data["Losses"]["Degradation"].get(site)
+
+    system_loss_degradation = round((100 - ((current_year - site_cod) * degradation)) / 100, 2)
+    system_loss_shading = (100 - losses["shading"]) / 100
+    system_loss_soiling = (100 - losses["soiling"]) / 100
+    system_loss_module_quality = (100 - losses["quality"]) / 100
+    system_loss_module_mismatch = (100 - losses["mismatch"]) / 100
+    system_loss_LID = (100 - losses["lid"]) / 100
+    system_losses_Array = np.product(
+        [
+            system_loss_degradation,
+            system_loss_shading,
+            system_loss_soiling,
+            system_loss_module_quality,
+            system_loss_module_mismatch,
+            system_loss_LID,
+        ]
     )
 
-    system_loss_shading = (100 - dict_Losses[sitename]["shading"]) / 100
-    system_loss_soiling = (100 - dict_Losses[sitename]["soiling"]) / 100
+    dc_adjustment = oemeta.data["Losses"]["DC_Adjustment"].get(site)
+    ac_adjustment = oemeta.data["Losses"]["AC_Adjustment"].get(site)
 
-    system_loss_module_quality = (100 - dict_Losses[sitename]["quality"]) / 100
-    system_loss_module_mismatch = (100 - dict_Losses[sitename]["mismatch"]) / 100
-    system_loss_LID = (100 - dict_Losses[sitename]["lid"]) / 100
-    system_loss_dc_ohmic = (100 - dict_Losses[sitename]["wiring"]) / 100
-
-    system_loss_DC_adj = dict_Losses["DC_Adjustment"][sitename]
-    system_loss_AC_adj = dict_Losses["AC_Adjustment"][sitename]
-
-    system_losses_Array = (
-        system_loss_degradation
-        * system_loss_shading
-        * system_loss_soiling
-        * system_loss_module_quality
-        * system_loss_module_mismatch
-        * system_loss_LID
-    )
-    system_losses_DC = system_loss_dc_ohmic * system_loss_DC_adj
-    system_losses_AC = system_loss_AC_adj
+    system_loss_dc_ohmic = (100 - losses["wiring"]) / 100
+    system_losses_DC = system_loss_dc_ohmic * dc_adjustment
+    system_losses_AC = ac_adjustment
 
     if not q:
         print("\nSystem losses:")
@@ -61,8 +63,8 @@ def get_site_model_losses(sitename, q=True):
             "Module Quality": system_loss_module_quality,
             "Module Mismatch": system_loss_module_mismatch,
             "LID": system_loss_LID,
-            "DC Adj": system_loss_DC_adj,
-            "AC Adj": system_loss_AC_adj,
+            "DC Adj": dc_adjustment,
+            "AC Adj": ac_adjustment,
         }
         for desc, val in param_printouts.items():
             print(f"{desc} = ".rjust(22) + f"{val:0.3f}")
@@ -79,118 +81,23 @@ def get_site_model_losses(sitename, q=True):
     return system_losses_Array, system_losses_DC, system_losses_AC
 
 
-def request_access_token():
-    ### Request Access Token ###
-    api_token_url = "https://api.auth.dtn.com/v1/tokens/authorize"
-    post_headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    request_body = {
-        "grant_type": "client_credentials",
-        "client_id": "ee7jYBGim2s8HZa363d2u8AtqFcAy1qA",
-        "client_secret": "t1dXBPELo4t-G2umw6OFY7bJgQbk9VO8v45JoqpZtFgOomB26NLl7RwNEz2HS-tG",
-        "audience": "https://weather.api.dtn.com/conditions",
-    }
-    response = requests.post(api_token_url, data=json.dumps(request_body), headers=post_headers)
-    access_token = response.json()["data"]["access_token"]
-    return access_token
+def run_pvlib_DTN_query(site, start, end, q=True):
+    # get location metadata
+    tz = oemeta.data["TZ"].get(site)
+    lat, lon = oemeta.data["LatLong"].get(site)
 
-
-def split_timedelta(start_date, end_date):
-    """
-    Splits the timedelta between two dates into 10-day chunks.
-
-    Parameters:
-    start_date (str): start date in 'YYYY-MM-DD' format.
-    end_date (str): end date in 'YYYY-MM-DD' format.
-
-    Returns:
-    List of tuples representing 10-day date ranges.
-    """
-    # Calculate timedelta between dates
-    delta = end_date - start_date
-    if delta.days <= 10:
-        return [(start_date, end_date)]
-
-    # Split timedelta into chunks of 10 days
-    date_ranges = []
-    current_date = start_date
-    while (end_date - current_date).days >= 10:
-        next_date = current_date + dt.timedelta(days=10)
-        date_ranges.append((current_date, next_date))
-        current_date = next_date
-
-    # Add final date range if necessary
-    if current_date < end_date:
-        date_ranges.append((current_date, end_date))
-
-    return date_ranges
-
-
-def query_DTN(sitename, startdate=None, enddate=None, printouts=False):
-    if printouts:
-        print("!! USING DTN !!")
-    ### Request API access token ###
-    access_token = request_access_token()
-
-    ### Load Project System Losses ###
-    system_losses_Array, system_losses_DC, system_losses_AC = get_site_model_losses(
-        sitename, q=(not printouts)
-    )
-
-    ### Set start/end dates for forecast ###
-    if not (startdate and enddate):
-        print("Problem with start or end date(s)... Aborting...")
-        return
-    tz = dict_TZ.get(sitename)
-    start_date = pd.Timestamp(startdate, tz=tz).date() - pd.Timedelta(days=1)
-    end_date = pd.Timestamp(enddate, tz=tz).date() + pd.Timedelta(days=1)
-
-    # print("start_date: " + str(start_date))
-    # print("end_date: " + str(end_date))
-
+    # run dtn query
     interval = "hour"
-    fields = "airTemp,shortWaveRadiation,windSpeed"
-    headers = {
-        "Accept-Encoding": "gzip",
-        "Accept": "application/json",
-        "Authorization": "Bearer " + access_token,
-    }
-    api_request_url = "https://weather.api.dtn.com/v1/conditions"
+    fields = ["airTemp", "shortWaveRadiation", "windSpeed"]
+    start_date = pd.Timestamp(start).floor("D")
+    end_date = pd.Timestamp(end).ceil("D") + pd.Timedelta(hours=1)  # add hour for upsample to min
+    df_dtn = query_DTN(lat, lon, start_date, end_date, interval, fields, tz=tz)
 
-    Ten_day_ranges = split_timedelta(start_date, end_date)
-    Lat, Long = dict_LatLong[sitename]
-
-    df_project = pd.DataFrame()
-    for date_range in Ten_day_ranges:
-        start = str(date_range[0]) + "T00:00:00Z"
-        end = str(date_range[1]) + "T00:00:00Z"
-        querystring = {
-            "interval": interval,
-            "lat": Lat,
-            "lon": Long,
-            "parameters": fields,
-            "startTime": start,
-            "endTime": end,
-        }
-        response = requests.request("GET", api_request_url, headers=headers, params=querystring)
-        response_dict = json.loads(response.text)
-        data = response_dict["content"]["items"][0]["parameters"]
-        df_temp = pd.DataFrame.from_dict(data)
-        df_project = pd.concat([df_project, df_temp])
-
-    df_project.index = pd.to_datetime(df_project.index)
-    df_project_localized = df_project.tz_convert(dict_TZ[sitename])
-    meteo = df_project_localized
-
-    meteo = meteo[
-        ~meteo.index.duplicated(keep="first")
-    ]  # remove extra tstamps from fall dst adjustment
+    meteo = df_dtn.copy()
 
     # calculate solar position for shifted timestamps:
     idx = meteo.index + pd.Timedelta(30, unit="min")
-    solar_position = pvlib.solarposition.get_solarposition(idx, Lat, Long)
+    solar_position = pvlib.solarposition.get_solarposition(idx, lat, lon)
 
     # but still report the values with the original timestamps:
     solar_position.index = meteo.index
@@ -198,7 +105,10 @@ def query_DTN(sitename, startdate=None, enddate=None, printouts=False):
 
     # transposition model
     dirint = pvlib.irradiance.dirint(
-        meteo["shortWaveRadiation"], meteo["apparent_zenith"].values, meteo.index, max_zenith=85
+        meteo["shortWaveRadiation"],
+        meteo["apparent_zenith"].values,
+        meteo.index,
+        max_zenith=85,
     )
     dirint = dirint.rename("dni_dirint")
 
@@ -222,10 +132,11 @@ def query_DTN(sitename, startdate=None, enddate=None, printouts=False):
     )
 
     ## Apply IRR Losses ##
-    meteo["ghi"] = meteo["ghi_raw"].mul(system_losses_Array)  # .mul(system_losses_DC)
-    meteo["dni"] = meteo["dni_raw"].mul(system_losses_Array)  # .mul(system_losses_DC)
-    meteo["dhi"] = meteo["dhi_raw"].mul(system_losses_Array)  # .mul(system_losses_DC)
-    # print(meteo.describe())
+    losses_array, _, _ = get_site_model_losses(site)
+    meteo["ghi"] = meteo["ghi_raw"].mul(losses_array)
+    meteo["dni"] = meteo["dni_raw"].mul(losses_array)
+    meteo["dhi"] = meteo["dhi_raw"].mul(losses_array)
+
     return meteo
 
 
@@ -379,10 +290,6 @@ def run_pvlib_model(
     qprint("\n" + "#" * 100)
     qprint(f"\nGenerating PVLib model for: {sitename}")
 
-    ### load metadata ###
-    Lat, Long = dict_LatLong[sitename]
-    Timezone, Altitude = dict_TZ[sitename], dict_Altitude[sitename]
-
     equip_keys = [
         "Inv_Count",
         "Inv_Type",
@@ -499,11 +406,14 @@ def run_pvlib_model(
             Start_Date, End_Date = map(lambda d: pd.Timestamp(d).date(), [start_date, end_date])
 
         qprint("\nQuerying DTN weather data...")
-        meteo = query_DTN(sitename, Start_Date, End_Date, printouts=(not q))
+        meteo = run_pvlib_DTN_query(sitename, Start_Date, End_Date, q=q)
         POA_Col_name = "POA_DTN"
 
-    coordinates = [(Lat, Long, sitename, Altitude, Timezone)]
-    location = pvlib.location.Location(Lat, Long, Timezone, Altitude, sitename)
+    # get location metadata
+    tz = oemeta.data["TZ"].get(sitename)
+    lat, lon = oemeta.data["LatLong"].get(sitename)
+    alt = oemeta.data["Altitude"].get(sitename)
+    location = pvlib.location.Location(lat, lon, tz, alt, sitename)
 
     ### Define racking parameters ###
     if racking_type == "Tracker":
@@ -528,11 +438,7 @@ def run_pvlib_model(
         )
 
     configs = []
-    array_list = []  # temp
     for n, inverter in enumerate(inverter_params):
-        print(
-            "this is module_params[n]"
-        )  #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         print(module_params[n])
         array = pvlib.pvsystem.Array(
             mount=mount,
@@ -542,11 +448,6 @@ def run_pvlib_model(
             modules_per_string=string_length[n],
             strings=strings_per_inv[n],
         )
-        # print(f"ARRAY!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!:{array}")
-        # array_list.append(array)   #temp
-        # print('TEST inv_params') #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        # print(inverter)
-
         config = pvlib.pvsystem.PVSystem(arrays=[array], inverter_parameters=inverter)
         configs.append(config)
 
@@ -555,21 +456,11 @@ def run_pvlib_model(
     dict_ac_results_by_config = {}
     DF_final_ac_results = pd.DataFrame()
 
-    system_losses_Array, system_losses_DC, system_losses_AC = get_site_model_losses(
-        sitename, q=True
-    )
-
-    # mc = ModelChain(configs, location, aoi_model='physical', spectral_model="no_loss")
-    # mc = ModelChain(pvsystem, location, aoi_model='physical', spectral_model="no_loss")   #test
-    # mc.run_model_from_effective_irradiance(meteo)
+    losses_array, _, _ = get_site_model_losses(sitename)
 
     config_count = len(configs)
     for n, config in enumerate(configs):
         ## Run ModelChain for each Inv config ##
-        # print('in loop')                                                                                       #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        # print(type(config))
-        # print(f'\n[config]\n\t{config}')
-
         mc = ModelChain(config, location, aoi_model="physical", spectral_model="no_loss")
         if "POA" in meteo.columns:
             msx_ = "" if (not poafromdtn) else " (transposed from DTN GHI)"
@@ -596,14 +487,14 @@ def run_pvlib_model(
                 model="perez",
             )
             meteo[POA_Col_name] = POA_irradiance["poa_global"]
-            meteo["effective_irradiance"] = POA_irradiance["poa_global"].mul(system_losses_Array)
+            meteo["effective_irradiance"] = POA_irradiance["poa_global"].mul(losses_array)
             mc.run_model_from_effective_irradiance(meteo)
 
         else:
             qprint("\n\n!! ERROR !! No POA or GHI columns selected\n\n")
 
-        ## Pull AC Power from modeled Inv output and apply AC System loss Adj ##
-        Possible_power_ac_series = mc.results.ac / 1000  # *system_losses_AC
+        ## Pull AC Power from modeled Inv output ##
+        Possible_power_ac_series = mc.results.ac / 1000
         Possible_power_ac_df = pd.DataFrame(
             {
                 "Timestamp": Possible_power_ac_series.index,
@@ -612,16 +503,11 @@ def run_pvlib_model(
         )
         dict_ac_results_by_config[n] = Possible_power_ac_df
 
-    # print(f'\n{inverter_config = }\n')
-
     for inv in inverter_config:
         ## Add AC Possible Power by Inv into DF_final_results ##
         DF_inv_results = pd.DataFrame(dict_ac_results_by_config[inverter_config[inv]].copy())
         DF_inv_results["Inv ID"] = "".join([inv, "_Possible_Power"])
         DF_final_ac_results = pd.concat([DF_final_ac_results, DF_inv_results])
-
-    # print(f'\n{DF_final_ac_results.columns = }\n')
-    # return DF_final_ac_results
 
     today_date = dt.datetime.now().strftime("%Y-%m-%d")
     f_suffix = f"{sitename}_{Start_Date}_to_{End_Date}_created_{today_date}"
@@ -665,10 +551,7 @@ def run_pvlib_model(
         POA_Minutes_Col = DF_PVLib_AC_hourly.pop("POA_minutes_filled")
         DF_PVLib_AC_hourly.insert(10, "POA_minutes_filled", POA_Minutes_Col)
 
-    # qprint('\nDF_PVLIB_AC_RESULTS:')
-
     if isinstance(DF_Inv, pd.DataFrame):
-        # qprint('\nDF_Inv provided!')
         DF_Inv = DF_Inv.replace("[-11059] No Good Data For Calculation", np.nan)
         keepcols = [c for c in DF_Inv if "PROCESSED" not in c]
         DF_Inv = DF_Inv[keepcols].copy()
@@ -684,7 +567,6 @@ def run_pvlib_model(
 
         DF_Inv[time_col] = pd.to_datetime(DF_Inv[time_col])
         DF_Inv = DF_Inv.set_index(time_col, drop=True)
-        # DF_Inv = DF_Inv.dropna(how='all', axis=1)                   ###############################
         DF_Inv = DF_Inv.astype(float)
         DF_Inv = DF_Inv.add_suffix("_Actual_Power")
         DF_Inv_Hourly = DF_Inv.resample("h").mean().copy()
@@ -712,7 +594,6 @@ def run_pvlib_model(
         ]
 
         if jupyter_plots or save_files:
-            # qprint('\n\nBEGIN PLOT OUTPUTS\n')
             default_margin = dict(t=20, r=20, b=20, l=20)
 
             if jupyter_plots:
@@ -796,12 +677,12 @@ def run_pvlib_model(
                 fig_timeseries.show()
 
             # inv/pvlib comparison plots
-            dfi_h = dfi.copy().resample("h").mean()
-            fig_subplots = solarplots.inv_pvlib_subplots(
-                sitename, dfinv=dfi_h, dfpvl=DF_PVLib_AC_hourly
-            )
-            if jupyter_plots:
-                fig_subplots.show()
+            # dfi_h = dfi.copy().resample("h").mean()
+            # fig_subplots = solarplots.inv_pvlib_subplots(
+            #     sitename, dfinv=dfi_h, dfpvl=DF_PVLib_AC_hourly
+            # )
+            # if jupyter_plots:
+            #     fig_subplots.show()
 
     def next_available_path(path_, fstem_, ext_):
         n, fname_ = 1, f"{fstem_}{ext_}"
@@ -829,10 +710,6 @@ def run_pvlib_model(
         DF_PVLib_AC_results.to_csv(ac_savepath)
         qprint(f'\n>> saved file: "{ac_savepath.name}"\n{str(ac_savepath)}')
 
-        # ac_hourly_savepath = next_available_path(spath_, f'PVLib_InvAC_Hourly_{f_suffix}', '.csv')
-        # DF_PVLib_AC_hourly.to_csv(ac_hourly_savepath)
-        # qprint(f'>> saved file: "{ac_hourly_savepath.name}"')
-
         if DF_Inv is not None:
             html_savepath = next_available_path(
                 spath_, f"PVLib_vs_Actual_vs_POA_Graph_{f_suffix}", ".html"
@@ -841,12 +718,12 @@ def run_pvlib_model(
             fig_timeseries.write_html(html_savepath)
             qprint(f'>> saved file: "{html_savepath.name}"\n{str(html_savepath)}')
 
-            tstamp_ = dt.datetime.now().strftime("%Y%m%d")
-            subplots_savepath = next_available_path(
-                spath_, f"PVLIB_v_ACTUAL_comparisonSubplots{tstamp_}", ".html"
-            )
-            fig_subplots.write_html(subplots_savepath)
-            qprint(f'>> saved file: "{subplots_savepath.name}"\n{str(subplots_savepath)}')
+            # tstamp_ = dt.datetime.now().strftime("%Y%m%d")
+            # subplots_savepath = next_available_path(
+            #     spath_, f"PVLIB_v_ACTUAL_comparisonSubplots{tstamp_}", ".html"
+            # )
+            # fig_subplots.write_html(subplots_savepath)
+            # qprint(f'>> saved file: "{subplots_savepath.name}"\n{str(subplots_savepath)}')
 
     qprint("\n\n!!! DONE !!!")
     if return_df_and_fpath:
