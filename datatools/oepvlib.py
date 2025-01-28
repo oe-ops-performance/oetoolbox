@@ -407,7 +407,7 @@ def run_pvlib_model(
     alt = oemeta.data["Altitude"].get(sitename)
     location = pvlib.location.Location(lat, lon, tz, alt, sitename)
 
-    ### Define racking parameters ###
+    # Define racking parameters
     if racking_type == "Tracker":
         mount = pvlib.pvsystem.SingleAxisTrackerMount(
             axis_azimuth=0,
