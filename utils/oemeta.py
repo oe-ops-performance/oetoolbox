@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from oepaths import references
+from .oepaths import references
 
 # get list of all JSON data files in python projects 'references' folder
 json_fpaths = [fp for fp in references.glob("*.json") if "-DEN-" not in fp.name]
