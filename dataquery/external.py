@@ -1,7 +1,7 @@
 import json
 import requests
 import pandas as pd
-from ..utils import oemeta
+from ..utils.config import DTN_CREDENTIALS
 
 
 def segmented_date_ranges(start, end, n_days):
@@ -21,15 +21,15 @@ def segmented_date_ranges(start, end, n_days):
 
 
 def request_access_token():
-    api_token_url = "https://api.auth.dtn.com/v1/tokens/authorize"
+    api_token_url = DTN_CREDENTIALS["api_token_url"]
     post_headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     request_body = {
         "grant_type": "client_credentials",
-        "client_id": "ee7jYBGim2s8HZa363d2u8AtqFcAy1qA",
-        "client_secret": "t1dXBPELo4t-G2umw6OFY7bJgQbk9VO8v45JoqpZtFgOomB26NLl7RwNEz2HS-tG",
+        "client_id": DTN_CREDENTIALS["client_id"],
+        "client_secret": DTN_CREDENTIALS["client_secret"],
         "audience": "https://weather.api.dtn.com/conditions",
     }
     response = requests.post(api_token_url, data=json.dumps(request_body), headers=post_headers)
