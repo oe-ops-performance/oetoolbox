@@ -76,7 +76,6 @@ docs/_build/
 target/
 
 # Jupyter Notebook
-*.ipynb
 .ipynb_checkpoints
 
 # IPython
@@ -170,6 +169,3 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-
-# secrets file (local; on user machine)
-secrets/
