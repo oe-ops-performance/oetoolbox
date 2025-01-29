@@ -126,10 +126,10 @@ def run_pvlib_DTN_query(site, start, end, q=True):
     )
 
     ## Apply IRR Losses ##
-    losses_array, _, _ = get_site_model_losses(site)
-    meteo["ghi"] = meteo["ghi_raw"].mul(losses_array)
-    meteo["dni"] = meteo["dni_raw"].mul(losses_array)
-    meteo["dhi"] = meteo["dhi_raw"].mul(losses_array)
+    losses_array, dc_losses, _ = get_site_model_losses(site)
+    meteo["ghi"] = meteo["ghi_raw"].mul(losses_array).mul(dc_losses)
+    meteo["dni"] = meteo["dni_raw"].mul(losses_array).mul(dc_losses)
+    meteo["dhi"] = meteo["dhi_raw"].mul(losses_array).mul(dc_losses)
 
     return meteo
 
@@ -282,29 +282,6 @@ def run_pvlib_model(
     qprint("\n" + "#" * 100)
     qprint(f"\nGenerating PVLib model for: {sitename}")
 
-    equip_keys = [
-        "Inv_Count",
-        "Inv_Type",
-        "Inv_Config",
-        "Mod_Type",
-        "String_Length",
-        "String_Count_Per_Inv",
-        "Racking_Type",
-        "Racking_Tilt",
-        "Racking_GCR",
-    ]
-    (
-        inverter_count,
-        inverter_type,
-        inverter_config,
-        module_type,
-        string_length,
-        strings_per_inv,
-        racking_type,
-        racking_tilt,
-        racking_gcr,
-    ) = [oemeta.data["Equip"][key].get(sitename) for key in equip_keys]
-
     # pull equipment data
     CEC_modules = pvlib.pvsystem.retrieve_sam("CECmod")
     CEC_inverters = pvlib.pvsystem.retrieve_sam("cecinverter")
@@ -312,25 +289,8 @@ def run_pvlib_model(
     temperature_params = pvlib.temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"][
         "open_rack_glass_polymer"
     ]
-    module_params = (
-        [CEC_modules[mod] for mod in module_type]
-        if isinstance(module_type, list)
-        else CEC_modules[module_type]
-    )
-    inverter_params = (
-        [CEC_inverters[inv] for inv in inverter_type]
-        if isinstance(inverter_type, list)
-        else CEC_inverters[inverter_type]
-    )
-
-    # invparams_dict = {inv: CEC_inverters[inv] for inv in inverter_type}   #test
-
-    if (sitename in Paco_adjustments) and isinstance(inverter_type, list):
-        for param in inverter_params:
-            param["Paco"] = Paco_adjustments[sitename]
 
     savepath = pvlib_output_folder  # default (if not for flashreport files)
-    # DF_Met = DF_Inv = dfi = None   #init/default
     dfi = None  # init/default
     if from_FRfiles:
         fr_folder = os.path.join(oepaths.flashreports, FR_yearmonth, "Solar", sitename)
@@ -407,60 +367,99 @@ def run_pvlib_model(
     alt = oemeta.data["Altitude"].get(sitename)
     location = pvlib.location.Location(lat, lon, tz, alt, sitename)
 
-    ### Define racking parameters ###
-    if racking_type == "Tracker":
-        mount = pvlib.pvsystem.SingleAxisTrackerMount(
-            axis_azimuth=0,
-            axis_tilt=0,
-            max_angle=racking_tilt,
-            backtrack=True,
-            gcr=racking_gcr,
-            racking_model="open_rack",
-        )
-        tracking_profile = pvlib.tracking.singleaxis(
-            meteo["apparent_zenith"],
-            meteo["azimuth"],
-            max_angle=racking_tilt,
-            backtrack=True,
-            gcr=racking_gcr,
-        )
-    elif racking_type == "Fixed":
-        mount = pvlib.pvsystem.FixedMount(
-            surface_tilt=racking_tilt, surface_azimuth=180, racking_model="open_rack"
-        )
+    site_GCR = oemeta.data["Equip"]["Racking_GCR"].get(sitename)
+    design_db = oemeta.data["Project_Design_Database"].get(sitename)
+    inv_list = list(design_db.keys())
 
-    configs = []
-    for n, inverter in enumerate(inverter_params):
-        print(module_params[n])
-        array = pvlib.pvsystem.Array(
-            mount=mount,
-            module_type="glass_polymer",
-            module_parameters=module_params[n],
-            temperature_model_parameters=temperature_params,
-            modules_per_string=string_length[n],
-            strings=strings_per_inv[n],
-        )
-        config = pvlib.pvsystem.PVSystem(arrays=[array], inverter_parameters=inverter)
-        configs.append(config)
+    inv_configs = []
+    for inv, dict_inv in design_db.items():
+        inv_arrays = []
+        inv_type = dict_inv["Inverter Type (CEC)"]
+        racking_tilt = int(dict_inv["Tilt Angle (Deg)"])
+        racking_azimuth = int(dict_inv["Azimuth Angle (Deg)"])
+        racking_type = dict_inv["Racking Type"]
+        inv_params = CEC_inverters[inv_type]
 
-    # pvsystem = pvlib.pvsystem.PVSystem(arrays=array_list, inverter_parameters=dict(inverter_params))   #temp test
+        if racking_type == "Tracker":
+            mount = pvlib.pvsystem.SingleAxisTrackerMount(
+                axis_azimuth=racking_azimuth,
+                axis_tilt=0,
+                max_angle=racking_tilt,
+                backtrack=True,
+                gcr=site_GCR,
+                racking_model="open_rack",
+            )
+            tracking_profile = pvlib.tracking.singleaxis(
+                meteo["apparent_zenith"],
+                meteo["azimuth"],
+                max_angle=racking_tilt,
+                backtrack=True,
+                gcr=site_GCR,
+            )
+        elif racking_type == "Fixed":
+            mount = pvlib.pvsystem.FixedMount(
+                surface_tilt=racking_tilt,
+                surface_azimuth=racking_azimuth,
+                racking_model="open_rack",
+            )
+
+        cmb_keys = list(dict_inv.keys())
+        combiner_list = cmb_keys[10:]
+
+        for combiner in combiner_list:
+            cmb_arrays = []
+            dict_cmb = dict_inv[combiner]
+            combiner_Mod_Type = dict_cmb["Module Type (CEC)"]
+            mod_wattage_count_list = []
+            total_combiner_mod_count = 0
+
+            for x in range(1, 6):
+                mod_watt_string = f"Module Wattage {x}"
+                if dict_cmb[mod_watt_string] > 0:
+                    mod_wattage_count_list.append(x)
+
+            for x in mod_wattage_count_list:
+                combiner_Mod_Count = dict_cmb[f"String Count {x}"]
+                combiner_Mod_Length = dict_cmb[f"String Length {x}"]
+                mod_count = combiner_Mod_Length * combiner_Mod_Count
+                total_combiner_mod_count = total_combiner_mod_count + mod_count
+
+                array = pvlib.pvsystem.Array(
+                    mount=mount,
+                    module_type="glass_polymer",
+                    module_parameters=CEC_modules[combiner_Mod_Type],
+                    temperature_model_parameters=temperature_params,
+                    modules_per_string=combiner_Mod_Length,
+                    strings=combiner_Mod_Count,
+                )
+
+                cmb_arrays.append(array)
+
+            inv_arrays.append(cmb_arrays)
+
+        inv_arrays = [array for cmb_array in inv_arrays for array in cmb_array]
+        inv_config = pvlib.pvsystem.PVSystem(arrays=inv_arrays, inverter_parameters=inv_params)
+        inv_configs.append(inv_config)
 
     dict_ac_results_by_config = {}
     DF_final_ac_results = pd.DataFrame()
 
     losses_array, _, _ = get_site_model_losses(sitename)
 
-    config_count = len(configs)
-    for n, config in enumerate(configs):
-        ## Run ModelChain for each Inv config ##
+    config_count = len(inv_configs)
+    for n, config in enumerate(inv_configs):
+        config_length = len(config.arrays)
+        meteo_mc = [meteo] * config_length
         mc = ModelChain(config, location, aoi_model="physical", spectral_model="no_loss")
+
         if "POA" in meteo.columns:
             msx_ = "" if (not poafromdtn) else " (transposed from DTN GHI)"
             qprint(
                 f"Running model with POA{msx_} - part {n+1} / {config_count}",
                 end_="\r" if (n + 1) < config_count else "\n",
             )
-            mc.run_model_from_effective_irradiance(meteo)
+            mc.run_model_from_effective_irradiance(meteo_mc)
+
         elif "ghi" in meteo.columns:
             qprint("Running model with GHI transposed to POA - config #" + str(n + 1))
             POA_irradiance = pvlib.irradiance.get_total_irradiance(
@@ -470,17 +469,17 @@ def run_pvlib_model(
                 surface_azimuth=(
                     tracking_profile["surface_azimuth"] if racking_type == "Tracker" else 180
                 ),
-                dni=meteo["dni_raw"],
-                ghi=meteo["ghi_raw"],
-                dhi=meteo["dhi_raw"],
+                dni=meteo["dni"],
+                ghi=meteo["ghi"],
+                dhi=meteo["dhi"],
                 dni_extra=meteo["dni_extra"],
                 solar_zenith=meteo["apparent_zenith"],
                 solar_azimuth=meteo["azimuth"],
                 model="perez",
             )
             meteo[POA_Col_name] = POA_irradiance["poa_global"]
-            meteo["effective_irradiance"] = POA_irradiance["poa_global"].mul(losses_array)
-            mc.run_model_from_effective_irradiance(meteo)
+            meteo["effective_irradiance"] = POA_irradiance["poa_global"]  # .mul(losses_array)
+            mc.run_model_from_effective_irradiance(meteo_mc)
 
         else:
             qprint("\n\n!! ERROR !! No POA or GHI columns selected\n\n")
@@ -493,11 +492,11 @@ def run_pvlib_model(
                 "Possible Power KW": Possible_power_ac_series.values,
             }
         )
-        dict_ac_results_by_config[n] = Possible_power_ac_df
+        dict_ac_results_by_config[str(n)] = Possible_power_ac_df
 
-    for inv in inverter_config:
+    for n, inv in enumerate(inv_list):
         ## Add AC Possible Power by Inv into DF_final_results ##
-        DF_inv_results = pd.DataFrame(dict_ac_results_by_config[inverter_config[inv]].copy())
+        DF_inv_results = pd.DataFrame(dict_ac_results_by_config[str(n)].copy())
         DF_inv_results["Inv ID"] = "".join([inv, "_Possible_Power"])
         DF_final_ac_results = pd.concat([DF_final_ac_results, DF_inv_results])
 
