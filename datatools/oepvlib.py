@@ -226,7 +226,7 @@ def prepare_project_meteo_DF(sitename, DF_Met, printouts):
     solar_position = location.get_solarposition(meteo.index)
 
     meteo = pd.merge(solar_position, meteo, left_index=True, right_index=True)
-
+    meteo = meteo.resample("1h").mean()  # TEMP
     return meteo
 
 
@@ -270,6 +270,7 @@ def run_pvlib_model(
     localsave=False,
     return_df_and_fpath=False,
     custom_savepath=None,
+    xyz=False,
 ):
     qprint = lambda msg, end_="\n": print(msg, end=end_) if not q else None
     c1 = from_FRfiles and FR_yearmonth
@@ -404,7 +405,7 @@ def run_pvlib_model(
             )
 
         cmb_keys = list(dict_inv.keys())
-        combiner_list = cmb_keys[10:]
+        combiner_list = cmb_keys[11:]
 
         for combiner in combiner_list:
             cmb_arrays = []
@@ -458,6 +459,11 @@ def run_pvlib_model(
                 f"Running model with POA{msx_} - part {n+1} / {config_count}",
                 end_="\r" if (n + 1) < config_count else "\n",
             )
+            if xyz:
+                print(
+                    f"{sitename} - model part {n+1} / {config_count}",
+                    end="\r" if (n + 1) < config_count else "\n",
+                )
             mc.run_model_from_effective_irradiance(meteo_mc)
 
         elif "ghi" in meteo.columns:
@@ -479,6 +485,11 @@ def run_pvlib_model(
             )
             meteo[POA_Col_name] = POA_irradiance["poa_global"]
             meteo["effective_irradiance"] = POA_irradiance["poa_global"]  # .mul(losses_array)
+            if xyz:
+                print(
+                    f"{sitename} - model part {n+1} / {config_count}",
+                    end="\r" if (n + 1) < config_count else "\n",
+                )
             mc.run_model_from_effective_irradiance(meteo_mc)
 
         else:
