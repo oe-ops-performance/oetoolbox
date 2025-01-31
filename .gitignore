@@ -173,3 +173,5 @@ cython_debug/
 
 # secrets file (local; on user machine)
 secrets/
+
+local_notebooks/
