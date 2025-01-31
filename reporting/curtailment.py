@@ -1,12 +1,11 @@
-import os, sys, calendar
-from pathlib import Path
-import datetime as dt
-import pandas as pd
-import numpy as np
+import calendar
 import openpyxl
-from sqlalchemy import create_engine
 from openpyxl.utils.dataframe import dataframe_to_rows
-from ..utils import oemeta, oepaths, oeplots
+import pandas as pd
+from pathlib import Path
+from sqlalchemy import create_engine
+
+from ..utils import oepaths
 
 ## function to load most recently-created file in fpath list
 get_file = lambda fp_list: max((fp.stat().st_ctime, fp) for fp in fp_list)[1] if fp_list else None
