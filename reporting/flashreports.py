@@ -1,17 +1,13 @@
 import os
-import openpyxl
-import numpy as np
 import pandas as pd
-import datetime as dt
 import missingno as msno
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from oetoolbox.utils import oepaths, oemeta, oeplots
+from oetoolbox.utils import oepaths, oemeta
 from oetoolbox.reporting.tools import get_ppa_rate, latest_file, site_frpath
 from oetoolbox.reporting.openpyxl_monthly import create_monthly_report
 from oetoolbox.datatools.meteoqc import transposed_POA_from_DTN_GHI
-import oetoolbox.reporting.fr_filestatuschecks as fs
 
 
 def load_PIdatafile(filepath, t1, t2):
@@ -30,10 +26,6 @@ def load_PIdatafile(filepath, t1, t2):
         df = df.fillna(0)
     df = df.loc[(df.index >= t1) & (df.index < t2)]  # filter/adjust for selected month
     return df
-
-
-"""NEED TO CHANGE THE SOURCE OF CURTAILMENT VALUE"""
-# >> getting from Comanche Invoices\2023\092023\2023_09 ComancheSolarPV_PSCCo_Invoice w Curtailment.xlsx"
 
 
 def get_Comanche_curtailment(year, month):
@@ -83,7 +75,6 @@ def generate_monthlyFlashReport(
         print(f"\n|| ~~~ BEGIN MONTHLY REPORT GENERATION - {sitename.upper()} ~~~ ||")
     # check if PI data exists for site name
     af_dict = oemeta.data
-    allsolarsites = list(af_dict["AF_Solar_V3"])
     site_capacity = af_dict["SystemSize"]["MWAC"][sitename]
     site_capacity_DC = af_dict["SystemSize"]["MWDC"][sitename]  ########NEW
     mod_Tcoeff = af_dict["Equip"]["Mod_Coeff"][sitename]  ########NEW
@@ -103,7 +94,6 @@ def generate_monthlyFlashReport(
         return
 
     # relevant data files in flash report folder
-    siteFRfiles = [f for f in os.listdir(siteFRpath) if not os.path.isdir(f"{siteFRpath}\\{f}")]
     inv_fileids = ["PIQuery", "Inverters", "csv"]
     ppc_fileids = ["PIQuery", "PPC", "csv"]
     pvlib_fileids = [f"PVLib_InvAC_{sitename}", "csv"]  # prev. ['PVLib','InvAC','Hourly','csv']
@@ -188,11 +178,6 @@ def generate_monthlyFlashReport(
     ).copy()  # drop columns with no data for selected time range
     sitenotexist = sitename not in dfm_.columns  # check for site in filtered columns
 
-    # if not dfm_.empty:
-    #     if not pd.infer_freq(dfm_.index):
-    #         dfm_ = dfm_[~dfm_.index.duplicated(keep='first')]
-
-    # if sitenotexist, check for PI meter data file
     if sitenotexist:
         pimtrfpaths = list(Path(siteFRpath).glob("PIQuery*Meter*.csv"))
         if len(pimtrfpaths) > 0:
@@ -254,16 +239,6 @@ def generate_monthlyFlashReport(
             dfi[inv] = 0
 
     """LOAD PPC CURTAILMENT DATA (if available)"""
-    # if ppcfile and sitename!='Comanche':
-    #     ppcpath = f'{siteFRpath}\\{ppcfile}'
-    #     dfc = load_PIdatafile(ppcpath, t_start, t_end)
-    #     dfc['Curt_SP'] = dfc['xcel_MW_setpoint']
-    #     dfc['Curt_SP'] = dfc['Curt_SP'].mask(dfc['xcel_MW_cmd_request']==0, site_capacity)   #remove
-    #     dfc = dfc.resample('h').mean()
-    #     if not q: print(f'Loaded PPC file -------- "{ppcfile}"')
-    # else:
-    #     dfc = pd.DataFrame({'Timestamp': timeRangeH, 'Curt_SP': site_capacity})
-
     dfc = pd.DataFrame({"Timestamp": timeRangeH, "Curt_SP": site_capacity})
 
     # get separate curtailment value for Comanche
@@ -441,7 +416,7 @@ def generate_monthlyFlashReport(
                 print(f"!! No CAISO file found !!")
 
     # get filename and generate savepath for report
-    has_meterdata = fs.data_in_meterhistorian(sitename, year, month)  # check for meter data
+    has_meterdata = meterfile
     sfolder_ = siteFRpath if not local else str(Path.home().joinpath("Downloads"))
 
     def filename_exists(filename):
@@ -493,42 +468,4 @@ def generate_monthlyFlashReport(
     if return_df_and_fpath:
         return df4xl, Path(savepath)
 
-    return
-
-
-def automatic_monthlyReportGenerator(
-    year, month, projects=None, q=True, local=False, onlyCAISO=False, excludeCAISO=False
-):
-    projectlist = projects if projects else fs.getFRprojectlist(year, month)
-
-    if onlyCAISO or excludeCAISO:
-        caiso_sites = fs.allCAISOsites
-        CAISOsheets = fs.checkCAISOprojects(year, month)  # returns empty list if file not exist
-        if onlyCAISO and not CAISOsheets:
-            print(f"No CAISO data found for {year = }, {month = }.\nExiting.")
-            return
-        elif excludeCAISO:
-            projectlist = [p for p in projectlist if p not in caiso_sites]
-            if not q:
-                print(f">> removed the following CAISO sites from list:\n{caiso_sites}\n")
-        else:
-            k_word = lambda site: sorted(site.replace("-", " ").split(), key=len)[-1]
-            existing_caiso_sites = [
-                s for s in caiso_sites if any(k_word(s) in sht for sht in CAISOsheets)
-            ]
-            removedsites = [s for s in caiso_sites if s not in existing_caiso_sites]
-            projectlist = existing_caiso_sites.copy()
-            if not q:
-                print(
-                    f">> filtered list to the following sites with CAISO data:\n{existing_caiso_sites}\n"
-                )
-                if removedsites:
-                    print(f">> removed CAISO sites from list b/c no data found:\n{removedsites}\n")
-
-    if not q:
-        print(f"Generating Flash Reports for the following sites:\n{projectlist}\n")
-    for project in projectlist:
-        generate_monthlyFlashReport(project, year, month, q=q, local=local)
-
-    print("\nEnd of automatic report generation.")
     return
