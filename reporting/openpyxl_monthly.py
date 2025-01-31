@@ -1,23 +1,23 @@
+import matplotlib.pyplot as plt
 import openpyxl
-import pythoncom
+from openpyxl.chart import ScatterChart, BarChart, LineChart, Reference, Series
+from openpyxl.chart.label import DataLabelList
+from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
+from openpyxl.drawing.image import Image
+from openpyxl.formula.translate import Translator
+from openpyxl.styles import Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
+import pandas as pd
+from pathlib import Path
 import shutil
 import tempfile
-import pandas as pd
-import xlwings as xw
-from pathlib import Path
 from tqdm.notebook import tqdm
-import matplotlib.pyplot as plt
-from openpyxl.drawing.image import Image
-from openpyxl.utils import get_column_letter
-from openpyxl.chart.label import DataLabelList
-from openpyxl.formula.translate import Translator
-from openpyxl.chart.shapes import GraphicalProperties
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
-from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
-from openpyxl.chart import ScatterChart, BarChart, LineChart, Reference, Series
-from oetoolbox.reporting.xlformatting import colors, formatting_props
 from types import SimpleNamespace
+import xlwings as xw
+
+from oetoolbox.reporting.xlformatting import formatting_props
+
 
 # using "simple namespace" for dot notation reference to dict items
 cc = SimpleNamespace(**formatting_props["colors"])
