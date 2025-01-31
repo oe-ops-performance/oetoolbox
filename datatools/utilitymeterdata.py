@@ -894,7 +894,9 @@ histpath = Path(oepaths.meter_generation_historian)
 
 
 # function to collect utility meter data & update historian Excel file
-def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, local=False, q=True):
+def compile_utility_meter_data(
+    year, month, sitelist=None, overwrite=False, local=False, q=True, output=False
+):
     """Loads utility meter data and updates historian file for the given year, month, and site(s).
 
     Parameters
@@ -983,7 +985,9 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
     else:
         search_sites = [s for s in sitelist if s in ALL_METER_SITES]
         if not search_sites:
-            print("No valid sites found in specified sitelist.\nExiting..")
+            qprint("No valid sites found in specified sitelist.\nExiting..")
+            if output:
+                return "SCRIPT FAILED - SPECIFIED SITELIST IS INVALID"
             return
 
     existing_sites = []
@@ -994,7 +998,9 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
         existing_sites = list(df_hist.columns)
         if existing_sites:
             if not search_sites:
-                print(">> found existing data for all specified sites!\n\nExiting..\n")
+                qprint(">> found existing data for all specified sites!\n\nExiting..\n")
+                if output:
+                    return "ALL SITES FOUND - EXITING"
                 return
             qprint(
                 f">> found sites with existing meter data.\n(overwrite=False) excluding: {existing_sites}\n"
@@ -1010,6 +1016,8 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
     dfu = load_meter_data(year, month, sitelist=search_sites, q=q, keep_fall_dst=FALL_DST_CONDITION)
     if dfu.empty:
         qprint("!! no meter data found for the specified inputs !!\n\nExiting..\n")
+        if output:
+            return "NO NEW DATA FOUND - EXITING"
         return
 
     # format dataframe for transfer to meter gen historian file
@@ -1032,7 +1040,9 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
         mfile_start = dfu.index.min()
         mfile_end = dfu.index.max()
         if (dt_start != mfile_start) or (dt_end != mfile_end):
-            print(f"!! ERROR !! -- timestamp mismatch -- check meter data files\nExiting..")
+            qprint(f"!! ERROR !! -- timestamp mismatch -- check meter data files\nExiting..")
+            if output:
+                return "SCRIPT FAILED - TIMESTAMP MISMATCH"
             return
 
     # load existing meter gen historian
@@ -1102,10 +1112,12 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
     elif n_duplicates > 0:
         qprint(f"\n!! WARNING !! - ({n_duplicates}) duplicate timestamps found in file")
         if not overwrite:
-            print(
+            qprint(
                 f'{" "*16}>> set overwrite=True to fix index (note: will re-pull existing data for range)'
             )
-            print("Exiting..")
+            qprint("Exiting..")
+            if output:
+                return "SCRIPT FAILED - DUPLICATE TIMESTAMP ISSUE"
             return
         qprint(f">> overwrite=True; removing duplicates & overwriting data for selected sites")
 
@@ -1154,7 +1166,9 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
         if some_dates_exist and missing_dates and next_month_exists_in_hist:
             n_newrows = len(missing_dates)
             if not overwrite:
-                print("\n>> set overwrite=True to add missing timestamps/data.\n\nExiting..\n")
+                qprint("\n>> set overwrite=True to add missing timestamps/data.\n\nExiting..\n")
+                if output:
+                    return "SCRIPT FAILED - TIMESTAMP MISMATCH"
                 return
             # simplified approach: add all missing rows to end of range & re-write (overwrite) data
             ws.insert_rows(rEnd, n_newrows)
@@ -1169,7 +1183,9 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
     n_newrows = rEnd + 1 - rStart  # in historian
     n_datarows = df_ALL.shape[0]  # from file
     if n_newrows != n_datarows:
-        print("DST-RELATED ERROR!!")
+        qprint("DST-RELATED ERROR!!")
+        if output:
+            return "SCRIPT FAILED - DST-RELATED ERROR"
         return
 
     # n_expectedrows = expected_date_range.shape[0]
@@ -1223,4 +1239,7 @@ def compile_utility_meter_data(year, month, sitelist=None, overwrite=False, loca
     wb.save(savepath)
     wb.close()
     qprint(f'done!\n>> path: "..{disppath}"\n\nEND.')
+
+    if output:
+        return foundsites
     return
