@@ -1,25 +1,20 @@
 import warnings
 
-warnings.simplefilter(
-    action="ignore", category=FutureWarning
-)  # temp for pandas (b/c of meteostat FutureWarning)
+# temp for pandas (b/c of meteostat FutureWarning)
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
-import os, sys, json
+import os
 import numpy as np
 import pandas as pd
-import datetime as dt
 from pathlib import Path
 import meteostat
 import astral
-from astral.sun import sun
-from astral import LocationInfo
 from astral.location import Location
 import pvlib
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import plotly
 
-from oetoolbox.utilities import oemeta, oepaths
+from oetoolbox.utils import oemeta, oepaths
 from oetoolbox.dataquery.external import query_DTN
 
 
@@ -94,7 +89,6 @@ def meteo_backfill_subplots(df_, resample=False):
         "wind": "Wind",
     }
     grp_IDs = [grp_ID_dict[grp] for grp in grouped_sensor_cols]
-    processed_cols = [f"Processed_{grpID}" for grpID in grp_IDs]
 
     n_rows = len(grouped_sensor_cols)
     s_titles = [f"<b>{grpID} sensor data</b>" for grpID in grp_IDs]
@@ -256,13 +250,6 @@ def remove_tzinfo_and_standardize_index(dataframe: pd.DataFrame):
     if n_remove > 0:
         df = df.iloc[:-n_remove, :]
         df.index = ref_index
-
-    # n_shift = df.index.duplicated().sum()
-    # if n_shift > 0:
-    #     dftemp = df.rename_axis('Timestamp').reset_index(drop=False).copy()
-    #     shift_idx = dftemp.loc[dftemp.Timestamp.duplicated(keep='last')].index[0]
-    #     df = df.loc[~df.index.duplicated(keep='first')]   #dst, fall
-    #     df.iloc[shift_idx:, :] = df.iloc[shift_idx:, :].shift(n_shift)
 
     if df.shape[0] != ref_index.shape[0]:
         df = df.reindex(ref_index)  # dst, spring
@@ -552,8 +539,6 @@ def backfill_meteo_data(df_met, site, force_avg_profile=[], q=True):
             dfQC[processed_col] = np.where(dfQC[allbad_col] == 0, dfQC[avggrp_col], dfQC[fill_col])
         else:
             dfQC[processed_col] = dfQC[fill_col].copy() if fill_col in dfQC.columns else np.nan
-            # if grp=='poa':
-            #     dfQC = dfQC.rename(columns={processed_col: f'{processed_col}_DTN'})
 
     qprint("done!")
     return dfQC
@@ -597,7 +582,6 @@ def run_meteo_backfill(
     savepath = frpath if not localsave else Path(Path.home(), "Downloads")
 
     ## GET CLEANED MET FILE
-    # mfpaths = list(frpath.glob('PIQuery*MetStations*CLEANED*.csv'))
     mfpaths_ = [
         fp for fp in frpath.glob("PIQuery*MetStations*CLEANED*.csv") if "PROCESSED" not in fp.name
     ]
@@ -633,7 +617,6 @@ def run_meteo_backfill(
 
         if overwrite:
             # find/remove all existing processed html files
-            # existingplot_fps = list(frpath.glob('PIQuery*MetStations*PROCESSED*.html'))
             existingplot_fps = list(frpath.glob(stem))
             for epfp_ in existingplot_fps:
                 os.remove(str(epfp_))
