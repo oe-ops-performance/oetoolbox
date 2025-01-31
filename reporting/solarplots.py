@@ -1,13 +1,12 @@
+import calendar
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import itertools, calendar
-
 import plotly
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from ..utilities import oepaths, oemeta
+from ..utils import oepaths
 from ..datatools import utilitymeterdata as umd
 from .tools import (
     load_monthly_query_files,
@@ -32,11 +31,6 @@ config_ = {
         "autoScale2d",
     ],
 }
-
-
-"""
-INVERTER VS. PVLIB SUBPLOTS
-"""
 
 
 def inv_pvlib_subplots(site, year=None, month=None, dfinv=None, dfpvl=None, fig_height=None):
@@ -84,7 +78,6 @@ def inv_pvlib_subplots(site, year=None, month=None, dfinv=None, dfpvl=None, fig_
         subplot_titles=[f"<b>{inv}</b>" for inv in invnames],
         vertical_spacing=0.2 / n_rows,
     )
-    # print(f'\n{pvlib_cols = }\n\n{inv_cols  = }\n')
     common_idx = dfi.index.copy()
     for i, col in enumerate(dfi.columns):
         kwargs_ = dict(x=common_idx, mode="lines", showlegend=False, hovertemplate=htemplate)
@@ -154,11 +147,6 @@ def inv_pvlib_subplots(site, year=None, month=None, dfinv=None, dfpvl=None, fig_
         )
 
     return fig
-
-
-"""
-FLASHREPORT SUMMARY PLOTS
-"""
 
 
 # for solar sites w/ flashreport data
@@ -475,60 +463,6 @@ def monthly_summary_subplots(site, year, month, save_html=False, savepath=None, 
         )
         fig.add_trace(bar_trace_util, row=2, col=2)
 
-    # ROW 2: add time series traces
-    # fig.add_trace(
-    #     go.Scatter(
-    #         y=dfH[poss_col],
-    #         name=poss_col,
-    #         **ts_kwargs,
-    #         **pvl_kwargs,
-    #         legendgroup='timeseries',
-    #     ),
-    #     row=2,
-    #     col=2,
-    # )
-    # fig.add_trace(
-    #     go.Scatter(
-    #         y=dfH[act_col],
-    #         name=act_col,
-    #         line_color=colors_[0],
-    #         opacity=0.2,
-    #         **ts_kwargs,
-    #         **inv_kwargs,
-    #         legendgroup='timeseries',
-    #     ),
-    #     row=2,
-    #     col=2,
-    # )
-    # fig.add_trace(
-    #     go.Scatter(
-    #         y=dfH[pi_col].fillna(0),
-    #         name=pi_col,
-    #         line_color=colors_[2],
-    #         fillpattern=dict(shape='\\', size=3, solidity=0.4),
-    #         opacity=0.4,
-    #         **ts_kwargs,
-    #         **inv_kwargs,
-    #         legendgroup='timeseries',
-    #     ),
-    #     row=2,
-    #     col=2,
-    # )
-    # if site in dfu.columns:
-    #     fig.add_trace(
-    #         go.Scatter(
-    #             y=dfu[site].fillna(0),
-    #             name=util_col,
-    #             line_color=colors_[1],
-    #             fillpattern=dict(shape='/', size=3, solidity=0.4),
-    #             **ts_kwargs,
-    #             **inv_kwargs,
-    #             legendgroup='timeseries',
-    #         ),
-    #         row=2,
-    #         col=2,
-    #     )
-
     # ROWS 3 to END
     for i, col in enumerate(invcols):
         scatter_trace = go.Scattergl(
@@ -792,26 +726,8 @@ def fr_historical_summary_plot(site, yearmonthlist, savehtml=False, q=True):
     return fig
 
 
-def poa_comparison_fig(dfpoa):
-
-    htemplate = (
-        "<b>%{fullData.name}</b><br>Value: %{y:.2f}<br><i>%{x|%Y-%m-%d %H:%M}</i><extra></extra>"
-    )
-
-    fig = go.Figure()
-
-    poacols = list(dfpoa.columns)[:-4]
-
-
-"""
-METER DATA COMPARISON DATA / FIGURES
-"""
-
-
 ## get df for meter comparison plot "meter_time_series_compare" (below)
 def get_site_combined_meter_df(site, year, month, df_util=None):
-    # if 'Inverters' not in oemeta.data['AF_Solar_V3'].get(site):
-    #     return pd.DataFrame()
     dfm = load_monthly_query_files(site, year, month, types_=["Meter", "Inverters"], q=False)
     keepcols_ = {"PI_Meter_MW": "PI_Meter", "Actual_MW": "Inverter_Sum"}
     df = dfm[[c for c in dfm.columns if c in keepcols_]].copy()
@@ -1081,11 +997,6 @@ def meter_comparison_subplots(
         )
 
     return fig
-
-
-"""
-MISC FLASHREPORT SUMMARY PLOTS
-"""
 
 
 def flashreport_inv_totals_subplots(site, year, month, q=True):
