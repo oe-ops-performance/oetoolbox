@@ -1,6 +1,4 @@
-import numpy as np
 import pandas as pd
-import plotly
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -27,13 +25,9 @@ def event_summary_by_category(df):
             n_assets = len(unique_assets)
             asset_names = ", ".join(unique_assets)
             timedelta_ = pd.Timedelta(0)  # init
-            # summary_data.append([site, category, n_events, n_assets, asset_names])
             for asset in unique_assets:
                 dfsa = dfs.loc[dfs.PrimaryElement.eq(asset)].reset_index(drop=True).copy()
                 for e in range(dfsa.shape[0]):
-                    e_start, e_end = map(
-                        pd.Timestamp, [dfsa.at[e, "EventStart"], dfsa.at[e, "EventEnd"]]
-                    )
                     timedelta_ += pd.Timedelta(dfsa.at[e, "EventDuration"])
 
             summary_data.append(
@@ -48,8 +42,7 @@ def event_summary_by_category(df):
                 ]
             )
 
-    dfsummary_ = pd.DataFrame(summary_data, columns=summary_cols)
-    return dfsummary_
+    return pd.DataFrame(summary_data, columns=summary_cols)
 
 
 def inverter_event_subplots(df, df_events, q=True):
