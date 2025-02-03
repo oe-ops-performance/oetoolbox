@@ -1,31 +1,22 @@
-import os, sys, math
+import datetime as dt
+import math
 import numpy as np
 import pandas as pd
-import datetime as dt
 from pathlib import Path
-import itertools, calendar
-
 import plotly
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
 from astral.sun import sun
 from astral import LocationInfo
-from astral.location import Location
-import meteostat
-import pvlib
-from pvlib.location import Location
 
-from ..utilities import oemeta, oepaths
-from ..dataquery.external import query_DTN
-import oetoolbox.reporting.tools as rt
+from ..utils import oemeta, oepaths
+from ..reporting.tools import get_solar_FR_status, solar_frpaths
 
 
 hasID_ = lambda col, ids_: any(i in col.casefold() for i in ids_)
-# isGHI = lambda c: hasID_(c, ['ghi', 'global', 'hor'])
 isGHI = lambda c: hasID_(c, ["ghi", "hor"])
 isPOA = lambda c: hasID_(c, ["poa", "plane", "irr"]) and (not isGHI(c))
-isINV = lambda c: ("OE.ActivePower" in c)  # or ('MeterMW' in c)
+isINV = lambda c: ("OE.ActivePower" in c)
 isMETER = lambda c: ("MeterMW" in c)
 isTEMP = lambda c: any(
     i in c.casefold() for i in ["temp", "tmp", "bom", "mts", "mst", "mdl", "mod"]
@@ -148,14 +139,14 @@ grouped_lists = lambda list_, n_: [list_[i : i + n_] for i in range(0, len(list_
 def show_qc_status(year, month):
 
     ##check meter files
-    all_frsite_fps = rt.solar_frpaths(year, month, all_fps=True)
+    all_frsite_fps = solar_frpaths(year, month, all_fps=True)
     hasmeterfile = lambda site_fp: len(list(site_fp.glob("PIQuery_Meter*.csv"))) > 0
     hascleanmeterfile = lambda site_fp: len(list(site_fp.glob("PIQuery_Meter*CLEANED*.csv"))) > 0
     site_fps_with_meter = [fp for fp in all_frsite_fps if hasmeterfile(fp)]
     needs_meter = [fp.name for fp in site_fps_with_meter if (not hascleanmeterfile(fp))]
     meter_qc_complete = [fp.name for fp in site_fps_with_meter if hascleanmeterfile(fp)]
 
-    frstatus_dict = rt.get_solar_FR_status(year, month, output=True, all_fps=True)
+    frstatus_dict = get_solar_FR_status(year, month, output=True, all_fps=True)
     completed_ = frstatus_dict["qc complete"]
     completed_sites = [s for s in completed_ if s in meter_qc_complete]
     if completed_sites:
@@ -182,23 +173,6 @@ def show_qc_status(year, month):
         print(f'    {site.ljust(20)}({"+".join(types_)})')
         output_dict[site] = types_
     return output_dict
-
-
-loadfile = lambda fp: (
-    pd.DataFrame() if (fp is None) else pd.read_csv(fp, index_col=0, parse_dates=True)
-)
-
-
-def verified_filepath(fpath):
-    parent_ = fpath.parent
-    n_, stem_ = 0, fpath.stem
-    ext_ = fpath.suffix
-    getpath = lambda n: (
-        Path(parent_, stem_ + ext_) if (n < 1) else Path(parent_, f"{stem_}({n}){ext_}")
-    )
-    while getpath(n_).exists():
-        n_ += 1
-    return getpath(n_)
 
 
 def run_auto_qc(df_raw, site, q=True, q_xtra=True):
@@ -509,7 +483,7 @@ def solar_reporting_autoqc(
         if savepath_.exists():
             qprint('>> note: "CLEANED" file already exists!')
             if not overwrite:
-                savepath_ = verified_filepath(savepath_)
+                savepath_ = oepaths.validated_savepath(savepath_)
 
         msg_ = "overwriting" if overwrite else "saving new"
         qprint(f'>> ({save_file=}, {overwrite=})\n>> {msg_} file: "{savepath_.name}"')
