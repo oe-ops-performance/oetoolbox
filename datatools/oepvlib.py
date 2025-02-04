@@ -233,23 +233,64 @@ def prepare_project_meteo_DF(sitename, DF_Met, printouts):
 Paco_adjustments = {
     "Alamo": 935000.0,
     "Adams East": 1482000.0,
-    "Catalina II": 782600.0,
+    "Catalina II": 784000.0,
     "CID": 840000.0,
     "CW-Corcoran": 840000.0,
-    "CW-Goose Lake": 840000.0,
-    "GA3": 3330000.0,
-    "GA4": 3330000.0,
+    "CW-Goose Lake": 875000.0,
+    "GA3": 3150000.0,
+    "GA4": 3333000.0,
     "Indy I": 714000.0,
     "Indy II": 714000.0,
     "Indy III": 720000.0,
-    "Kent South": 1429000.0,
+    "Kent South": 1452000.0,
     "Old River One": 1460000.0,
     "Mulberry": 880000.0,
     "Maricopa West": 2200000.0,
-    "Pavant": 2174000.0,
-    "Richland": 1833000.0,
+    "Pavant": 2198000.0,
+    "Richland": 1834000.0,
     "Selmer": 880000.0,
 }
+
+site_capacity_limits = {
+    "Adams East": 19.01,
+    "Alamo": 20.57,
+    "AZ1": 32.64,
+    "Azalea": 7.95,
+    "Camelot": 45.0,
+    "Catalina II": 18.0,
+    "CID": 19.76,
+    "Columbia II": 15.0,
+    "Comanche": 123.52,
+    "CW-Corcoran": 10.65,
+    "CW-Goose Lake": 12.0,
+    "CW-Marin": 1.0,
+    "FL1": 20.0,
+    "FL4": 42.0,
+    "GA3": 63.0,
+    "GA4": 201.12,
+    "Grand View East": 20.0,
+    "Grand View West": 80.0,
+    "Imperial Valley": 20.0,
+    "Indy I": 10.1,
+    "Indy II": 10.1,
+    "Indy III": 8.64,
+    "Kansas": 20.01,
+    "Kent South": 20.0,
+    "Maplewood 1": 182.67,
+    "Maplewood 2": 27.2,
+    "Maricopa West": 21.23,
+    "MS3": 52.0,
+    "Mulberry": 15.84,
+    "Old River One": 20.01,
+    "Pavant": 50.6,
+    "Richland": 20.16,
+    "Selmer": 15.8,
+    "Somers": 4.99,
+    "Sweetwater": 82.81,
+    "Three Peaks": 80.0,
+    "West Antelope": 20.0,
+}
+
 pvlib_output_folder = os.path.join(oepaths.released, "PVLib", "Output")
 
 
@@ -380,6 +421,8 @@ def run_pvlib_model(
         racking_azimuth = int(dict_inv["Azimuth Angle (Deg)"])
         racking_type = dict_inv["Racking Type"]
         inv_params = CEC_inverters[inv_type]
+        if sitename in Paco_adjustments:
+            inv_params["Paco"] = Paco_adjustments[sitename]
 
         if racking_type == "Tracker":
             mount = pvlib.pvsystem.SingleAxisTrackerMount(
@@ -546,6 +589,10 @@ def run_pvlib_model(
 
     DF_PVLib_AC_results = DF_PVLib_AC_results.tz_localize(None)
     DF_PVLib_AC_results = DF_PVLib_AC_results.loc[Start_Date : pd.Timestamp(End_Date)].copy()
+
+    limit_per_inv = site_capacity_limits[site] / len(inv_list)
+    poss_cols = [c for c in DF_PVLib_AC_results.columns if "Possible_Power" in c]
+    DF_PVLib_AC_results[poss_cols] = DF_PVLib_AC_results[poss_cols].clip(upper=limit_per_inv)
 
     DF_PVLib_AC_hourly = DF_PVLib_AC_results.resample("h").mean()
     if "POA_all_bad" in DF_PVLib_AC_hourly.columns:
