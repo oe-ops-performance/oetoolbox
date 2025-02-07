@@ -574,7 +574,7 @@ def run_meteo_backfill(
     qprint = lambda msg, end="\n": None if q else print(msg, end=end)
 
     ## GET SITE FLASHREPORT PATH
-    frpath = oepaths.getSolarFRpath(site, year, month)
+    frpath = oepaths.frpath(year, month, ext="solar", site=site)
     if not frpath.exists():
         qprint(f'FlashReport path not found: "{str(frpath)}"')
         return
@@ -671,7 +671,7 @@ def poa_comparison_df(site, year, month, q=True):
     qprint = lambda msg, end="\n": None if q else print(msg, end=end)
 
     ## GET SITE FLASHREPORT PATH
-    frpath = oepaths.getSolarFRpath(site, year, month)
+    frpath = oepaths.frpath(year, month, ext="solar", site=site)
 
     ## GET SITE METADATA (location info)
     tz = oemeta.data["TZ"].get(site)
