@@ -71,32 +71,37 @@ def grouped_columns(column_list, met_data=False, n_groups=None):
 
 
 getsun = lambda tz, lat, lon, date: sun(LocationInfo("", "", tz, lat, lon).observer, date=date)
-suntime_utc = lambda key_, tz, lat, lon, date: pd.Timestamp(getsun(tz, lat, lon, date).get(key_))
-getDawn = (
-    lambda tz, lat, lon, date: suntime_utc("dawn", tz, lat, lon, date)
-    .tz_convert(tz)
-    .tz_localize(None)
-    .floor("min")
-)
-getDusk = (
-    lambda tz, lat, lon, date: suntime_utc("dusk", tz, lat, lon, date)
-    .tz_convert(tz)
-    .tz_localize(None)
-    .ceil("min")
-)
 
 
-def get_daylight_dateranges(tz, lat, lon, start, end):
-    date_range = pd.date_range(start, end)  # freq: day
-    args_ = [tz, lat, lon]
-    dawn_list = [getDawn(*args_, date) for date in date_range]
-    dusk_list = [getDusk(*args_, date + dt.timedelta(days=1)) for date in date_range]
-    return [pd.date_range(dawn_, dusk_, freq="1min") for dawn_, dusk_ in zip(dawn_list, dusk_list)]
+def get_suntimes(tz, lat, lon, start, end):
+    suntimes = []
+    args = [tz, lat, lon]
+    localized = lambda date: pd.Timestamp(date).tz_convert(tz).tz_localize(None)
+    for i, date in enumerate(pd.date_range(start, end)):
+        args = [tz, lat, lon]
+        try:
+            sun = getsun(*args, date=date)
+            dawn, dusk = sun["dawn"], sun["dusk"]
+        except:
+            delta = 1 if i == 0 else -1
+            date_offset = dt.timedelta(days=delta)
+            sun = getsun(*args, date=date + date_offset)
+            dawn, dusk = map(lambda d: d - date_offset, [sun["dawn"], sun["dusk"]])
+
+        sun_dict = {
+            "dawn": localized(dawn).floor("min"),
+            "dusk": localized(dusk).ceil("min") + dt.timedelta(days=1),
+        }
+        suntimes.append(sun_dict)
+
+    return suntimes
 
 
 def get_all_daylight_timestamps(tz, lat, lon, start, end):
-    daylight_dateranges = get_daylight_dateranges(tz, lat, lon, start, end)
-    return [t for rng in daylight_dateranges for t in rng]
+    tstamps = []
+    for dict_ in get_suntimes(tz, lat, lon, start, end):
+        tstamps.extend(list(pd.date_range(dict_["dawn"], dict_["dusk"], freq="1min")))
+    return tstamps
 
 
 getfile = lambda fplist: None if (not fplist) else max((fp.stat().st_ctime, fp) for fp in fplist)[1]
