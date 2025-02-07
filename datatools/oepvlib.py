@@ -409,8 +409,8 @@ def run_pvlib_model(
     alt = oemeta.data["Altitude"].get(sitename)
     location = pvlib.location.Location(lat, lon, tz, alt, sitename)
 
-    site_GCR = oemeta.data["Equip"]["Racking_GCR"].get(sitename)
     design_db = oemeta.data["Project_Design_Database"].get(sitename)
+    site_GCR = list(design_db.values())[0]["Racking GCR"]
     inv_list = list(design_db.keys())
 
     inv_configs = []
@@ -590,9 +590,20 @@ def run_pvlib_model(
     DF_PVLib_AC_results = DF_PVLib_AC_results.tz_localize(None)
     DF_PVLib_AC_results = DF_PVLib_AC_results.loc[Start_Date : pd.Timestamp(End_Date)].copy()
 
-    limit_per_inv = site_capacity_limits[site] / len(inv_list)
-    poss_cols = [c for c in DF_PVLib_AC_results.columns if "Possible_Power" in c]
-    DF_PVLib_AC_results[poss_cols] = DF_PVLib_AC_results[poss_cols].clip(upper=limit_per_inv)
+    limits_per_inv = oemeta.data["Inverter_AC_Limits"].get(sitename)
+    vals_ = [v for v in limits_per_inv.values() if pd.notna(v) or v != 0]
+    default_limit = round(np.mean(vals_))
+
+    posscols = [c for c in DF_PVLib_AC_results if "Possible_Power" in c]
+    invcols = [*limits_per_inv]
+
+    for inv, pcol in zip(invcols, posscols):
+        limit = limits_per_inv[inv]
+        if pd.isna(limit):
+            limit = default_limit
+        elif limit == 0:
+            limit = default_limit
+        DF_PVLib_AC_results[pcol] = DF_PVLib_AC_results[pcol].clip(upper=limit)
 
     DF_PVLib_AC_hourly = DF_PVLib_AC_results.resample("h").mean()
     if "POA_all_bad" in DF_PVLib_AC_hourly.columns:
