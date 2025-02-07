@@ -5,7 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from oetoolbox.utils import oepaths, oemeta
-from oetoolbox.reporting.tools import get_ppa_rate, latest_file, site_frpath
+from oetoolbox.reporting.tools import get_ppa_rate, latest_file, load_meter_historian, site_frpath
 from oetoolbox.reporting.openpyxl_monthly import create_monthly_report
 from oetoolbox.datatools.meteoqc import transposed_POA_from_DTN_GHI
 
@@ -167,7 +167,7 @@ def generate_monthlyFlashReport(
     """GET METER DATA"""
     # utility meter data (if exists)
     if df_util is None:
-        dfum = rt.load_meter_historian(year=year, month=month)
+        dfum = load_meter_historian(year=year, month=month)
     else:
         dfum = df_util.copy()
 
