@@ -1,3 +1,4 @@
+import itertools
 import openpyxl
 import os, calendar
 import pandas as pd
@@ -365,7 +366,7 @@ def load_stlmtui_file(fpath):
     return df
 
 
-def load_varsity_stlmtui_sites(year, month, sitelist=None, q=True):
+def load_varsity_stlmtui_sites(year, month, sitelist=None, q=True, return_fpaths=False):
     """Loads meter data from combined Varsity files for specified sitelist. (of type "stlmtui*.xls")
 
     Parameters
@@ -422,6 +423,8 @@ def load_varsity_stlmtui_sites(year, month, sitelist=None, q=True):
         qprint(">> no stlmtui files found for the selected year/month. Exiting..")
         return None
 
+    warnings = []
+    fpath_dict = {}
     remaining_sites = target_sites.copy()  # init
     found_sites = []  # init
     df_list = []  # init
@@ -438,12 +441,15 @@ def load_varsity_stlmtui_sites(year, month, sitelist=None, q=True):
         expected_idx = mdatatransforms.expected_index(df, freq="h")
         for col in df.columns:
             if df[col].last_valid_index() != expected_idx.max():
-                qprint(f"        !! ALERT !! data for {col} ends {df[col].last_valid_index()}")
+                alert_msg = f"        !! ALERT !! data for {col} ends {df[col].last_valid_index()}"
+                qprint(alert_msg)
+                warnings.append(alert_msg)
 
         df_list.append(df)
 
         found_sites.extend(sitesofinterest)
         for s in sitesofinterest:
+            fpath_dict[s] = str(fpath)
             remaining_sites.remove(s)
 
         if len(remaining_sites) == 0:
@@ -461,6 +467,10 @@ def load_varsity_stlmtui_sites(year, month, sitelist=None, q=True):
         qprint(f"    >> {missing_sites = }")
 
     df_stlmtui = pd.concat(df_list, axis=1)
+    if return_fpaths:
+        if warnings:
+            fpath_dict["warnings"] = warnings
+        return df_stlmtui, fpath_dict
     return df_stlmtui
 
 
@@ -468,7 +478,9 @@ SUPPORTED_FALL_DST_SITES = ["Route 66", "South Plains II"]
 
 
 # function to get utility meter data for sites with individual files (ie not grouped/stlmtui)
-def load_site_meter_data(site, year=None, month=None, q=True, localized=False):
+def load_site_meter_data(
+    site, year=None, month=None, q=True, localized=False, return_df_and_fpath=False
+):
     """Load hourly utility meter data for the given site, year, and month.
 
     Parameters
@@ -531,6 +543,10 @@ def load_site_meter_data(site, year=None, month=None, q=True, localized=False):
     except:
         df = None
         qprint("ERROR!")
+
+    if return_df_and_fpath:
+        return df, mfp
+
     return df
 
 
@@ -747,7 +763,7 @@ def compare_utility_and_pi_meter(
 
 
 # function to load utility meter data for any site(s)
-def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False):
+def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False, return_fpaths=False):
     """Load hourly utility meter data for the given year, month, and site(s).
 
     Parameters
@@ -837,13 +853,14 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False):
         main_sites.append(s) if (s not in stlmtui_siteIDs) else stlmtui_sites.append(s)
 
     df_list = []
+    fpath_dict = {}
 
     if main_sites:
         qprint("\nINDIVIDUAL UTILITY METER DATA FILES")
         for site in main_sites:
             qprint(f"    {site.ljust(22)}", end="")
             if not keep_fall_dst:
-                dfm_ = load_site_meter_data(site, year, month, q=q)
+                dfm_, mfp = load_site_meter_data(site, year, month, q=q, return_df_and_fpath=True)
                 if dfm_ is None:
                     continue
                 dfm_.index = pd.to_datetime(
@@ -855,15 +872,26 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False):
                 )
                 dfm = dfm_[["MWh"]].rename(columns={"MWh": site}).copy()
             else:
-                dfm = load_site_meter_data(site, year, month, q=q, localized=True)
+                dfm, mfp = load_site_meter_data(
+                    site, year, month, q=q, localized=True, return_df_and_fpath=True
+                )
                 dfm.columns = [site]  # df has one column & datetimeindex
 
             df_list.append(dfm)
+            fpath_dict[site] = str(mfp)
 
     if stlmtui_sites:
-        df_stlmtui = load_varsity_stlmtui_sites(year, month, sitelist=stlmtui_sites, q=q)
-        if df_stlmtui is not None:
+        stlmtui_output = load_varsity_stlmtui_sites(
+            year=year,
+            month=month,
+            sitelist=stlmtui_sites,
+            q=q,
+            return_fpaths=return_fpaths,
+        )
+        if stlmtui_output is not None:
+            df_stlmtui, stlmtui_fpath_dict = stlmtui_output
             df_list.append(df_stlmtui)
+            fpath_dict.update(stlmtui_fpath_dict)
 
     qprint("\nFinished loading files", end="; ")
 
@@ -886,7 +914,8 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False):
         qprint("no data found.")
 
     qprint("\nEND METER DATA COLLECTION\n")
-
+    if return_fpaths:
+        return df_meter, fpath_dict
     return df_meter
 
 
@@ -1013,7 +1042,14 @@ def compile_utility_meter_data(
     FALL_DST_CONDITION = (month == 11) and all(s in SUPPORTED_FALL_DST_SITES for s in search_sites)
 
     # load utility meter data
-    dfu = load_meter_data(year, month, sitelist=search_sites, q=q, keep_fall_dst=FALL_DST_CONDITION)
+    dfu, fpath_dict = load_meter_data(
+        year=year,
+        month=month,
+        sitelist=search_sites,
+        q=q,
+        keep_fall_dst=FALL_DST_CONDITION,
+        return_fpaths=True,
+    )
     if dfu.empty:
         qprint("!! no meter data found for the specified inputs !!\n\nExiting..\n")
         if output:
@@ -1241,5 +1277,6 @@ def compile_utility_meter_data(
     qprint(f'done!\n>> path: "..{disppath}"\n\nEND.')
 
     if output:
-        return foundsites
+        valid_keys = foundsites + ["warnings"]
+        return {k: fp for k, fp in fpath_dict.items() if k in valid_keys}
     return

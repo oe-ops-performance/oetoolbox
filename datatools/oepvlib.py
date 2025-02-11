@@ -312,6 +312,7 @@ def run_pvlib_model(
     return_df_and_fpath=False,
     custom_savepath=None,
     xyz=False,
+    c_adj_dict={"C0": 1, "C1": 1, "C2": 1, "C3": 1},
 ):
     qprint = lambda msg, end_="\n": print(msg, end=end_) if not q else None
     c1 = from_FRfiles and FR_yearmonth
@@ -423,6 +424,10 @@ def run_pvlib_model(
         inv_params = CEC_inverters[inv_type]
         if sitename in Paco_adjustments:
             inv_params["Paco"] = Paco_adjustments[sitename]
+
+        if sitename == "Catalina II":
+            for param, adj in c_adj_dict.items():
+                inv_params[param] = inv_params[param] * adj
 
         if racking_type == "Tracker":
             mount = pvlib.pvsystem.SingleAxisTrackerMount(
@@ -591,19 +596,19 @@ def run_pvlib_model(
     DF_PVLib_AC_results = DF_PVLib_AC_results.loc[Start_Date : pd.Timestamp(End_Date)].copy()
 
     limits_per_inv = oemeta.data["Inverter_AC_Limits"].get(sitename)
-    vals_ = [v for v in limits_per_inv.values() if pd.notna(v) or v != 0]
-    default_limit = round(np.mean(vals_))
+    if limits_per_inv:
+        is_valid = lambda val: all([pd.notna(val), val != 0])
+        vals_ = [v for v in limits_per_inv.values() if is_valid(v)]
+        default_limit = round(np.mean(vals_))
 
-    posscols = [c for c in DF_PVLib_AC_results if "Possible_Power" in c]
-    invcols = [*limits_per_inv]
+        posscols = [c for c in DF_PVLib_AC_results if "Possible_Power" in c]
+        invcols = [*limits_per_inv]
 
-    for inv, pcol in zip(invcols, posscols):
-        limit = limits_per_inv[inv]
-        if pd.isna(limit):
-            limit = default_limit
-        elif limit == 0:
-            limit = default_limit
-        DF_PVLib_AC_results[pcol] = DF_PVLib_AC_results[pcol].clip(upper=limit)
+        for inv, pcol in zip(invcols, posscols):
+            limit = limits_per_inv[inv]
+            if not is_valid(limit):
+                limit = default_limit
+            DF_PVLib_AC_results[pcol] = DF_PVLib_AC_results[pcol].clip(upper=limit)
 
     DF_PVLib_AC_hourly = DF_PVLib_AC_results.resample("h").mean()
     if "POA_all_bad" in DF_PVLib_AC_hourly.columns:
