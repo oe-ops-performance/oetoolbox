@@ -429,7 +429,10 @@ def load_kpi_tracker(sheet="ALL PROJECTS"):
 # function to get ppa rate from kpi tracker  (used in flashreport script)
 def get_ppa_rate(site, year):
     dfk = load_kpi_tracker(sheet="Ref Tables")
-    ppa = dfk.at[site, str(year)] if (site in dfk.index) else None
+    try:
+        ppa = dfk.at[site, str(year)] if (site in dfk.index) else None
+    except:
+        ppa = None
     return ppa
 
 
