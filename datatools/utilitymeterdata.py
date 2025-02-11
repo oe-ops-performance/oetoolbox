@@ -860,9 +860,10 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False, ret
         for site in main_sites:
             qprint(f"    {site.ljust(22)}", end="")
             if not keep_fall_dst:
-                dfm_, mfp = load_site_meter_data(site, year, month, q=q, return_df_and_fpath=True)
-                if dfm_ is None:
+                output = load_site_meter_data(site, year, month, q=q, return_df_and_fpath=True)
+                if output is None:
                     continue
+                dfm_, mfp = output
                 dfm_.index = pd.to_datetime(
                     dfm_.Day.astype(str)
                     + " "
@@ -872,9 +873,12 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False, ret
                 )
                 dfm = dfm_[["MWh"]].rename(columns={"MWh": site}).copy()
             else:
-                dfm, mfp = load_site_meter_data(
+                output = load_site_meter_data(
                     site, year, month, q=q, localized=True, return_df_and_fpath=True
                 )
+                if output is None:
+                    continue
+                dfm, mfp = output
                 dfm.columns = [site]  # df has one column & datetimeindex
 
             df_list.append(dfm)
