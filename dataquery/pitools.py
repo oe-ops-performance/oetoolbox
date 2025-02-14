@@ -6,18 +6,30 @@ import pandas as pd
 import datetime as dt
 from pathlib import Path
 
-from oetoolbox.utils import oemeta, oepaths
-from oetoolbox.dataquery import pireference as ref
+from ..utils import oemeta, oepaths
+from ..dataquery import pireference as ref
 
 sys.path.append(r"C:\Program Files (x86)\PIPC\AF\PublicAssemblies\4.0")
 clr.AddReference("OSIsoft.AFSDK")
-import OSIsoft
-from OSIsoft.AF import PISystems
-from OSIsoft.AF.Search import AFEventFrameSearch
-from OSIsoft.AF.Asset import AFAttribute, AFAttributeList, AFSearchMode
-from OSIsoft.AF.PI import PIPageType, PIPagingConfiguration, PIPoint, PIPointList, PIServers
-from OSIsoft.AF.Time import AFTime, AFTimeRange, AFTimeSpan, AFTimeZone, AFTimeZoneFormatProvider
-from OSIsoft.AF.Data import (
+import OSIsoft  # type: ignore
+from OSIsoft.AF import PISystems  # type: ignore
+from OSIsoft.AF.Search import AFEventFrameSearch  # type: ignore
+from OSIsoft.AF.Asset import AFAttribute, AFAttributeList, AFSearchMode  # type: ignore
+from OSIsoft.AF.PI import (  # type: ignore
+    PIPageType,
+    PIPagingConfiguration,
+    PIPoint,
+    PIPointList,
+    PIServers,
+)
+from OSIsoft.AF.Time import (  # type: ignore
+    AFTime,
+    AFTimeRange,
+    AFTimeSpan,
+    AFTimeZone,
+    AFTimeZoneFormatProvider,
+)
+from OSIsoft.AF.Data import (  # type: ignore
     AFBoundaryType,
     AFCalculationBasis,
     AFSummaryTypes,

@@ -14,8 +14,8 @@ import pvlib
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from oetoolbox.utils import oemeta, oepaths
-from oetoolbox.dataquery.external import query_DTN
+from ..utils import oemeta, oepaths
+from ..dataquery.external import query_DTN
 
 
 hasID_ = lambda col, ids_: any(i in col.casefold() for i in ids_)

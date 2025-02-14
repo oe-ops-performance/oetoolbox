@@ -16,7 +16,7 @@ from tqdm.notebook import tqdm
 from types import SimpleNamespace
 import xlwings as xw
 
-from oetoolbox.reporting.xlformatting import formatting_props
+from ..reporting.xlformatting import formatting_props
 
 
 # using "simple namespace" for dot notation reference to dict items

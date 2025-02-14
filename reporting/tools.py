@@ -8,9 +8,9 @@ import itertools
 import tempfile, shutil, pythoncom
 import xlwings as xw
 from pathlib import Path
-from oetoolbox.utils import oepaths, oemeta
-from oetoolbox.dataquery import pireference as ref
-from oetoolbox.dataquery.external import query_DTN
+from ..utils import oepaths, oemeta
+from ..dataquery import pireference as ref
+from ..dataquery.external import query_DTN
 
 
 ALL_SOLAR_SITES = list(oemeta.data["AF_Solar_V3"].keys())

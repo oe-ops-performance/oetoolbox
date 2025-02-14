@@ -4,15 +4,15 @@ import missingno as msno
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from oetoolbox.utils import oepaths, oemeta  # type: ignore
-from oetoolbox.reporting.tools import (  # type: ignore
+from ..utils import oepaths, oemeta
+from ..reporting.tools import (
     get_ppa_rate,
     latest_file,
     load_meter_historian,
     site_frpath,
 )
-from oetoolbox.reporting.openpyxl_monthly import create_monthly_report  # type: ignore
-from oetoolbox.datatools.meteoqc import transposed_POA_from_DTN_GHI  # type: ignore
+from ..reporting.openpyxl_monthly import create_monthly_report
+from ..datatools.meteoqc import transposed_POA_from_DTN_GHI
 
 
 def load_PIdatafile(filepath, t1, t2):
