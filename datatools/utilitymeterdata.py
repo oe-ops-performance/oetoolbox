@@ -6,11 +6,11 @@ import datetime as dt
 from pathlib import Path
 import shutil, tempfile, xmltodict
 
-import oetoolbox.dataquery.pitools as pt
-from oetoolbox.utils import oemeta, oepaths
-from oetoolbox.dataquery import pireference as ref
-from oetoolbox.datatools import mdatatransforms
-from oetoolbox.reporting.tools import load_meter_historian, date_range, site_frpath
+import oetoolbox.dataquery.pitools as pt  # type: ignore
+from oetoolbox.utils import oemeta, oepaths  # type: ignore
+from oetoolbox.dataquery import pireference as ref  # type: ignore
+from oetoolbox.datatools import mdatatransforms  # type: ignore
+from oetoolbox.reporting.tools import load_meter_historian, date_range, site_frpath  # type: ignore
 
 
 now = lambda: dt.datetime.now()

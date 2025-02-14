@@ -2,7 +2,7 @@ import itertools
 import os
 import pandas as pd
 
-from oetoolbox.utils import oemeta
+from ..utils import oemeta
 
 af_dict = oemeta.data
 allsolarsites = list(af_dict["AF_Solar_V3"])

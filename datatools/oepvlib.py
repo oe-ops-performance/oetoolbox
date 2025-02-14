@@ -1,19 +1,15 @@
 import pvlib
-from pvlib.location import Location
 from pvlib.modelchain import ModelChain
 from pathlib import Path
 import datetime as dt
 import pandas as pd
 import numpy as np
-import requests
-import os, json
-import plotly
-import plotly.express as px
+import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from oetoolbox.utils import oemeta, oepaths
-from oetoolbox.dataquery.external import query_DTN
+from oetoolbox.utils import oemeta, oepaths  # type: ignore
+from oetoolbox.dataquery.external import query_DTN  # type: ignore
 
 
 def get_site_model_losses(site, q=True):
@@ -226,7 +222,7 @@ def prepare_project_meteo_DF(sitename, DF_Met, printouts):
     solar_position = location.get_solarposition(meteo.index)
 
     meteo = pd.merge(solar_position, meteo, left_index=True, right_index=True)
-    meteo = meteo.resample("1h").mean()  # TEMP
+    # meteo = meteo.resample("1h").mean()  # TEMP
     return meteo
 
 

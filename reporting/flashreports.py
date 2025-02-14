@@ -4,10 +4,15 @@ import missingno as msno
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from oetoolbox.utils import oepaths, oemeta
-from oetoolbox.reporting.tools import get_ppa_rate, latest_file, load_meter_historian, site_frpath
-from oetoolbox.reporting.openpyxl_monthly import create_monthly_report
-from oetoolbox.datatools.meteoqc import transposed_POA_from_DTN_GHI
+from ..utils import oepaths, oemeta
+from ..reporting.tools import (
+    get_ppa_rate,
+    latest_file,
+    load_meter_historian,
+    site_frpath,
+)
+from ..reporting.openpyxl_monthly import create_monthly_report
+from ..datatools.meteoqc import transposed_POA_from_DTN_GHI
 
 
 def load_PIdatafile(filepath, t1, t2):
@@ -58,7 +63,14 @@ def get_Comanche_curtailment(year, month):
 
 
 def generate_monthlyFlashReport(
-    sitename, year, month, q=True, local=False, return_df_and_fpath=False, df_util=None
+    sitename,
+    year,
+    month,
+    q=True,
+    local=False,
+    return_df_and_fpath=False,
+    df_util=None,
+    return_df_and_log_info=False,
 ):
     """
     creates and saves flash report (Excel file) for specified PI site/project
@@ -108,6 +120,9 @@ def generate_monthlyFlashReport(
             sorted_fptups = list(sorted([(fp.stat().st_ctime, fp) for fp in fpaths], reverse=True))
             files = [tup[1].name for tup in sorted_fptups]
         return files
+
+    # create dictionary for log info output (source filepaths)
+    source_fpath_dict = {}  # init
 
     # pvlib file -- REQUIRED
     pvlib_files = matchingfiles(siteFRpath, pvlib_fileids)
@@ -163,6 +178,7 @@ def generate_monthlyFlashReport(
 
     if not q:
         print(f'Loaded PVLib file ------ "{pvlibfile}"')
+    source_fpath_dict["pvlib"] = Path(pvlibpath)
 
     """GET METER DATA"""
     # utility meter data (if exists)
@@ -187,15 +203,20 @@ def generate_monthlyFlashReport(
             df_meter = df_meter.rename(columns={df_meter.columns[0]: sitename})
             if not q:
                 print(f'No utility meter found; Loaded PI Meter file ------ "{pimeterpath.name}"')
+            meterpath = pimeterpath
         else:
             df_meter = pd.DataFrame({"Timestamp": timeRangeH, sitename: 0})
             if not q:
                 print(f"!! No PI meter data found for {sitename} !! - replacing with df of zeros.")
+            meterpath = None
     else:
+        meterpath = oepaths.meter_generation_historian
         dfm_ = dfm_.reset_index(drop=True)  # for row numbers when writing to excel
         df_meter = dfm_.copy()
         if not q:
             print('Loaded Meter file ------ "Meter_Generation_Historian.xlsm"')
+
+    source_fpath_dict["meter"] = None if meterpath is None else Path(meterpath)
 
     """CREATE DICTIONARY FOR MISSING DATA FILES (EXISTENCE) (arg. for report gen. function)"""
     meterfile = False if (nometerdata or sitenotexist) else True
@@ -228,6 +249,7 @@ def generate_monthlyFlashReport(
         if not q:
             print(f'Loaded Inverter file --- "{invfile}"')
     else:
+        invpath = None
         if not q:
             print("!! No inverter data found. !! - replacing with df of zeros.")
         dfi = pd.DataFrame(index=timeRangeH)  # blank dataframe
@@ -237,6 +259,8 @@ def generate_monthlyFlashReport(
         invcols = [col.split("_")[0] for col in inv_cols]  # using pvlib inv names
         for inv in invcols:
             dfi[inv] = 0
+
+    source_fpath_dict["inverters"] = None if invpath is None else Path(invpath)
 
     """LOAD PPC CURTAILMENT DATA (if available)"""
     dfc = pd.DataFrame({"Timestamp": timeRangeH, "Curt_SP": site_capacity})
@@ -358,6 +382,7 @@ def generate_monthlyFlashReport(
             c_fps = list(ympath.glob(cstr_))
         caiso_fp = max((fp.stat().st_ctime, fp) for fp in c_fps)[1] if c_fps else None
         if caiso_fp:
+            source_fpath_dict["caiso"] = Path(caiso_fp)
             cfp_ = max((fp.stat().st_ctime, fp) for fp in c_fps)[1]
             csheets_ = list(pd.read_excel(cfp_, sheet_name=None, nrows=0).keys())
             site_keyword = sorted(sitename.replace("-", " ").split(), key=len)[
@@ -467,5 +492,8 @@ def generate_monthlyFlashReport(
 
     if return_df_and_fpath:
         return df4xl, Path(savepath)
+    elif return_df_and_log_info:
+        source_fpath_dict.update({"report": Path(savepath)})
+        return df4xl, source_fpath_dict
 
     return
