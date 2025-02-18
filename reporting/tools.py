@@ -505,7 +505,7 @@ def calculate_and_read_excel_file(filepath, sheet, q=True, use_tempdir=True):
 
 
 # function to load flashreport file
-def load_solar_flashreport(site, year, month, q=True, use_tempdir=True):
+def load_solar_flashreport(site, year, month, q=True, use_tempdir=True, return_df_and_fpath=False):
     qprint = lambda msg, end="\n": print(msg, end=end) if (not q) else None
 
     # get solar flashreport folders/paths
@@ -532,16 +532,21 @@ def load_solar_flashreport(site, year, month, q=True, use_tempdir=True):
             qprint("ERROR".ljust(50))
             df = pd.DataFrame()
 
+    if return_df_and_fpath:
+        return df, str(frfp)
     return df
 
 
-def get_flashreport_summary_table(site, year, month, inverter_level=False, q=True):
+def get_flashreport_summary_table(
+    site, year, month, inverter_level=False, q=True, return_df_and_fpath=False
+):
     # load flashreport
-    df_ = load_solar_flashreport(site, year, month, q=q)
+    output = load_solar_flashreport(site, year, month, q=q, return_df_and_fpath=return_df_and_fpath)
+    df_ = output if not return_df_and_fpath else output[0]
     if df_.empty:
         if not q:
             print("error loading flashreport file.\nexiting..")
-        return
+        return df_, output[1]
 
     if site in df_.loc[0].values:
         df_.columns = df_.loc[0].values
@@ -587,6 +592,8 @@ def get_flashreport_summary_table(site, year, month, inverter_level=False, q=Tru
         for col in df.columns:
             df.loc[df[col].lt(0), col] = 0.0
 
+    if return_df_and_fpath:
+        return df, output[1]
     return df
 
 
@@ -624,19 +631,24 @@ kpi_data_cols = [
 ]
 
 
-def get_flashreport_kpis(site, year, month, q=True):
+def get_flashreport_kpis(site, year, month, q=True, return_df_and_fpath=False):
     qprint = lambda msg, end="\n": print(msg, end=end) if (not q) else None
 
     # load summary table
-    df_ = get_flashreport_summary_table(site, year, month, q=q)
-    if df_ is None:
-        return
+    output = get_flashreport_summary_table(
+        site, year, month, q=q, return_df_and_fpath=return_df_and_fpath
+    )
+    df__ = output if not return_df_and_fpath else output[0]
+    if df__ is None:
+        if return_df_and_fpath:
+            return df__, output[1]
+        return df__
 
     ## filter columns, move avail % to Value col, create entry for sitename
-    df_ = df_.loc[df_.index.isin(kpi_matching_cols)]
+    df_ = df__.loc[df__.index.isin(kpi_matching_cols)].copy()
     avail_col = "Inverter Availability"
-    df_.loc[avail_col, "Value"] = df_.at[avail_col, "%"]
-    df_.loc["Site", "Value"] = df_.index.name
+    df_.at[avail_col, "Value"] = df_.at[avail_col, "%"]
+    df_.at["Site", "Value"] = df_.index.name
 
     ## transpose, reorder/rename columns
     df = df_[["Value"]].rename_axis(None).T.reset_index(drop=True).copy()
@@ -666,6 +678,8 @@ def get_flashreport_kpis(site, year, month, q=True):
         ghi_total  # column was previously inserted at the correct location
     )
 
+    if return_df_and_fpath:
+        return df, output[1]
     return df
 
 
@@ -683,7 +697,7 @@ def get_monthly_DTN_ghi_total(site, year, month, q=True):
     return df_dtn
 
 
-def collect_solar_flashreport_kpis(year, month, sitelist=None, q=True):
+def collect_solar_flashreport_kpis(year, month, sitelist=None, q=True, return_df_and_fpath=False):
     qprint = lambda msg: None if q else print(msg)
     if sitelist is not None:
         frsites_ = [s for s in sitelist if s in ALL_SOLAR_SITES]
@@ -691,17 +705,26 @@ def collect_solar_flashreport_kpis(year, month, sitelist=None, q=True):
         frsites_ = ALL_SOLAR_SITES
     skipped_sites = []  # init
     df_list = []  # init
+    fpath_list = []
     for site in frsites_:
         if not list(site_frpath(site, year, month).glob("*FlashReport*.xlsx")):
             skipped_sites.append(site)
             continue
-        df_ = get_flashreport_kpis(site, year, month, q=q)
+        output = get_flashreport_kpis(
+            site, year, month, q=q, return_df_and_fpath=return_df_and_fpath
+        )
+        df_ = output if not return_df_and_fpath else output[0]
         df_list.append(df_.copy())
+        if return_df_and_fpath:
+            fpath_list.append(output[1])
     if len(skipped_sites) > 0:
         qprint(f"\nNote: KPIs were not collected for the following sites:\n{skipped_sites}\n")
     if not df_list:
         qprint("!! No kpis found !!\nexiting..")
+        if return_df_and_fpath:
+            return None, []
         return
+
     df = pd.concat(df_list, axis=0, ignore_index=True)
 
     ## overwrite negative values
@@ -718,6 +741,8 @@ def collect_solar_flashreport_kpis(year, month, sitelist=None, q=True):
     inv_avail_ = "Inverter Uptime Availability (%)"
     df.loc[df[inv_avail_].gt(1), inv_avail_] = 1.00
 
+    if return_df_and_fpath:
+        return df, fpath_list
     return df
 
 
