@@ -8,8 +8,8 @@ import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from oetoolbox.utils import oemeta, oepaths  # type: ignore
-from oetoolbox.dataquery.external import query_DTN  # type: ignore
+from ..utils import oemeta, oepaths
+from ..dataquery.external import query_DTN
 
 
 def get_site_model_losses(site, q=True):
