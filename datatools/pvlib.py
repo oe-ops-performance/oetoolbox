@@ -428,7 +428,7 @@ def run_pvlib_model(site, df_met=None, start_date=None, end_date=None, q=True):
             return
 
         qprint("Querying DTN data")
-        df_met = run_pvlib_DTN_query(site, start, end)
+        # df_met = run_pvlib_DTN_query(site, start, end)
 
         # transpose poa from ghi
         surface_tilt, surface_azimuth = get_surface_parameters(site, df_met)
