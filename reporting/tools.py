@@ -305,7 +305,15 @@ def date_range(year, month, freq):
     return date_range
 
 
-def load_monthly_query_files(site, year, month, types_=None, separate_dfs=False, q=True):
+def load_monthly_query_files(
+    site,
+    year,
+    month,
+    types_=None,
+    separate_dfs=False,
+    q=True,
+    return_fpaths=False,
+):
     qprint = lambda msg, end="\n": None if q else print(msg, end=end)
     frpath = Path(oepaths.frpath(year, month, ext="Solar"), site)
     latestfile = lambda fplist: max((fp.stat().st_ctime, fp) for fp in fplist)[1]
@@ -321,6 +329,7 @@ def load_monthly_query_files(site, year, month, types_=None, separate_dfs=False,
     if isinstance(types_, list):
         fp_dict = {k: fp for k, fp in fp_dict.items() if k in types_}
 
+    fpath_list = []
     df_list = []
     df_dict = {}
     for key_, fpath in fp_dict.items():
@@ -330,8 +339,8 @@ def load_monthly_query_files(site, year, month, types_=None, separate_dfs=False,
                 continue
             df_dict[key_] = pd.DataFrame()
 
-        with fpath as fp:
-            df = pd.read_csv(fp, index_col=0, parse_dates=True)
+        df = pd.read_csv(fpath, index_col=0, parse_dates=True)
+        fpath_list.append(str(fpath))
 
         if key_ == "Meter":
             mcol_ = [c for c in df.columns if "processed" not in c.casefold()]
@@ -360,12 +369,18 @@ def load_monthly_query_files(site, year, month, types_=None, separate_dfs=False,
         df_dict[key_] = df.copy()
 
     if not df_list:
+        if return_fpaths:
+            return pd.DataFrame(), []
         return pd.DataFrame()
 
     if separate_dfs:
+        if return_fpaths:
+            return df_dict, fpath_list
         return df_dict
 
     df_all = pd.concat(df_list, axis=1)
+    if return_fpaths:
+        return df_all, fpath_list
     return df_all
 
 

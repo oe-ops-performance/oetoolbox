@@ -150,7 +150,15 @@ def inv_pvlib_subplots(site, year=None, month=None, dfinv=None, dfpvl=None, fig_
 
 
 # for solar sites w/ flashreport data
-def monthly_summary_subplots(site, year, month, save_html=False, savepath=None, df_util=None):
+def monthly_summary_subplots(
+    site,
+    year,
+    month,
+    save_html=False,
+    savepath=None,
+    df_util=None,
+    return_df_and_fpaths=False,
+):
     # error handling for invalid savepath
     if savepath is not None:
         if not Path(savepath).exists():
@@ -163,9 +171,20 @@ def monthly_summary_subplots(site, year, month, save_html=False, savepath=None, 
     qfile_types = ["Inverters", "PVLib", "Meter"]
 
     ## get flashreport-related files
-    df_dict = load_monthly_query_files(
-        site, year, month, types_=qfile_types, separate_dfs=True, q=True
+    output = load_monthly_query_files(
+        site,
+        year,
+        month,
+        types_=qfile_types,
+        separate_dfs=True,
+        q=True,
+        return_fpaths=return_df_and_fpaths,
     )
+    if output is None:
+        print("error: no data")
+        return
+
+    df_dict = output if not return_df_and_fpaths else output[0]
     if not all(k in df_dict for k in qfile_types):
         print(
             f"Missing the following file(s): {[k for k in qfile_types if k not in df_dict]}\n>> exiting.."
@@ -609,6 +628,8 @@ def monthly_summary_subplots(site, year, month, save_html=False, savepath=None, 
         )
         print(f'Saved file "{spath_.name}"\n>> path: {disppath}')
 
+    if return_df_and_fpaths:
+        return fig, output[1]
     return fig
 
 
