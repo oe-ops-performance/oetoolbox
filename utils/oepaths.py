@@ -51,3 +51,18 @@ def validated_savepath(fpath):
         fpath = Path(fpath.parent, f"{stem_}({n_}){fpath.suffix}")
         n_ += 1
     return fpath
+
+
+# function to sort filepath list by date created
+def sorted_filepaths(filepath_list):
+    """sorts list of pathlib.Path filepaths by date created (most recent first)"""
+    sort_kwargs = dict(key=lambda fp: fp.stat().st_ctime, reverse=True)
+    return list(sorted(filepath_list, **sort_kwargs))
+
+
+# function to get most recent file from filepath list
+def latest_file(filepath_list):
+    """returns most recently created filepath from list"""
+    if not filepath_list:
+        return None
+    return sorted_filepaths(filepath_list)[0]
