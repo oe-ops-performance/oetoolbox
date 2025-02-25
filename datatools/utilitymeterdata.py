@@ -1,4 +1,3 @@
-import itertools
 import openpyxl
 import os, calendar
 import pandas as pd
@@ -6,11 +5,10 @@ import datetime as dt
 from pathlib import Path
 import shutil, tempfile, xmltodict
 
-import oetoolbox.dataquery.pitools as pt  # type: ignore
-from oetoolbox.utils import oemeta, oepaths  # type: ignore
-from oetoolbox.dataquery import pireference as ref  # type: ignore
-from oetoolbox.datatools import mdatatransforms  # type: ignore
-from oetoolbox.reporting.tools import load_meter_historian, date_range, site_frpath  # type: ignore
+from ..dataquery import pireference as ref, pitools as pt  # type: ignore
+from ..datatools import mdatatransforms  # type: ignore
+from ..reporting.tools import load_meter_historian, date_range, site_frpath  # type: ignore
+from ..utils import oepaths  # type: ignore
 
 
 now = lambda: dt.datetime.now()
@@ -192,13 +190,6 @@ def get_meter_filepaths(site, year=None, month=None):
         using the paths/file patterns outlined earlier in this file.
         If multiple files are found, returns sorted list (most recent first).
         If no matching files are found, returns empty list.
-
-    Example
-    -------
-    >>> meter_fpaths = get_meter_filepaths(site='AZ1', year=2024, month=2)
-    >>> print([fp.name for fp in meter_fpaths])
-    ["AZ Solar_02-2024.xlsx"]
-
     """
 
     year, month = validate_YM(year, month)
@@ -280,28 +271,6 @@ def load_stlmtui_file(fpath):
     pandas DataFrame or None
         If meter file is successfully loaded, returns a dataframe with datetime index
         and hourly generation data (in MWh) for each site found in file. (columns = sitenames)
-
-    Example
-    -------
-    >>> meter_fpaths = get_meter_filepaths(site='Alamo', year=2024, month=3)   #returns all stlmtui files
-    >>> filepath = meter_fpaths[0]
-    >>> df = load_stlmtui_file(filepath)
-    >>> df.info()
-    <class 'pandas.core.frame.DataFrame'>
-    DatetimeIndex: 744 entries, 2024-03-01 00:00:00 to 2024-03-31 23:00:00
-    Freq: h
-    Data columns (total 6 columns):
-     #   Column         Non-Null Count  Dtype
-    ---  ------         --------------  -----
-     0   Alamo          743 non-null    float64
-     1   CID            743 non-null    float64
-     2   Kansas         743 non-null    float64
-     3   Kent South     743 non-null    float64
-     4   Old River One  743 non-null    float64
-     5   West Antelope  743 non-null    float64
-    dtypes: float64(6)
-    memory usage: 40.7 KB
-
     """
     ## june 2024 files are suddenly formatted as true .xls docs (not .xml w/ wrong extension)
     try:
@@ -387,19 +356,6 @@ def load_varsity_stlmtui_sites(year, month, sitelist=None, q=True, return_fpaths
     pandas DataFrame or None
         If meter data is found for specified sites, returns a dataframe with datetime index
         and hourly generation data (in MWh) for each site. (columns = site names)
-
-    Example
-    -------
-    >>> df = load_varsity_stlmtui_sites(2024, 5, q=False)
-
-    GROUPED UTILITY METER DATA FILES
-    File: "stlmtui_Meter Data - 2024-06-05T155804.905.xls"
-    ⇛ loaded: ['Alamo', 'CID', 'Kansas', 'Kent South', 'Old River One', 'West Antelope']
-        !! ALERT !! data for Kansas ends 2024-05-23 00:00:00
-    File: "stlmtui_Meter Data - 2024-06-05T161245.012.xls"
-    ⇛ loaded: ['Adams East', 'CW-Corcoran', 'CW-Goose Lake', 'Camelot', 'Catalina II', 'Columbia II', 'Maricopa West']
-        !! ALERT !! data for CW-Goose Lake ends 2024-05-23 00:00:00
-    Complete; found 13 of 13 specified stlmtui sites!
     """
 
     # note: function returns dataframe w/ columns names = site names (i.e. not "MWh")
@@ -507,20 +463,6 @@ def load_site_meter_data(
         the following columns/dtypes: ['Day' (datetime), 'Hour' (int), 'MWh' (float)]
         where the "Hour" column represents "Hour Ending" for the interval (range 1 to 24).
         If there is no file or an error loading the file, returns None.
-
-    Example
-    -------
-    >>> df = load_site_meter_data(site='AZ1', year=2024, month=2, q=False)
-    >>> df.head()
-    Loading file: "AZ Solar_02-2024.xlsx" ... success!
-              Day  Hour     MWh
-    ___________________________
-    0  2024-02-01     1  -0.088
-    1  2024-02-01     2  -0.088
-    2  2024-02-01     3  -0.087
-    3  2024-02-01     4  -0.087
-    4  2024-02-01     5  -0.087
-
     """
 
     qprint = lambda msg, end="\n": print(msg, end=end) if not q else None
@@ -624,20 +566,12 @@ def compare_utility_and_pi_meter(
     Example
     -------
     >>> df_compare = umd.compare_utility_and_pi_meter(2024, 4, sitelist=['Camelot', 'GA4', 'Kansas'])
-    >>> df_compare.head()
     Loading utility meter historian.. done!
     Comparing with PI data:
         SITE                   PI METER    UTILITY     Δ-MWh
         Camelot                11139.80   11814.42    674.62  (6.06%)
         Kansas                  3587.14    3616.34     29.20  (0.81%)
         GA4                    45600.90   45704.95    104.05  (0.23%)
-
-          Site  Year  Month      PI Meter  Utility Meter  Delta (MWh)  Delta (%)
-    ____________________________________________________________________________
-    0  Camelot  2024      4  11139.795412   11814.417149   674.621737   6.055962
-    1   Kansas  2024      4   3587.142696    3616.342211    29.199515   0.814005
-    2      GA4  2024      4  45600.898242   45704.952000   104.053758   0.228184
-
     """
     if not valid_year_month_args(year, month, yearmonth_list):
         print(
@@ -788,41 +722,6 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False, ret
     --------
     >>> sitelist = ['Adams East', 'AZ1', 'Bingham', 'Camelot', 'CID', 'GA4', 'Kansas', 'Richland']
     >>> df = load_meter_data(year=2024, month=4, sitelist=sitelist, q=False)
-
-    BEGIN METER DATA COLLECTION FOR APRIL 2024
-
-    Searching for sites:
-        Adams East            AZ1                   Bingham               Camelot
-        CID                   GA4                   Kansas                Richland
-
-    INDIVIDUAL UTILITY METER DATA FILES
-        AZ1                   Loading file: "AZ Solar 04-2024.xlsx" ... success!
-        Bingham               Loading file: "Bingham_37105_April_2024.xlsx" ... success!
-        GA4                   Loading file: "Twiggs County REDI Generation Preview 04.2024.xls" ... success!
-        Richland              Loading file: "April RichlandGeneration Report.xls" ... success!
-
-    GROUPED UTILITY METER DATA FILES
-        Loading file: "stlmtui_Meter Data - 2024-05-08T115222.081.xls"  ⇛  ['Adams East', 'Camelot']
-        Loading file: "stlmtui_Meter Data - 2024-05-08T113958.802.xls"  ⇛  ['CID', 'Kansas']
-        >> found (4/4) specified stlmtui sites!
-
-    Finished loading files; found 8 of 8 sites:
-        AZ1                   Adams East            Bingham               CID
-        Camelot               GA4                   Kansas                Richland
-
-    Comparing with PI data:
-        SITE                   PI METER    UTILITY     Δ-MWh
-        AZ1                     9320.20    9321.68      1.48  (0.02%)
-        Adams East              2808.32    2840.02     31.71  (1.13%)
-        Bingham                50771.19   49787.98   -983.20  (-1.94%) *real-time query data
-        CID                     3252.75    3292.83     40.09  (1.23%)
-        Camelot                11139.80   11814.42    674.62  (6.06%)
-        GA4                    45600.90   45704.95    104.05  (0.23%)
-        Kansas                  3587.14    3616.34     29.20  (0.81%)
-        Richland                3948.53    3978.18     29.65  (0.75%)
-
-    END METER DATA COLLECTION
-
     """
     qprint = lambda msg, end="\n": print(msg, end=end) if not q else None
 
@@ -963,52 +862,6 @@ def compile_utility_meter_data(
     --------
     >>> sitelist = ['Adams East', 'CID', 'GA4', 'Kansas', 'Richland']
     >>> compile_utility_meter_data(year=2024, month=4, sitelist=sitelist, q=False)
-
-    BEGIN METER DATA COLLECTION FOR APRIL 2024
-
-    Searching for sites:
-        Adams East            CID                   GA4                   Kansas
-        Richland
-
-    INDIVIDUAL UTILITY METER DATA FILES
-        GA4                   Loading file: "Twiggs County REDI Generation Preview 04.2024.xls" ... success!
-        Richland              Loading file: "April RichlandGeneration Report.xls" ... success!
-
-    GROUPED UTILITY METER DATA FILES
-        Loading file: "stlmtui_Meter Data - 2024-05-08T115222.081.xls"  ⇛  ['Adams East']
-        Loading file: "stlmtui_Meter Data - 2024-05-08T113958.802.xls"  ⇛  ['CID', 'Kansas']
-        >> found (3/3) specified stlmtui sites!
-
-    Finished loading files; found 5 of 5 sites:
-        Adams East            CID                   GA4                   Kansas
-        Richland
-
-    Comparing with available PI meter data:
-        SITE                   PI METER    UTILITY     Δ-MWh
-        Adams East              2808.32    2840.02     31.71  (1.13%)
-        CID                     3252.75    3292.83     40.09  (1.23%)
-        GA4                    45600.90   45704.95    104.05  (0.23%)
-        Kansas                  3587.14    3616.34     29.20  (0.81%)
-        Richland                3948.53    3978.18     29.65  (0.75%)
-
-    END METER DATA COLLECTION
-
-    Loading meter generation historian file for read/write... done!
-    >> all timestamps found in file for April-2024; new data will be added to existing rows.
-
-    Writing meter data to Excel worksheet... done!
-    >> added new meter data to historian for 5 sites:
-        ++ Adams East
-        ++ CID
-        ++ GA4
-        ++ Kansas
-        ++ Richland
-
-    Saving file... done!
-    >> path: "..Commercial\Standardized Meter Generation\Meter_Generation_Historian.xlsm"
-
-    END.
-
     """
     qprint = lambda msg, end="\n": print(msg, end=end) if not q else None
 
