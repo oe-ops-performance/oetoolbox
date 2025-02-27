@@ -3,13 +3,12 @@ import pandas as pd
 from pathlib import Path
 
 from . import oemeta, oepaths
+from .config import PI_DATABASE_PATH
 from ..datatools.meteoqc import run_meteo_backfill
 from ..datatools.oepvlib import run_pvlib_model
 from ..datatools.qcutils import run_auto_qc
 from ..reporting.flashreports import generate_monthlyFlashReport
 from ..reporting.tools import get_query_attribute_paths
-
-PI_DATABASE_PATH = "\\\\CORP-PISQLAF\\Onward Energy"
 
 
 class PISite:
