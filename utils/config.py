@@ -8,3 +8,5 @@ with open(secrets_fpath) as content:
     secrets = json.load(content)
 
 DTN_CREDENTIALS = secrets["dtn_api"]
+
+PI_DATABASE_PATH = "\\\\CORP-PISQLAF\\Onward Energy"
