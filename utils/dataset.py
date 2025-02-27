@@ -47,7 +47,6 @@ class SolarDataset(Dataset):
     """A dataset loaded from PI containing time series data for a particular solar site
     as well as some other metadata. Inherits from Dataset.
 
-
     Additional Parameters
     ---------------------
     site : oetoolbox.utils.assets.SolarSite
