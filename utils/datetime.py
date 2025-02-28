@@ -77,3 +77,20 @@ def create_localized_index(site, start, end, freq):
     """Generates a timezone-aware date range localized to a given site"""
     df_ = pd.DataFrame(index=create_naive_index(start, end, freq))
     return localize_naive_datetimeindex(dataframe=df_, site=site).index
+
+
+def segmented_date_ranges(start: pd.Timestamp, end: pd.Timestamp, n_days: int):
+    """Returns a list of sub date ranges with length n_days"""
+    t0, t1 = start, start + pd.DateOffset(days=n_days)
+    if t1 > end:
+        return [(start, end)]
+    date_range_list = []  # init
+    while t1 <= end:
+        date_range_list.append((t0, t1))
+        if t1 == end:
+            break
+        t0 = t1
+        t1 = t1 + pd.DateOffset(days=n_days)
+        if t1 > end:
+            t1 = end
+    return date_range_list
