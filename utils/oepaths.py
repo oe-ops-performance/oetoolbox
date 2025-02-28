@@ -7,7 +7,9 @@ if "Onward Energy" not in Path.cwd().parts:
 else:
     idx = Path.cwd().parts.index("Onward Energy")
     onward_fp = Path(*Path.cwd().parts[: idx + 1])
-shared_fp = max((fp.stat().st_mtime, fp) for fp in onward_fp.iterdir())[1]
+shared_fp = max(
+    (fp.stat().st_mtime, fp) for fp in onward_fp.iterdir() if fp.name.startswith("Shared")
+)[1]
 intra_fp = shared_fp if "Intralinks" in shared_fp.name else Path(shared_fp, "Intralinks")
 internal_documents = Path(intra_fp, "Internal Documents")
 
