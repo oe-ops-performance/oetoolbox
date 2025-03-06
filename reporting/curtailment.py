@@ -13,7 +13,7 @@ get_file = lambda fp_list: max((fp.stat().st_ctime, fp) for fp in fp_list)[1] if
 
 ## COMANCHE CURTAILMENT REPORT
 ## function to load supporting documents for curtailment report
-def load_curtailment_report_data(year, month, q=True):
+def load_curtailment_report_data(year, month, q=True, pvlib_scaling_factor=1):
     qprint = lambda msg: None if q else print(msg)
     frpath_ = Path(oepaths.frpath(year, month, ext="Solar"), "Comanche")
     globstr_list = [f"PVLib_InvAC_Comanche_*.csv", "PIQuery_Meter_*.csv", "PIQuery_PPC_*.csv"]
@@ -55,6 +55,8 @@ def load_curtailment_report_data(year, month, q=True):
     ## create new dataframe
     df = df_pvl[[poacol, "inv_sum"]].join(df_mtr).join(df_ppc[[spcol]])
     df.columns = ["poa", "pvlib", "meter", spcol.replace("_PPC", "")]
+    if pvlib_scaling_factor != 1:
+        df["pvlib"] = df["pvlib"].mul(pvlib_scaling_factor)
 
     ## calculate lost energy from curtailment using conditions below
     df.loc[:, "lost_nrg"] = float(0)  # init

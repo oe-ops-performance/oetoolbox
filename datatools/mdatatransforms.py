@@ -194,6 +194,7 @@ def load_sunflower(fpath):
         n, col = 1, c
         while col in uniquecols:
             col = f"{c}.{n}"
+            n += 1
         uniquecols.append(col)
     uniquecols
     df.columns = uniquecols

@@ -33,6 +33,8 @@ kpi_tracker = Path(solar, "z_Monthly KPI Tracker.xlsx")
 kpi_tracker_rev1 = Path(solar, "z_Monthly KPI Tracker_Rev1.xlsx")
 kpi_notes_file = Path(flashreports, "_kpis_and_notes_.xlsx")
 
+UTILITY_METER_DIR = Path("\\\\corp-cdaas\\Meter_Data_Historian")
+
 
 # function to generate flashreport paths
 def frpath(year, month, ext=None, site=None):
