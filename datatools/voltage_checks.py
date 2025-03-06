@@ -8,17 +8,17 @@ VOLTAGE_BAND = 4  # kV
 
 VOLTAGE_PIPOINT_DICT = {
     "Route 66": [f"RT66.RTAC.Tenska_ERCOT_VOLT_{x}" for x in ("Target", "POI")],
-    "South Plains II": [f"SP2.RTAC.Tenska_ERCOT_VOLT_{x}" for x in ("Target", "POI")],
+    "South Plains II": [f"SP2.RTAC.Tenaska_ERCOT_VOLT_{x}" for x in ("Target", "POI")],
 }
 
 
-def query_monthly_voltage_data(site, year, month):
+def query_monthly_voltage_data(site, year, month, freq="1h"):
     if site not in VOLTAGE_PIPOINT_DICT:
         raise ValueError(f"Invalid site specified: {site}")
     start = pd.Timestamp(year=year, month=month, day=1)
     end = start + pd.DateOffset(months=1)
     start_date, end_date = map(lambda t: t.strftime("%Y-%m-%d"), [start, end])
-    kwargs = dict(start_date=start_date, end_date=end_date, freq="1h", keep_tzinfo=True)
+    kwargs = dict(start_date=start_date, end_date=end_date, freq=freq, keep_tzinfo=True)
     dataset = PIDataset.from_pipoints(site, VOLTAGE_PIPOINT_DICT[site], **kwargs)
     return dataset.data
 
@@ -43,7 +43,7 @@ def create_excursion_event_table(df_list):
         "Start Setpoint (kV)",
         "End Time",
         "End Setpoint (kV)",
-        "Duration (h)",
+        "Duration (mins)",
         "Max Delta (kV)",
         "Min Delta (kV)",
     ]
@@ -52,7 +52,7 @@ def create_excursion_event_table(df_list):
         start, end = df.index[0], df.index[-1]
         start_sp = df.at[start, "volt_target"]
         end_sp = df.at[end, "volt_target"]
-        duration = (end - start).total_seconds() / 3600
+        duration = (end - start).total_seconds() / 60
         max_delta = df["delta"].abs().max()
         min_delta = df["delta"].abs().min()
         data.append([start, start_sp, end, end_sp, duration, max_delta, min_delta])
@@ -60,15 +60,11 @@ def create_excursion_event_table(df_list):
 
 
 def create_excursion_plot(df_query, site):
-    dff = df_query.copy()
+    dff = format_query_dataframe(df_query).copy()
     dff["lower_limit"] = -VOLTAGE_BAND
     dff["upper_limit"] = VOLTAGE_BAND
 
-    max_delta = dff["delta"].max()
-    min_delta = dff["delta"].min()
-    delta_range = max_delta - min_delta
-    yaxis2_range = [(min_delta - delta_range), (max_delta + delta_range)]
-
+    title_text = f"{site} - Voltage Profile - {dff.index[0].strftime('%b-%Y')}"
     fig = go.Figure()
     for col in ["volt_target", "volt_poi"]:
         fig.add_trace(go.Scatter(x=dff.index, y=dff[col], mode="lines", name=col))
@@ -76,13 +72,7 @@ def create_excursion_plot(df_query, site):
     fig.update_layout(
         height=500,
         width=1050,
-        title=dict(
-            text=f"<b>{site} - Voltage Profile - {dff.index[0].strftime('%b-%Y')}</b>",
-            pad_b=15,
-            yref="paper",
-            yanchor="bottom",
-            y=1,
-        ),
+        title=dict(text=title_text, pad_b=15, yanchor="bottom", y=1, yref="paper"),
         legend_x=1.05,
         margin=dict(t=50, b=20, l=70, r=20),
         yaxis_title=dict(text="Voltage (kV)", standoff=10),
@@ -91,7 +81,6 @@ def create_excursion_plot(df_query, site):
             overlaying="y",
             side="right",
             showgrid=False,
-            range=yaxis2_range,
         ),
     )
 
@@ -117,10 +106,16 @@ def create_excursion_plot(df_query, site):
             )
         )
 
-    for dfg in process_excursion_events(dff):
+    event_df_list = process_excursion_events(dff)
+    for dfg in event_df_list:
+        x0, x1 = dfg.index.min(), dfg.index.max()
+        timedelta = x1 - x0
+        if len(event_df_list) > 50:
+            if timedelta < pd.Timedelta("15min"):
+                continue
         fig.add_vrect(
-            x0=dfg.index.min(),
-            x1=dfg.index.max(),
+            x0=x0,
+            x1=x1,
             fillcolor="navajowhite",
             opacity=0.3,
             layer="below",
@@ -130,11 +125,17 @@ def create_excursion_plot(df_query, site):
     return fig
 
 
-def run_voltage_analysis(site, year, month):
+def run_voltage_analysis(site, year, month, return_data=False, return_plot=False):
     """Queries voltage data for a given site and month, then processes and visualizes the data."""
     df_query = query_monthly_voltage_data(site, year, month)
     df = format_query_dataframe(df_query)
     df_list = process_excursion_events(df)
     df_table = create_excursion_event_table(df_list)
-    fig = create_excursion_plot(df_query, site)
-    return df_table, fig
+
+    outputs = [df_table]
+    if return_data:
+        outputs.append(df_query)
+    if return_plot:
+        outputs.append(create_excursion_plot(df_query, site))
+
+    return outputs
