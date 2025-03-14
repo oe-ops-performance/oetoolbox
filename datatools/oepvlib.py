@@ -675,7 +675,7 @@ def run_pvlib_model(
             for col in ["Total Possible", "Total Actual"]:
                 fig_scatter.add_trace(
                     go.Scatter(
-                        x=dfsc["POA"],
+                        x=dfsc[POA_Col_name],
                         y=dfsc[col],
                         name=col,
                         mode="markers",
@@ -714,8 +714,8 @@ def run_pvlib_model(
             )
             fig_timeseries.add_trace(go.Scatter(**xy1, **kwargs1), secondary_y=False)
 
-            xy2 = dict(x=DF_PVLib_AC_hourly.index, y=DF_PVLib_AC_hourly["POA"])
-            kwargs2 = dict(name="POA", mode="lines", hovertemplate=irrad_hovtemplate)
+            xy2 = dict(x=DF_PVLib_AC_hourly.index, y=DF_PVLib_AC_hourly[POA_Col_name])
+            kwargs2 = dict(name=POA_Col_name, mode="lines", hovertemplate=irrad_hovtemplate)
             fig_timeseries.add_trace(go.Scatter(**xy2, **kwargs2), secondary_y=True)
 
             for i, inv in enumerate(Actual_InvIDs):
