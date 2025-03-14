@@ -47,16 +47,59 @@ def request_access_token():
 # note: 10-day maximum -- this function is called in the main query function "query_DTN" (below)
 def query_DTN_weather_data(latitude, longitude, start, end, interval, fields):
     """
-    known fields:
-        airTemp
-        iceAccPeriod
-        liquidAccPeriod
-        precipAccPeriod
-        precipAccAdjusted
-        precipAccRaw
-        shortWaveRadiation
-        snowAccPeriod
-        windSpeed
+    all parameters/fields available for hourly historical data
+        airTemp - C, F
+            Air temperature at two meters above ground level. Units depend on unitcode setting.
+        cloudCover - %
+            Cloud cover data. Cloud cover refers to the percentage of the sky covered by clouds.
+        dewPoint - C, F
+            Dew point temperature at two meters above ground level. Dew point temperature is
+            defined as the temperature to which the air must be cooled for saturation and
+            condensation to occur.
+        iceAccPeriod - mm, in
+            Hourly ice accumulation data.
+        liquidAccPeriod - mm, in
+            Hourly liquid accumulation data.
+        longWaveRadiation - W/m^2
+            Downwelling longwave radiation flux data. Longwave radiation is the energy emitted from
+            non-solar radiation sources.
+        precipAccPeriod - mm, in
+            Hourly liquid-equivalent precipitation accumulation data.
+        precipAccAdjusted - mm, in
+            Liquid-equivalent precipitation accumulation, fundamentally derived from the raw
+            precipitation product, but then adjusted to more closely match available ground truth
+            observations. Due to the delays in receiving these ground truth data, accumulation
+            adjustment typically lags real-time by a day or more.
+        precipAccRaw - mm, in
+            Liquid-equivalent precipitation accumulation, estimated from multiple sources of data
+            that may include any or all of the following: weather radar, satellite, computer
+            models, and surface observation data.
+        relativeHumidity - %
+            Relative humidity at two meters above ground level. Relative humidity is the ratio of
+            the actual amount of water vapor in the air to the maximum amount that can physically
+            exist at a given air temperature.
+        shortWaveRadiation - W/m^2
+            Downwelling shortwave radiation flux data. Shortwave radiation is the high-energy solar
+            radiation that reaches Earth’s surface.
+        snowAccPeriod - mm, in
+            Hourly snow accumulation data.
+        surfacePressure - hPa, mb
+            This parameter represents the pressure that the air exerts on the surface of the Earth.
+        visibility - km, mi
+            Visibility data. Visibility is a measure of the lateral distance one can see before
+            one’s line of sight is obstructed due to weather conditions.
+        windDirection - degrees
+            Wind direction at ten meters above ground level, measured with respect to true north.
+            A wind direction from true north corresponds to a value of zero degrees, which
+            increases to 360 degrees with corresponding clockwise shifts in wind direction. Returns
+            "n/a" if wind speed is less than one mph.
+        windGust - km/h, mph
+            Wind gust at ten meters above ground level. Returns "n/a" if wind speed is less than
+            five mph, or if the difference between wind gust and wind speed is less than five mph.
+        windSpeed - m/s, mph
+            Wind speed at ten meters above ground level. Units dependent on the unitcode setting.
+
+    reference: https://weather.api.dtn.com/v1/docs/conditions/#section/Weather-Parameters
     """
     token_ = request_access_token()
     headers = {
