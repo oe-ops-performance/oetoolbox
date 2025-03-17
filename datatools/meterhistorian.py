@@ -72,7 +72,7 @@ def load_meter_historian(year=None, month=None, dropna=True):
 
 
 def get_data_output_savepath(year: int, month: int):
-    server_folder = Path(UTILITY_DATA_OUTPUT_FOLDER, f"{year}{month:02d}01")
+    server_folder = Path(UTILITY_DATA_OUTPUT_FOLDER, f"{year}{month:02d}")
     filename = f"utility_meter_data_{year}-{month:02d}_output.csv"
     return oepaths.validated_savepath(Path(server_folder, filename))
 
@@ -81,7 +81,7 @@ def get_data_folder(year: int, month: int, fleet: str):
     source_dir = UTILITY_DATA_SOURCE_DIRS.get(fleet)
     if not source_dir:
         raise ValueError("Invalid fleet")
-    return Path(source_dir, f"{year}{month:02d}01")
+    return Path(source_dir, f"{year}{month:02d}")
 
 
 def add_pi_data_files_to_server_folder(year: int, month: int, overwrite: bool = False):
