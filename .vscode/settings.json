@@ -10,5 +10,6 @@
         "--line-length",
         "100"
     ],
-    "autoDocstring.docstringFormat": "numpy"
+    "autoDocstring.docstringFormat": "numpy",
+    "python.REPL.enableREPLSmartSend": false
 }
