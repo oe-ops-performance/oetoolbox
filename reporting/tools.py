@@ -360,7 +360,11 @@ def load_monthly_query_files(
 
         elif key_ == "PVLib":
             pvl_inv_cols = [c for c in df.columns if "Possible_Power" in c]
-            keepcols = ["module_temperature", "POA"] + pvl_inv_cols
+            poacol = "POA" if "POA" in df.columns else "POA_DTN"
+            sensor_cols = [poacol]
+            if "module_temperature" in df.columns:
+                sensor_cols.append("module_temperature")
+            keepcols = sensor_cols + pvl_inv_cols
             df = df[keepcols]
             df["Possible_MW"] = df[pvl_inv_cols].sum(axis=1).div(1000).copy()
 
