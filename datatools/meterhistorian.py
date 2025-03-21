@@ -1,12 +1,11 @@
 import openpyxl
-import os, calendar
+import calendar
 import pandas as pd
 import datetime as dt
 from pathlib import Path
-import shutil, tempfile, xmltodict
+import shutil
 
-from ..dataquery import pireference as ref, pitools as pt
-from ..datatools import mdatatransforms
+from ..datatools import meter_transforms as transforms
 from ..reporting.tools import ALL_SOLAR_SITES
 from ..utils import oepaths
 from ..utils.helpers import quiet_print_function
@@ -190,9 +189,13 @@ ALL_HISTORIAN_SITES = list(get_utility_filename_patterns(2025, 1).keys())
 
 def get_sites_from_stlmtui_file(filepath):
     """Returns dictionary with filenames as keys and list of sites as values"""
-    with open(str(filepath), "r") as file:
-        data = file.read()
-    return [site for site, id_ in VARSITY_STLMTUI_SITE_IDS.items() if id_ in data]
+    try:
+        with open(str(filepath), "r") as file:
+            data = file.read()
+        return [site for site, id_ in transforms.VARSITY_STLMTUI_SITE_IDS.items() if id_ in data]
+    except:
+        df = transforms.load_stlmtui(filepath)
+        return list(df.columns)
 
 
 def stlmtui_sites_by_filepath(fpath_list):
@@ -211,6 +214,8 @@ def get_all_stlmtui_filepaths(year, month):
     data_folder = get_data_folder(year, month, fleet="solar")
     if data_folder.exists():
         filepath_list = list(data_folder.glob("*stlmtui*"))
+        if not filepath_list:
+            filepath_list = get_legacy_meter_filepaths(year, month).get("CID")
     else:
         filepath_list = get_legacy_meter_filepaths(year, month).get("CID")
     if not filepath_list:
@@ -240,6 +245,8 @@ def get_meter_filepaths(site: str, year: int, month: int):
     data_folder = get_data_folder(year, month, fleet)
     if data_folder.exists():
         meter_filepaths = list(data_folder.glob(filepattern))
+        if not meter_filepaths:
+            meter_filepaths = get_legacy_meter_filepaths(year, month).get(site)
     else:
         meter_filepaths = get_legacy_meter_filepaths(year, month).get(site)
 
@@ -249,75 +256,14 @@ def get_meter_filepaths(site: str, year: int, month: int):
     return oepaths.sorted_filepaths(meter_filepaths)
 
 
-def parse_stlmtui_file(filepath):
-    with open(str(filepath), "r") as file:
-        data = file.read()
-    data_dict = xmltodict.parse(data)
-    worksheet_dict = data_dict["Workbook"].get("Worksheet")
-    if not isinstance(worksheet_dict, dict):
-        is_meter_sheet = lambda x: x["@ss:Name"] == "Meter Data"
-        worksheet_dict = [d for d in worksheet_dict if is_meter_sheet(d)].pop()
-
-    worksheet_rows = worksheet_dict["Table"].get("Row")
-    get_row_values = lambda row_dict: [c["Data"].get("#text") for c in row_dict["Cell"]]
-
-    # get column names from second row (skip first b/c blank)
-    cols = pd.Series(get_row_values(worksheet_rows[1]))
-    w = 1
-    while cols.duplicated().any():
-        if cols.loc[cols.duplicated()].str[-2].eq("_").all():
-            new_cols = cols.loc[cols.duplicated()].str[:-2] + f"_{w}"
-        else:
-            new_cols = cols.loc[cols.duplicated()] + f"_{w}"
-        cols.loc[cols.duplicated()] = new_cols
-        w += 1
-
-    # get data from third row to end
-    data_list = list(map(get_row_values, worksheet_rows[2:]))
-
-    df = pd.DataFrame(data_list, columns=cols)
-    df = df.dropna(axis=1, how="all")
-    return df
-
-
-def format_stlmtui_data(df_):
-    column_dict = {
-        "Trade Date": "Day",
-        "Interval ID": "Hour",
-        "Value": "MWh",
-        "Resource ID": "Site",
-    }
-    df = df_.loc[df_["Measurement Type"].eq("GEN")].copy()
-    df = df[[*column_dict]].rename(columns=column_dict)
-    df = df.replace({"Site": {id_: site for site, id_ in VARSITY_STLMTUI_SITE_IDS.items()}})
-    df["Hour"] = pd.to_numeric(df["Hour"]).astype(int)
-    df["MWh"] = pd.to_numeric(df["MWh"])
-    df["MWh"] = df["MWh"].fillna(0)
-    df = df.loc[df.Hour.isin(range(1, 25))].reset_index(drop=True).copy()  # for fall DST
-    df["Timestamp"] = pd.to_datetime(
-        df["Day"] + " " + df["Hour"].sub(1).astype(str).str.zfill(2) + ":00:00",
-        format="%m/%d/%Y %H:%M:%S",
-    )
-    df = df[["Timestamp", "MWh", "Site"]]
-    df = pd.pivot_table(df, index="Timestamp", values="MWh", columns="Site")
-    df = df.rename_axis(None, axis=1)
-    if df.shape[0] != mdatatransforms.expected_index(df, freq="h").shape[0]:
-        df = df.reindex(mdatatransforms.expected_index(df, freq="h"))
-    return df
-
-
-def load_stlmtui_file(filepath):
-    df_ = parse_stlmtui_file(filepath)
-    return format_stlmtui_data(df_)
-
-
 def load_utility_meter_file(site, filepath):
-    if "stlmtui" in Path(filepath).name:
-        return load_stlmtui_file(filepath)
+    if "stlmtui" in Path(filepath).name:  # note: use other function whenever possible
+        function_name = "load_stlmtui"
+    else:
+        formatted_site_name = site.lower().replace(" ", "_").replace("-", "_")
+        function_name = f"load_{formatted_site_name}"
 
-    formatted_site_name = site.lower().replace(" ", "_").replace("-", "_")
-    function_name = f"load_{formatted_site_name}"
-    load_df_function = getattr(mdatatransforms, function_name)
+    load_df_function = getattr(transforms, function_name)
     try:
         dfm = load_df_function(filepath)
     except Exception as e:
@@ -326,133 +272,68 @@ def load_utility_meter_file(site, filepath):
     return dfm
 
 
-def load_multiple_stlmtui_sites(year: int, month: int, sitelist: list, return_fpaths=False):
-    sites_by_file = stlmtui_sites_by_filepath(get_all_stlmtui_filepaths(year, month))
-    fpath_dict = {}
+def load_all_stlmtui_files(year, month, return_fpaths=False):
+    """Loads all stlmtui files for year/month and returns most recent data for each site"""
+    fpath_list = get_all_stlmtui_filepaths(year, month)
+    fp_dict = {}
     collected_sites = []
     df_list = []
-    while len(collected_sites) < len(sitelist):
-        for filepath, sites in sites_by_file.items():
-            target_sites = [s for s in sitelist if s not in collected_sites and s in sites]
-            if not target_sites:
-                continue
-            df_ = load_stlmtui_file(filepath)
-            df_list.append(df_[target_sites])
-            collected_sites.extend(target_sites)
-            fpath_dict.update({site: filepath for site in target_sites})
-        break
+    valid_col = lambda c: c in transforms.VARSITY_STLMTUI_SITE_IDS and c not in collected_sites
+    for fpath in fpath_list:
+        df_ = transforms.load_stlmtui(fpath, fmt=False)  # retains datetime index (for concat)
+        keep_sites = list(filter(valid_col, df_.columns))
+        if not keep_sites:
+            continue
+        collected_sites.extend(keep_sites)
+        df_list.append(df_[keep_sites])
+        fp_dict[str(fpath)] = keep_sites
 
     if not df_list:
-        return pd.DataFrame()
+        df = pd.DataFrame()
+    else:
+        df = pd.concat(df_list, axis=1)
+        ordered_cols = [c for c in transforms.VARSITY_STLMTUI_SITE_IDS if c in df.columns]
+        df = transforms.formatted_dataframe(df[ordered_cols])
 
-    return pd.concat(df_list, axis=1)
-
-
-# TODO: update logic to always include DST data (i.e. for all sites) when available
-SUPPORTED_FALL_DST_SITES = ["Route 66", "South Plains II"]
-
-
-# function to get utility meter data for sites with individual files (ie not grouped/stlmtui)
-def load_site_meter_data(site, year, month, q=True, localized=False, return_df_and_fpath=False):
-    """Load hourly utility meter data for the given site, year, and month.
-
-    Parameters
-    ----------
-    site : str
-        Name of *site.
-    year : int
-        Number of year, 4-digit.
-    month : int
-        Number of month.
-    q : bool, optional
-        If False, enables status printouts. Defaults to True.
-    localized : bool, optional
-        Returns timezone-aware data when True. Defaults to False.
-    return_df_and_fpath : bool, optional
-        Returns dataframe and filepath when True (for logging). Defaults to False.
-
-    *note - there are certain varsity sites that provide data in combined files,
-        and will not be able to load. (use "load_varsity_stlmtui_sites" function)
-
-    Returns
-    -------
-    pandas DataFrame or None
-        If meter file is found and successfully loaded, returns a dataframe with
-        the following columns/dtypes: ['Day' (datetime), 'Hour' (int), 'MWh' (float)]
-        where the "Hour" column represents "Hour Ending" for the interval (range 1 to 24).
-        If there is no file or an error loading the file, returns None.
-    """
-    qprint = quiet_print_function(q=q)
-    meter_fpath = oepaths.latest_file(get_meter_filepaths(site, year, month))
-    if not meter_fpath:
-        qprint("no file found")
-        return
-
-    qprint(f'Loading file: "{meter_fpath.name}"', end=" ... ")
-    if site in VARSITY_STLMTUI_SITE_IDS:
-        df_stlmtui = load_stlmtui_file(meter_fpath)
-        if localized:
-            pass  # TODO
-        dfm = df_stlmtui[[site]]
-        if return_df_and_fpath:
-            return dfm, meter_fpath
-        return dfm
-
-    formatted_site_name = site.lower().replace(" ", "_").replace("-", "_")
-    function_name = f"load_{formatted_site_name}"
-    load_df_function = getattr(mdatatransforms, function_name)
-    args = [meter_fpath]
-    if localized and (site in SUPPORTED_FALL_DST_SITES):
-        args.append(True)
-    try:
-        dfm = load_df_function(*args)
-        qprint("success!")
-    except:
-        qprint("ERROR!")
-        return
-
-    dfm.index = pd.to_datetime(
-        dfm.Day.astype(str) + " " + dfm.Hour.sub(1).astype(str).str.zfill(2) + ":00:00",
-        format="%Y-%m-%d %H:%M:%S",
-    )
-    df = dfm[["MWh"]].copy()
-    df.columns = [site]
-
-    if return_df_and_fpath:
-        return df, meter_fpath
-
+    if return_fpaths:
+        return df, fp_dict
     return df
 
 
-def load_multiple_meter_files(year, month, sitelist, q=True, localized=False, return_fpaths=False):
-    target_sites = [s for s in sitelist if s not in VARSITY_STLMTUI_SITE_IDS]
+def load_multiple_meter_files(year, month, sitelist, return_fpaths=False):
+    target_sites = [s for s in sitelist if s not in transforms.VARSITY_STLMTUI_SITE_IDS]
     if not target_sites:
         return
     df_list = []
     fpath_dict = {}
-    kwargs = dict(q=q, localized=localized, return_df_and_fpath=True)
     for site in target_sites:
-        args = [site, year, month]
-        output = load_site_meter_data(*args, **kwargs)
-        if output is None:
+        fp_list = get_meter_filepaths(site, year, month)
+        fpath = oepaths.latest_file(fp_list)
+        if fpath is None:
             continue
-        dfm, mfp = output
-        df_list.append(dfm)
-        fpath_dict[site] = str(mfp)
+        df_ = load_utility_meter_file(site, fpath)
+        if not df_list:  # i.e. first df
+            df_ = df_.rename(columns={"MWh": site})
+        else:
+            df_ = df_[["MWh"]].rename(columns={"MWh": site})
+
+        df_list.append(df_)
+        fpath_dict[site] = str(fpath)
 
     if not df_list:
-        return
-    df_meter = pd.concat(df_list, axis=1)
-    ordered_columns = [s for s in ALL_HISTORIAN_SITES if s in df_meter.columns]
-    df_meter = df_meter[ordered_columns]
+        df = pd.DataFrame()
+    else:
+        df = pd.concat(df_list, axis=1)
+        ordered_cols = [c for c in ALL_HISTORIAN_SITES if c in df.columns]
+        df = df[ordered_cols]
 
     if return_fpaths:
-        return df_meter, fpath_dict
-    return df_meter
+        return df, fpath_dict
+    return df
 
 
 # function to load utility meter data for any site(s)
-def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False, return_fpaths=False):
+def load_meter_data(year, month, sitelist=None, q=True, return_fpaths=False):
     """Load hourly utility meter data for the given year, month, and site(s).
 
     Parameters
@@ -482,46 +363,57 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False, ret
     else:
         target_sites = ALL_HISTORIAN_SITES
 
-    # only allows to keep extra timestamp if all sites in list are wind sites (functionality not built out for solar)
-    if keep_fall_dst:
-        if month != 11:
-            keep_fall_dst = False
-        if not all(s in SUPPORTED_FALL_DST_SITES for s in target_sites):
-            keep_fall_dst = False
-
     # split sites into stlmtui & non-stlmtui
+    is_stlmtui = lambda site: site in transforms.VARSITY_STLMTUI_SITE_IDS
     main_sites, stlmtui_sites = [], []
     for s in target_sites:
-        main_sites.append(s) if (s not in VARSITY_STLMTUI_SITE_IDS) else stlmtui_sites.append(s)
+        main_sites.append(s) if not is_stlmtui(s) else stlmtui_sites.append(s)
 
     df_list = []
     fpath_dict = {}
 
     if main_sites:
-        output = load_multiple_meter_files(
-            year, month, main_sites, q=q, localized=keep_fall_dst, return_fpaths=True
-        )
+        output = load_multiple_meter_files(year, month, main_sites, return_fpaths=True)
         if output is not None:
-            df_list.append(output[0])
-            fpath_dict.update(output[1])
+            df_, fp_dict = output
+            df_list.append(df_)
+            fpath_dict.update(fp_dict)
 
     if stlmtui_sites:
-        df_ = load_multiple_stlmtui_sites(year, month, sitelist=stlmtui_sites)
-        df_list.append(df_)
+        output = load_all_stlmtui_files(year, month, return_fpaths=True)
+        if output is not None:
+            df_, fp_dict = output
+            matching_cols = [c for c in stlmtui_sites if c in df_.columns]
+            if matching_cols:
+                if not df_list:
+                    include_cols = ["Day", "Hour"] + matching_cols
+                    df_list.append(df_[include_cols])
+                else:
+                    df_list.append(df_[matching_cols])
+                fpath_dict.update(
+                    {
+                        s: [fp for fp, sitelist in fp_dict.items() if s in sitelist]
+                        for s in matching_cols
+                    }
+                )
 
     if not df_list:
         qprint("no data found")
         return pd.DataFrame()
 
-    df_meter = pd.concat(df_list, axis=1)
-    foundsites = list(df_meter.columns)
+    if len(df_list) == 1:
+        df = df_list[0].copy()
+    else:
+        df = pd.concat(df_list, axis=1)
+
+    foundsites = list(fpath_dict.keys())
     qprint(f"found {len(foundsites)} of {len(target_sites)} sites\n{foundsites}")
-    ordered_columns = [s for s in ALL_HISTORIAN_SITES if s in df_meter.columns]
-    df_meter = df_meter[ordered_columns]
+    ordered_columns = ["Day", "Hour"] + [s for s in ALL_HISTORIAN_SITES if s in df.columns]
+    df = df[ordered_columns]
 
     if return_fpaths:
-        return df_meter, fpath_dict
-    return df_meter
+        return df, fpath_dict
+    return df
 
 
 def load_data_to_server(df, q=True):
