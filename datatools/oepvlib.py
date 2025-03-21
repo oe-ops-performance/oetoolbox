@@ -489,7 +489,7 @@ def run_pvlib_model(
     dict_ac_results_by_config = {}
     DF_final_ac_results = pd.DataFrame()
 
-    losses_array, _, _ = get_site_model_losses(sitename)
+    losses_array, dc_losses, _ = get_site_model_losses(sitename)
 
     config_count = len(inv_configs)
     for n, config in enumerate(inv_configs):
@@ -519,16 +519,18 @@ def run_pvlib_model(
                 surface_azimuth=(
                     tracking_profile["surface_azimuth"] if racking_type == "Tracker" else 180
                 ),
-                dni=meteo["dni"],
-                ghi=meteo["ghi"],
-                dhi=meteo["dhi"],
+                dni=meteo["dni_raw"],
+                ghi=meteo["ghi_raw"],
+                dhi=meteo["dhi_raw"],
                 dni_extra=meteo["dni_extra"],
                 solar_zenith=meteo["apparent_zenith"],
                 solar_azimuth=meteo["azimuth"],
                 model="perez",
             )
             meteo[POA_Col_name] = POA_irradiance["poa_global"]
-            meteo["effective_irradiance"] = POA_irradiance["poa_global"]  # .mul(losses_array)
+            meteo["effective_irradiance"] = (
+                POA_irradiance["poa_global"].mul(losses_array).mul(dc_losses)
+            )
             if xyz:
                 print(
                     f"{sitename} - model part {n+1} / {config_count}",
