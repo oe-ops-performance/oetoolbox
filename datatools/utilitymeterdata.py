@@ -792,9 +792,10 @@ def load_meter_data(year, month, sitelist=None, q=True, keep_fall_dst=False, ret
             return_fpaths=return_fpaths,
         )
         if stlmtui_output is not None:
-            df_stlmtui, stlmtui_fpath_dict = stlmtui_output
+            df_stlmtui = stlmtui_output[0] if return_fpaths else stlmtui_output
             df_list.append(df_stlmtui)
-            fpath_dict.update(stlmtui_fpath_dict)
+            if return_fpaths:
+                fpath_dict.update(stlmtui_output[1])
 
     qprint("\nFinished loading files", end="; ")
 

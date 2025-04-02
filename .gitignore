@@ -175,3 +175,4 @@ cython_debug/
 secrets/
 
 local_notebooks/
+dev_nbs/

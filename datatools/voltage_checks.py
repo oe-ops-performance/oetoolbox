@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from ..utils.pi import PIDataset
+from ..dataquery.pitools import pipoint_list, query_pi_recordedvalues
 
 
 VOLTAGE_BAND = 4  # kV
@@ -23,15 +24,42 @@ def query_monthly_voltage_data(site, year, month, freq="1h"):
     return dataset.data
 
 
+def query_monthly_voltage_data_recordedvalues(site, year, month, q=True):
+    if site not in VOLTAGE_PIPOINT_DICT:
+        raise ValueError(f"Invalid site specified: {site}")
+    start = pd.Timestamp(year=year, month=month, day=1)
+    end = start + pd.DateOffset(months=1)
+    start_date, end_date = map(lambda t: t.strftime("%Y-%m-%d"), [start, end])
+    pipt_list = pipoint_list(VOLTAGE_PIPOINT_DICT[site])
+    df = query_pi_recordedvalues(site, start_date, end_date, pipoint_list=pipt_list, q=q)
+    df["Attribute"] = df["Attribute"].astype(str)
+    df_poi = df.loc[df.Attribute.str.contains("POI")].copy()
+    df_target = df.loc[df.Attribute.str.contains("Target")].copy()
+    df_target = df_target.resample("1s").ffill()
+
+    target_tag, poi_tag = VOLTAGE_PIPOINT_DICT[site]
+
+    dfp = df_poi[["Value"]].rename(columns={"Value": poi_tag}).copy()
+    dft = df_target[["Value"]].rename(columns={"Value": target_tag}).copy()
+    df_query = dfp.join(dft, how="left")
+    df_query = df_query[~df_query.index.duplicated()].copy()
+    return df_query
+
+
 def format_query_dataframe(df_query):
     df = df_query.copy()
     df.columns = df.columns.map(lambda c: c.split("ERCOT_")[-1].casefold())
+    for col in ["volt_poi", "volt_target"]:
+        if df[col].max() > 1e3:
+            df[col] = df[col].div(10)
     df["delta"] = df["volt_poi"].sub(df["volt_target"])
     return df
 
 
-def process_excursion_events(df, threshold=VOLTAGE_BAND):
+def process_excursion_events(df, threshold=VOLTAGE_BAND, recordedvalues=False):
     """Returns a list of DataFrames where the voltage delta exceeds the voltage band."""
+    if recordedvalues:
+        df = df.resample("1s").ffill().copy()
     condition = df["delta"].abs().gt(threshold)
     breaks = (~condition).cumsum()
     return [group for _, group in df[condition].groupby(breaks)]
@@ -53,8 +81,8 @@ def create_excursion_event_table(df_list):
         start_sp = df.at[start, "volt_target"]
         end_sp = df.at[end, "volt_target"]
         duration = (end - start).total_seconds() / 60
-        max_delta = df["delta"].abs().max()
-        min_delta = df["delta"].abs().min()
+        max_delta = df["delta"].max()
+        min_delta = df["delta"].min()
         data.append([start, start_sp, end, end_sp, duration, max_delta, min_delta])
     return pd.DataFrame(data, columns=columns)
 
@@ -67,7 +95,7 @@ def create_excursion_plot(df_query, site):
     title_text = f"{site} - Voltage Profile - {dff.index[0].strftime('%b-%Y')}"
     fig = go.Figure()
     for col in ["volt_target", "volt_poi"]:
-        fig.add_trace(go.Scatter(x=dff.index, y=dff[col], mode="lines", name=col))
+        fig.add_trace(go.Scattergl(x=dff.index, y=dff[col], mode="lines", name=col))
 
     fig.update_layout(
         height=500,

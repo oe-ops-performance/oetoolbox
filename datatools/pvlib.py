@@ -332,9 +332,9 @@ def query_dtn_meteo_data(site, start, end, freq="1min", q=True):
     )
 
     # apply losses
-    losses_array, dc_losses, _ = get_site_model_losses(site)
-    for col in ["ghi", "dni", "dhi"]:
-        dfDTN[col] = dfDTN[f"{col}_raw"].mul(losses_array).mul(dc_losses)
+    # losses_array, dc_losses, _ = get_site_model_losses(site)
+    # for col in ["ghi", "dni", "dhi"]:
+    #     dfDTN[col] = dfDTN[f"{col}_raw"].mul(losses_array).mul(dc_losses)
 
     dfDTN = remove_tzinfo_and_standardize_index(dfDTN)
     if freq == "1min":

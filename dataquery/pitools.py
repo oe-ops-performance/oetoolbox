@@ -204,6 +204,11 @@ def query_pi_data(
     if format_ in ["wide", "long"]:
         df_format = format_
 
+    if df_format == "long":
+        # check asset groups (if all same, omits group name from columns)
+        all_asset_groups = [asset_grp(p) for p in attPath_list]
+        all_same_group = len(list(set(all_asset_groups))) == 1
+
     is_long = df_format == "long"  # variable for use in loop below
 
     ## function to get column name from afvals (depending on format & col_name_source arg)

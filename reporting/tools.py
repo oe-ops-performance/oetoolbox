@@ -360,7 +360,11 @@ def load_monthly_query_files(
 
         elif key_ == "PVLib":
             pvl_inv_cols = [c for c in df.columns if "Possible_Power" in c]
-            keepcols = ["module_temperature", "POA"] + pvl_inv_cols
+            poacol = "POA" if "POA" in df.columns else "POA_DTN"
+            sensor_cols = [poacol]
+            if "module_temperature" in df.columns:
+                sensor_cols.append("module_temperature")
+            keepcols = sensor_cols + pvl_inv_cols
             df = df[keepcols]
             df["Possible_MW"] = df[pvl_inv_cols].sum(axis=1).div(1000).copy()
 
@@ -385,9 +389,8 @@ def load_monthly_query_files(
 
 
 # function to load utility meter data from historian
-def load_meter_historian(year=None, month=None):
-    with Path(oepaths.meter_generation_historian) as fpath:
-        df = pd.read_excel(fpath, engine="openpyxl")
+def load_meter_historian(year=None, month=None, dropna=True):
+    df = pd.read_excel(oepaths.meter_generation_historian, engine="calamine")
     df = df.iloc[: df.Day.last_valid_index() + 1, :].copy()
     df.index = pd.to_datetime(
         df["Day"].astype(str)
@@ -403,14 +406,17 @@ def load_meter_historian(year=None, month=None):
     if month is not None:
         df = df[(df.index.month == month)].copy()
 
-    df = df.loc[~df.index.duplicated()]
+    if df.index.duplicated().any():
+        df = df.loc[~df.index.duplicated()].copy()
+    if dropna:
+        df = df.dropna(axis=1, how="all").copy()
 
     return df
 
 
 # function to load kpi tracker (updated Aug.2024 for rev1)
 def load_kpi_tracker(sheet="ALL PROJECTS"):
-    kwargs = dict(sheet_name=sheet, engine="openpyxl")
+    kwargs = dict(sheet_name=sheet, engine="calamine")
     header_row_dict = {"Ref Tables": 1, "Site List": 1, "ALL PROJECTS": 0}
     hdr_row = header_row_dict.get(sheet)
     keepcols = lambda df: [c for c in df.columns if "Unnamed" not in c]
@@ -418,19 +424,24 @@ def load_kpi_tracker(sheet="ALL PROJECTS"):
     kpi_fpath = Path(oepaths.kpi_tracker_rev1)
 
     if hdr_row is not None:
-        with kpi_fpath as fpath:
-            df_ = pd.read_excel(fpath, **kwargs, header=hdr_row)
+        df_ = pd.read_excel(kpi_fpath, **kwargs, header=hdr_row)
         if sheet != "Ref Tables":
             df = df_[keepcols(df_)].copy()
         else:
             df_.columns = df_.iloc[0].astype(str).str.replace(".0", "")
-            end_row = df_[df_["Project Name"].isna()].index[0]
-            end_col = list(df_.columns).index("Notes")
-            df = df_.iloc[1:end_row, :end_col].dropna(axis=1, how="all").copy()
-            df = df.set_index("Project Name")
+            ppc_column_indexes = [
+                index
+                for index, col in enumerate(df_.columns)
+                if not pd.isna(pd.to_datetime(col, errors="coerce"))
+            ]
+            ppc_column_indexes.insert(0, ppc_column_indexes[0] - 1)  # for site column
+            df = df_.iloc[1:, ppc_column_indexes].reset_index(drop=True).copy()
+            df.columns = ["Site", *list(df.columns[1:])]
+            end_row = df.loc[df.Site.isna()].index[0]
+            df = df.iloc[:end_row, :].set_index("Site").copy()
+            df.columns = df.columns.map(lambda c: pd.to_datetime(c).strftime("%Y-%m"))
     else:
-        with kpi_fpath as fpath:
-            df = pd.read_excel(fpath, **kwargs)
+        df = pd.read_excel(kpi_fpath, **kwargs)
 
     if sheet == "ALL PROJECTS":
         end_row = df.Project.last_valid_index() + 1
@@ -442,10 +453,10 @@ def load_kpi_tracker(sheet="ALL PROJECTS"):
 
 
 # function to get ppa rate from kpi tracker  (used in flashreport script)
-def get_ppa_rate(site, year):
+def get_ppa_rate(site, year, month):
     dfk = load_kpi_tracker(sheet="Ref Tables")
     try:
-        ppa = dfk.at[site, str(year)] if (site in dfk.index) else None
+        ppa = dfk.at[site, f"{year}-{month:02d}"] if (site in dfk.index) else None
     except:
         ppa = None
     return ppa
@@ -701,7 +712,7 @@ def get_flashreport_kpis(site, year, month, q=True, return_df_and_fpath=False):
 def get_monthly_DTN_ghi_total(site, year, month, q=True):
     tz = oemeta.data["TZ"].get(site)
     lat, lon = oemeta.data["LatLong"].get(site)
-    start = pd.Timestamp(year, month, day=1)
+    start = pd.Timestamp(year, month, 1)
     end = start + pd.DateOffset(months=1)
     interval = "hour"
     fields = ["shortWaveRadiation"]

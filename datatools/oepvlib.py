@@ -122,10 +122,10 @@ def run_pvlib_DTN_query(site, start, end, q=True):
     )
 
     ## Apply IRR Losses ##
-    losses_array, dc_losses, _ = get_site_model_losses(site)
-    meteo["ghi"] = meteo["ghi_raw"].mul(losses_array).mul(dc_losses)
-    meteo["dni"] = meteo["dni_raw"].mul(losses_array).mul(dc_losses)
-    meteo["dhi"] = meteo["dhi_raw"].mul(losses_array).mul(dc_losses)
+    # losses_array, dc_losses, _ = get_site_model_losses(site)
+    # meteo["ghi"] = meteo["ghi_raw"].mul(losses_array).mul(dc_losses)
+    # meteo["dni"] = meteo["dni_raw"].mul(losses_array).mul(dc_losses)
+    # meteo["dhi"] = meteo["dhi_raw"].mul(losses_array).mul(dc_losses)
 
     return meteo
 
@@ -489,7 +489,7 @@ def run_pvlib_model(
     dict_ac_results_by_config = {}
     DF_final_ac_results = pd.DataFrame()
 
-    losses_array, _, _ = get_site_model_losses(sitename)
+    losses_array, dc_losses, _ = get_site_model_losses(sitename)
 
     config_count = len(inv_configs)
     for n, config in enumerate(inv_configs):
@@ -519,16 +519,18 @@ def run_pvlib_model(
                 surface_azimuth=(
                     tracking_profile["surface_azimuth"] if racking_type == "Tracker" else 180
                 ),
-                dni=meteo["dni"],
-                ghi=meteo["ghi"],
-                dhi=meteo["dhi"],
+                dni=meteo["dni_raw"],
+                ghi=meteo["ghi_raw"],
+                dhi=meteo["dhi_raw"],
                 dni_extra=meteo["dni_extra"],
                 solar_zenith=meteo["apparent_zenith"],
                 solar_azimuth=meteo["azimuth"],
                 model="perez",
             )
             meteo[POA_Col_name] = POA_irradiance["poa_global"]
-            meteo["effective_irradiance"] = POA_irradiance["poa_global"]  # .mul(losses_array)
+            meteo["effective_irradiance"] = (
+                POA_irradiance["poa_global"].mul(losses_array).mul(dc_losses)
+            )
             if xyz:
                 print(
                     f"{sitename} - model part {n+1} / {config_count}",
@@ -675,7 +677,7 @@ def run_pvlib_model(
             for col in ["Total Possible", "Total Actual"]:
                 fig_scatter.add_trace(
                     go.Scatter(
-                        x=dfsc["POA"],
+                        x=dfsc[POA_Col_name],
                         y=dfsc[col],
                         name=col,
                         mode="markers",
@@ -714,8 +716,8 @@ def run_pvlib_model(
             )
             fig_timeseries.add_trace(go.Scatter(**xy1, **kwargs1), secondary_y=False)
 
-            xy2 = dict(x=DF_PVLib_AC_hourly.index, y=DF_PVLib_AC_hourly["POA"])
-            kwargs2 = dict(name="POA", mode="lines", hovertemplate=irrad_hovtemplate)
+            xy2 = dict(x=DF_PVLib_AC_hourly.index, y=DF_PVLib_AC_hourly[POA_Col_name])
+            kwargs2 = dict(name=POA_Col_name, mode="lines", hovertemplate=irrad_hovtemplate)
             fig_timeseries.add_trace(go.Scatter(**xy2, **kwargs2), secondary_y=True)
 
             for i, inv in enumerate(Actual_InvIDs):
