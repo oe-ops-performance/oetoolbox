@@ -122,10 +122,10 @@ def run_pvlib_DTN_query(site, start, end, q=True):
     )
 
     ## Apply IRR Losses ##
-    losses_array, dc_losses, _ = get_site_model_losses(site)
-    meteo["ghi"] = meteo["ghi_raw"].mul(losses_array).mul(dc_losses)
-    meteo["dni"] = meteo["dni_raw"].mul(losses_array).mul(dc_losses)
-    meteo["dhi"] = meteo["dhi_raw"].mul(losses_array).mul(dc_losses)
+    # losses_array, dc_losses, _ = get_site_model_losses(site)
+    # meteo["ghi"] = meteo["ghi_raw"].mul(losses_array).mul(dc_losses)
+    # meteo["dni"] = meteo["dni_raw"].mul(losses_array).mul(dc_losses)
+    # meteo["dhi"] = meteo["dhi_raw"].mul(losses_array).mul(dc_losses)
 
     return meteo
 
