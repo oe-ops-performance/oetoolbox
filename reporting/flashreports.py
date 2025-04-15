@@ -8,7 +8,7 @@ from ..utils import oepaths, oemeta
 from ..reporting.tools import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
 from ..datatools.meteoqc import transposed_POA_from_DTN_GHI
-from ..datatools.meterhistorian import load_meter_historian
+from ..datatools.meterhistorian import load_meter_historian, METER_HISTORIAN_FILEPATH
 
 
 def load_PIdatafile(filepath, t1, t2):
@@ -289,7 +289,10 @@ def generate_monthlyFlashReport(
             qprint(f"!! No PI meter data found for {sitename} !! - replacing with df of zeros.")
             meterpath = None
     else:
-        meterpath = oepaths.meter_generation_historian
+        meterpath = METER_HISTORIAN_FILEPATH
+        expected_rng = pd.date_range(dfm_.index.min(), dfm_.index.max(), freq="h")
+        if len(expected_rng) != dfm_.shape[0]:
+            dfm_ = dfm_.reindex(expected_rng)  # for DST (historian removes/adds tstamps)
         dfm_ = dfm_.reset_index(drop=True)  # for row numbers when writing to excel
         df_meter = dfm_.copy()
         qprint('Loaded Meter file ------ "Meter_Generation_Historian.xlsm"')
