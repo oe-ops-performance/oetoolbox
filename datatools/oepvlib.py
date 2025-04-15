@@ -510,7 +510,7 @@ def run_pvlib_model(
                 )
             mc.run_model_from_effective_irradiance(meteo_mc)
 
-        elif "ghi" in meteo.columns:
+        elif any(c in meteo.columns for c in ["ghi", "ghi_raw"]):
             qprint("Running model with GHI transposed to POA - config #" + str(n + 1))
             POA_irradiance = pvlib.irradiance.get_total_irradiance(
                 surface_tilt=(
