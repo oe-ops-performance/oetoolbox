@@ -18,11 +18,7 @@ UTILITY_DATA_SOURCE_DIRS = {
 }
 UTILITY_DATA_OUTPUT_FOLDER = Path(oepaths.UTILITY_METER_DIR, "Output")
 METER_HISTORIAN_FOLDER = Path(oepaths.UTILITY_METER_DIR, "Master_Version")
-# METER_HISTORIAN_FILEPATH = Path(METER_HISTORIAN_FOLDER, "Meter_Generation_Historian.xlsm")
-
-METER_HISTORIAN_FILEPATH = METER_HISTORIAN_FOLDER.joinpath(
-    "Meter_Generation_Historian_TEST-COPY.xlsm"
-)
+METER_HISTORIAN_FILEPATH = METER_HISTORIAN_FOLDER.joinpath("Meter_Generation_Historian.xlsm")
 
 PI_DATA_SITES = ["CW-Marin", "Indy I", "Indy II", "Indy III"]
 
