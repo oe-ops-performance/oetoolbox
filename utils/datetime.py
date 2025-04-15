@@ -1,15 +1,16 @@
 import pandas as pd
 
-from ..utils import oemeta
+from . import oemeta
 
 
-def localize_naive_datetimeindex(dataframe: pd.DataFrame, site: str = "", tz: str = ""):
+def localize_naive_datetimeindex(
+    dataframe: pd.DataFrame, site: str = "", tz: str = "", q: bool = True
+):
     if site == tz == "":
-        print('Error: must specify either "site" or timezone "tz"')
-        return
+        raise ValueError('Error: must specify either "site" or timezone "tz"')
     elif not isinstance(dataframe.index, pd.DatetimeIndex):
-        print("Error: dataframe must have datetime index")
-        return
+        raise ValueError("Error: dataframe must have datetime index")
+
     if tz == "":
         tz = oemeta.data["TZ"].get(site)
 
@@ -18,15 +19,15 @@ def localize_naive_datetimeindex(dataframe: pd.DataFrame, site: str = "", tz: st
         df = df.tz_localize(tz)
         return df
     except:
-        print("dst condition detected")
+        if not q:
+            print("dst condition detected; continuing")
         pass
 
     freq = pd.infer_freq(df.index)
     if not freq:
         freq = pd.infer_freq(df.index[:100])
         if not freq:
-            print("Error: could not infer frequency from index")
-            return
+            raise ValueError("Error: could not infer frequency from index")
 
     # get expected local tz index (includes DST times; i.e. extra or missing hour)
     expected_local_index = pd.date_range(df.index.min(), df.index.max(), freq=freq, tz=tz)
@@ -45,14 +46,14 @@ def localize_naive_datetimeindex(dataframe: pd.DataFrame, site: str = "", tz: st
 
 def remove_tzinfo_and_standardize_index(dataframe: pd.DataFrame):
     if not isinstance(dataframe.index, pd.DatetimeIndex):
-        print("Error: dataframe must have datetime index")
-        return
+        raise ValueError("Error: dataframe must have datetime index")
+
     freq = pd.infer_freq(dataframe.index)
     if not freq:
         freq = pd.infer_freq(dataframe.index[:100])
         if not freq:
-            print("Error: could not infer frequency from index")
-            return
+            raise ValueError("Error: could not infer frequency from index")
+
     df = dataframe.tz_localize(None).copy()
     ref_index = pd.date_range(df.index.min(), df.index.max(), freq=freq)
 
