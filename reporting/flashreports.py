@@ -5,14 +5,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from ..utils import oepaths, oemeta
-from ..reporting.tools import (
-    get_ppa_rate,
-    latest_file,
-    load_meter_historian,
-    site_frpath,
-)
+from ..reporting.tools import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
 from ..datatools.meteoqc import transposed_POA_from_DTN_GHI
+from ..datatools.meterhistorian import load_meter_historian
 
 
 def load_PIdatafile(filepath, t1, t2):
@@ -226,9 +222,9 @@ def generate_monthlyFlashReport(
     ppcfile = ppc_files[0] if ppc_files else None
 
     """ GET DTN POA INSOLATION """
-    frpath = site_frpath(sitename, year, month)
+    frpath = oepaths.frpath(year, month, ext="solar", site=sitename)
     met_fpaths = list(frpath.glob("PIQuery_MetStations*PROCESSED*.csv"))
-    met_fp = latest_file(met_fpaths)
+    met_fp = oepaths.latest_file(met_fpaths)
     if not met_fp:
         dtn_start = pd.Timestamp(year, month, 1)
         dtn_end = dtn_start + pd.DateOffset(months=1)
@@ -268,7 +264,7 @@ def generate_monthlyFlashReport(
     """GET METER DATA"""
     # utility meter data (if exists)
     if df_util is None:
-        dfum = load_meter_historian(year=year, month=month)
+        dfum = load_meter_historian(year=year, month=month, dropna=True)
     else:
         dfum = df_util.copy()
 
