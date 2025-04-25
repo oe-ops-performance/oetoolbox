@@ -324,7 +324,7 @@ def load_monthly_query_files(
         "Meter": getfile(f"PIQuery_Meter*.csv"),
         "Inverters": getfile(f"PIQuery_Inverters*.csv"),
         "MetStations": getfile(f"PIQuery_MetStations*.csv"),
-        "PVLib": getfile(f"PVLib_InvAC_{site}*.csv"),
+        "PVLib": getfile(f"PVLib_InvAC_*.csv"),
     }
     if isinstance(types_, list):
         fp_dict = {k: fp for k, fp in fp_dict.items() if k in types_}
