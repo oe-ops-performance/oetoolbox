@@ -27,13 +27,15 @@ commercial = Path(internal_documents, "Commercial")
 standard_meter_gen = Path(commercial, "Standardized Meter Generation")
 varsity_metergen = Path(standard_meter_gen, "Varsity Generation DataBase", "Monthly Generation")
 
+UTILITY_METER_DIR = Path("\\\\corp-cdaas\\Meter_Data_Historian")
+
 # frequently-referenced files
-meter_generation_historian = Path(standard_meter_gen, "Meter_Generation_Historian.xlsm")
+meter_generation_historian = Path(
+    UTILITY_METER_DIR, "Master_Version", "Meter_Generation_Historian.xlsm"
+)
 kpi_tracker = Path(solar, "z_Monthly KPI Tracker.xlsx")
 kpi_tracker_rev1 = Path(solar, "z_Monthly KPI Tracker_Rev1.xlsx")
 kpi_notes_file = Path(flashreports, "_kpis_and_notes_.xlsx")
-
-UTILITY_METER_DIR = Path("\\\\corp-cdaas\\Meter_Data_Historian")
 
 
 # function to generate flashreport paths
