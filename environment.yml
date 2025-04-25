@@ -1,0 +1,16 @@
+name: oetoolbox_env
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - numpy
+  - openpyxl=3.0.*
+  - pandas
+  - paramiko=2.8.*
+  - pip
+  - plotly=5.9.*
+  - pytest
+  - python=3.9.*
+  - sqlalchemy
+  - xlsxwriter
+  - xlwings
