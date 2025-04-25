@@ -134,6 +134,7 @@ def query_DTN_weather_data(latitude, longitude, start, end, interval, fields):
 
 
 def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
+    """Returns a timezone-aware dataframe with data queried from DTN"""
     qprint = lambda msg, end="\n": None if q else print(msg, end=end)
     fmt_tstamp = (
         lambda t: pd.Timestamp(t, tz=tz).tz_convert(tz="UTC").tz_localize(None).isoformat() + "Z"
@@ -156,10 +157,7 @@ def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
     qprint("\nDone!")
 
     df = pd.concat(df_list)
-    # if any(df.index.duplicated()):
-    #     df = df[~df.index.duplicated(keep='first')]
     df.index = pd.to_datetime(df.index, utc=True).tz_convert(tz=tz)
-
     return df
 
 
