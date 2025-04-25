@@ -200,6 +200,12 @@ def monthly_summary_subplots(
     pvlnames = [f"{i}_PVLib" for i in invnames]
 
     # combine inverter, meter, and pvlib data
+    data_freq = "1min"
+    if dfp.index[1] - dfp.index[0] > pd.Timedelta(minutes=1):
+        data_freq = "1h"
+        dfi = dfi.resample(data_freq).mean()
+        dfm = dfm.resample(data_freq).mean()
+
     df = dfi.join(dfm).join(dfp).copy()
 
     # rename "Actual_MW" column to "Inv_Total_MW'
@@ -313,7 +319,10 @@ def monthly_summary_subplots(
     htemplate_sc = "<b>%{fullData.name}</b><br>POA: %{x:.2f} kW/m2<br>Power: %{y:.2f} kW<br><i>%{customdata|%Y-%m-%d %H:%M}</i><extra></extra>"
 
     # ROW 1: scatter plot -- actual v. possible v. meter
-    df_ = df.resample("15min").mean().copy()
+    if data_freq == "1h":
+        df_ = df.resample("15min").mean().copy()
+    else:
+        df_ = df.copy()
     p1_cols = [poss_col, act_col, pi_col]
     p1_opacity = [0.3, 1, 0.9]
     p1_markers = [
@@ -362,7 +371,10 @@ def monthly_summary_subplots(
     )
 
     # resample to hourly for remaining subplots
-    dfH = df.resample("h").mean().copy()
+    if data_freq == "1min":
+        dfH = df.resample("h").mean().copy()
+    else:
+        dfH = df.copy()
 
     # add utility meter data if exists (use hourly poa data for trace)
     if site in dfu.columns:
@@ -439,7 +451,10 @@ def monthly_summary_subplots(
 
     # ROW 2, COL 2: stacked bar charts -- daily generation
     bar_cols = [poss_col, act_col, pi_col]
-    dfbar = df[bar_cols].resample("h").mean().resample("D").sum().copy()
+    if data_freq == "1min":
+        dfbar = df[bar_cols].resample("h").mean().resample("D").sum().copy()
+    else:
+        dfbar = df[bar_cols].resample("D").sum().copy()
     bar_max = dfbar.max().max() * 1.05  # used for yaxis in layout
     dfbar = dfbar.rename_axis("Date").reset_index(drop=False)
 
