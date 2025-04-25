@@ -1,25 +1,27 @@
 import datetime as dt
 import numpy as np
 import pandas as pd
-from pathlib import Path
-import pvlib
+from pvlib.irradiance import complete_irradiance, dirint, get_extra_radiation, get_total_irradiance
 from pvlib.location import Location
 from pvlib.modelchain import ModelChain
-from pvlib.pvsystem import Array, FixedMount, PVSystem, SingleAxisTrackerMount
+from pvlib.pvsystem import Array, FixedMount, PVSystem, retrieve_sam, SingleAxisTrackerMount
+from pvlib.solarposition import get_solarposition
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
+from pvlib.tracking import singleaxis
 
 from ..dataquery.external import load_noaa_weather_data, query_DTN
-from ..utils import oemeta, oepaths
+from ..utils import oemeta
 from ..utils.datetime import (
     create_localized_index,
     create_naive_index,
     localize_naive_datetimeindex,
     remove_tzinfo_and_standardize_index,
 )
+from ..utils.helpers import quiet_print_function
 
 # define constants/reference parameters
-CEC_INVERTERS = pvlib.pvsystem.retrieve_sam("cecinverter")
-CEC_MODULES = pvlib.pvsystem.retrieve_sam("CECmod")
+CEC_INVERTERS = retrieve_sam("cecinverter")
+CEC_MODULES = retrieve_sam("CECmod")
 TEMPERATURE_PARAMETERS = TEMPERATURE_MODEL_PARAMETERS["sapm"]["open_rack_glass_polymer"]
 
 # TODO: move parameters to metadata file
@@ -45,11 +47,18 @@ Paco_adjustments = {
 }
 
 
-def get_site_model_losses(site, q=True):
-    losses = oemeta.data["Losses"].get(site)
+def site_location_metadata(site):
+    alt = oemeta.data["Altitude"].get(site)
+    lat, lon = oemeta.data["LatLong"].get(site)
+    tz = oemeta.data["TZ"].get(site)
+    return alt, lat, lon, tz
 
+
+def get_site_model_losses(site, q=True):
+    """Returns losses to be applied in pvlib model."""
     current_year = dt.date.today().year
     site_cod = oemeta.data["COD"].get(site)
+    losses = oemeta.data["Losses"].get(site)
     degradation = oemeta.data["Losses"]["Degradation"].get(site)
 
     system_loss_degradation = round((100 - ((current_year - site_cod) * degradation)) / 100, 2)
@@ -58,7 +67,7 @@ def get_site_model_losses(site, q=True):
     system_loss_module_quality = (100 - losses["quality"]) / 100
     system_loss_module_mismatch = (100 - losses["mismatch"]) / 100
     system_loss_LID = (100 - losses["lid"]) / 100
-    system_losses_Array = np.product(
+    system_losses_Array = np.prod(
         [
             system_loss_degradation,
             system_loss_shading,
@@ -115,6 +124,15 @@ def get_site_location(site: str):
     lat, lon = oemeta.data["LatLong"].get(site)
     alt = oemeta.data["Altitude"].get(site)
     return Location(lat, lon, tz, alt, site)
+
+
+def get_pvlib_solar_position(site, datetime_index):
+    """returns dataframe with azimuth, zenith, etc."""
+    lat, lon = oemeta.data["LatLong"].get(site)
+    idx = datetime_index + pd.Timedelta(minutes=30)
+    solar_position = get_solarposition(idx, lat, lon)
+    solar_position.index = datetime_index
+    return solar_position
 
 
 def get_inverter_names(site):
@@ -189,7 +207,7 @@ def get_surface_parameters(site, df_met):
     if dict_inv.get("Racking Type") != "Tracker":  # same for all inv
         return racking_tilt, 180
 
-    tracking_profile = pvlib.tracking.singleaxis(
+    tracking_profile = singleaxis(
         df_met["apparent_zenith"],
         df_met["azimuth"],
         max_angle=racking_tilt,
@@ -199,10 +217,12 @@ def get_surface_parameters(site, df_met):
     return tracking_profile["surface_tilt"], tracking_profile["surface_azimuth"]
 
 
-def get_inverter_configs(site):
+def get_inverter_configs(site, inv_names):
     design_db = design_database(site)
     inv_configs = []
-    for dict_inv in design_db.values():
+    for inv, dict_inv in design_db.items():
+        if inv not in inv_names:
+            continue
         inv_arrays = []  # init
         inv_type = dict_inv["Inverter Type (CEC)"]
         inv_params = get_inverter_parameters(site, inv_type)
@@ -230,7 +250,7 @@ def get_inverter_configs(site):
 
             inv_arrays.extend(cmb_arrays)
 
-        inv_configs.append(PVSystem(arrays=inv_arrays, inverter_parameters=inv_params))
+        inv_configs.append(PVSystem(arrays=inv_arrays, inverter_parameters=inv_params, name=inv))
 
     return inv_configs
 
@@ -249,229 +269,219 @@ def load_pvlib_clearsky(site, start, end, freq="1min"):
     return dfSUN
 
 
-def load_pvlib_noaa_data(site, start, end, freq="1min", q=True):
-    """Loads NOAA weather data (hourly)"""
-    df_ = load_noaa_weather_data(site, start, end, freq=freq, q=q)
-    dfNOAA = remove_tzinfo_and_standardize_index(df_)  # hourly
-
-    if freq == "1min":
-        naive_index = create_naive_index(start, end, freq)
-        dfNOAA = dfNOAA.resample(freq).ffill()
-        dfNOAA = dfNOAA.reindex(naive_index)
-
-    return dfNOAA
+def dtn_data_requires_dst_shift(df):
+    """checks for march dst condition in df to determine whether shift is needed"""
+    if 3 not in df.index.month:
+        return False
+    return len(df.index.strftime("%z").unique()) > 1
 
 
-def query_dtn_meteo_data(site, start, end, freq="1min", q=True):
-    """Queries meteo data from DTN for use in pvlib model (when df_met not provided)
+def apply_dst_shift_to_dtn_data(df_dtn):
+    """applies shift for march dst data queried from dtn"""
+    df = df_dtn.copy()
+    df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
+    df_dates["offset"] = df_dates.index.strftime("%z")
+    tz_offsets = list(df_dates["offset"].unique())
+    shift_date = df_dates.loc[df_dates["tz_offset"].eq(tz_offsets[0])].index[-1]
+    shifted = df.index >= shift_date
+    for col in df.columns:
+        df.loc[shifted, col] = df.loc[shifted, col].shift(1)
+    return df
+
+
+def query_dtn_meteo_data(
+    site: str,
+    start_date: str,
+    end_date: str,
+    keep_tz: bool = True,
+    q: bool = True,
+):
+    """Queries meteo data from DTN for use in pvlib model (when df_met not provided).
 
     Parameters
     ----------
     site : str
         name of solar site
-    start : str
+    start_date : str
         start date for query; format = '%Y-%m-%d'
-    end : str
+    end_date : str
         end date for query; format = '%Y-%m-%d'
+    keep_tz : bool, optional
+        whether to keep or remove site timezone information from index
     q : bool, optional
         quiet parameter, by default True (i.e. no printouts)
-    """
-    # get location metadata
-    tz = oemeta.data["TZ"].get(site)
-    lat, lon = oemeta.data["LatLong"].get(site)
 
+    Returns
+    -------
+    pandas.DataFrame
+        A dataframe with datetime index and columns for DTN data and solar position.
+    """
     # run dtn query
+    _, lat, lon, tz = site_location_metadata(site)
     interval = "hour"
     fields = ["airTemp", "shortWaveRadiation", "windSpeed"]
-    start_date = pd.Timestamp(start).floor("D")
-    end_date = pd.Timestamp(end).ceil("D") + pd.Timedelta(hours=1)  # add hour for upsample to min
-    df = query_DTN(lat, lon, start_date, end_date, interval, fields, tz=tz, q=q)
-    # new_columns = ["DTN_temp_air", "DTN_ghi", "DTN_wind_speed"]
-    # df = df[fields].rename(columns=dict(zip(fields, new_columns)))
+    start = pd.Timestamp(start_date).floor("D")
+    end = pd.Timestamp(end_date).ceil("D") + pd.Timedelta(hours=1)  # add hour for upsample to min
+    df = query_DTN(lat, lon, start, end, interval, fields, tz=tz, q=q)
+    df = df.rename(columns=dict(zip(fields, ["dtn_air_temp", "dtn_ghi", "dtn_wind_speed"])))
 
-    # apply ghi adjustment factor (if exists)
-    # GHI_ADJ = oemeta.data["DTN_GHI_adj"].get(site)
-    # if GHI_ADJ is not None:
-    #     df["DTN_ghi"] = df["DTN_ghi"].mul(GHI_ADJ)
+    # add solar position data
+    solar_position = get_pvlib_solar_position(site, df.index.copy())
+    df = df.join(solar_position)
 
-    # TODO: determine whether the following lines are necessary
-    # calculate solar position for shifted timestamps
-    idx = df.index + pd.Timedelta(30, unit="min")
-    solar_position = pvlib.solarposition.get_solarposition(idx, lat, lon)
-    solar_position.index = df.index  # but still report the values with original timestamps
-    df = pd.merge(df, solar_position, left_index=True, right_index=True)
-
-    # transposition
-    dirint = pvlib.irradiance.dirint(
-        df["shortWaveRadiation"],
-        df["apparent_zenith"].values,
-        df.index,
-        max_zenith=85,
-    )
-    dirint = dirint.rename("dni_dirint")
-    df_disc = pvlib.irradiance.complete_irradiance(
+    # use dirint method to get decomposed irradiance (ghi, dhi, dni)
+    df_dirint = complete_irradiance(
         solar_zenith=df["apparent_zenith"],
-        ghi=df["shortWaveRadiation"],
-        dni=dirint,
+        ghi=df["dtn_ghi"],
+        dni=dirint(df["dtn_ghi"], df["apparent_zenith"], df.index, max_zenith=85),
         dhi=None,
     )
+    df[["dhi_raw", "dni_raw"]] = df_dirint[["dhi", "dni"]].copy()
+    df["dni_extra"] = get_extra_radiation(df.index)
+    df = df.rename(columns={"dtn_ghi": "ghi_raw"})
 
-    df_extra_dni = pvlib.irradiance.get_extra_radiation(df_disc.index)
-    df_extra_dni = df_extra_dni.rename("dni_extra")
+    # check for march dst condition & apply shift if necessary
+    if dtn_data_requires_dst_shift(df):
+        df = apply_dst_shift_to_dtn_data(df)
 
-    dfDTN = pd.concat([df_disc, df, df_extra_dni], axis=1)
-    dfDTN = dfDTN.drop(columns=["ghi"])
-    dfDTN = dfDTN.rename(
-        columns={
-            "dni": "dni_raw",
-            "dhi": "dhi_raw",
-            "airTemp": "temp_air",
-            "windSpeed": "wind_speed",
-            "shortWaveRadiation": "ghi_raw",
-        }
-    )
+    if not keep_tz:
+        df = remove_tzinfo_and_standardize_index(df)
 
-    # apply losses
-    # losses_array, dc_losses, _ = get_site_model_losses(site)
-    # for col in ["ghi", "dni", "dhi"]:
-    #     dfDTN[col] = dfDTN[f"{col}_raw"].mul(losses_array).mul(dc_losses)
-
-    dfDTN = remove_tzinfo_and_standardize_index(dfDTN)
-    if freq == "1min":
-        naive_index = create_naive_index(start, end, freq)
-        dfDTN = dfDTN.resample(freq).ffill()
-        dfDTN = dfDTN.reindex(naive_index)
-
-    return dfDTN
+    data_tz = tz if keep_tz else None
+    expected_index = pd.date_range(start_date, end_date, freq="h", inclusive="left", tz=data_tz)
+    df = df.reindex(expected_index)
+    return df
 
 
-def get_poa_from_dtn_ghi(site, start, end, freq="1min", keep_tzinfo=False, q=True):
-    """Generates POA time series data via a transposition model using external data"""
-    qprint = lambda msg, end="\n": None if q else print(msg, end=end)
+def get_poa_from_ghi(site, df):
+    """Calculates irradiance values using the 'perez' sky diffuse model
 
-    # get external weather data
-    args = [site, start, end]
-    df_dtn = query_dtn_meteo_data(*args, freq=freq, q=q)
-    df_sun = load_pvlib_clearsky(*args, freq=freq)
+    Parameters
+    ----------
+    site : str
+        Name of site.
+    df : pandas.DataFrame
+        Dataframe with DTN data and solar position data.
 
-    meteo = df_dtn.copy()
-
-    # combine and add timezone info
-    tz = oemeta.data["TZ"].get(site)
-    dropcols = ["apparent_elevation", "elevation", "equation_of_time"]
-    df_naive = df_sun.drop(columns=dropcols).join(df_dtn)
-    df = localize_naive_datetimeindex(df_naive, tz=tz)
-
-    # transposition models (DTN GHI to POA)
-    qprint("Transposing DTN GHI to POA...", end=" ")
-    disc = pvlib.irradiance.disc(
-        ghi=df["DTN_ghi"],
-        solar_zenith=df["zenith"],
-        datetime_or_doy=df.index,
-        max_zenith=90,
-        max_airmass=2,
-    )
-    df_disc = pvlib.irradiance.complete_irradiance(
-        solar_zenith=df["apparent_zenith"],
-        ghi=df["DTN_ghi"],
-        dni=disc["dni"],
-        dhi=None,
-        dni_clear=df["dni_clearsky"],
-    )
-    df_disc = df_disc.rename(columns={"dni": "DTN_dni", "dhi": "DTN_dhi"})
-    df_disc = df_disc.drop(columns=["ghi"])
-    df_disc["dni_extra"] = pvlib.irradiance.get_extra_radiation(
-        datetime_or_doy=df_disc.index,
-        method="nrel",
-        epoch_year=df_disc.index.year[0],
-    )
-
-    # add to main dataframe
-    df = df.join(df_disc)
-
+    Returns
+    -------
+    pandas.DataFrame
+        A dataframe with columns: 'poa_global', 'poa_direct', 'poa_diffuse',
+        'poa_sky_diffuse', 'poa_ground_diffuse'
+    """
     # get racking parameters (only uses df for sites with trackers)
     surface_tilt, surface_azimuth = get_surface_parameters(site, df)
-
-    # transpose to POA
-    df_poa = pvlib.irradiance.get_total_irradiance(
+    total_irrad = get_total_irradiance(
         surface_tilt=surface_tilt,
         surface_azimuth=surface_azimuth,
-        dni=df["DTN_dni"],
-        ghi=df["DTN_ghi"],
-        dhi=df["DTN_dhi"],
+        dni=df["dni_raw"],
+        ghi=df["ghi_raw"],
+        dhi=df["dhi_raw"],
         dni_extra=df["dni_extra"],
         solar_zenith=df["apparent_zenith"],
         solar_azimuth=df["azimuth"],
         model="perez",
     )
-    df_poa = df_poa.fillna(value=0)
-    df = df.join(df_poa)
-    qprint("done!")
+    total_irrad = total_irrad.fillna(value=0)
+    return total_irrad
 
 
-"""LEFT OFF HERE 02-19"""
+def run_pvlib_model(
+    site: str,
+    datetime_index: pd.DatetimeIndex,
+    poa_data: pd.Series = None,
+    inverter_names: list = None,
+    q: bool = True,
+):
+    """Runs pvlib model using parameters for the given site.
+        -> uses poa_data if provided, otherwise queries dtn ghi and transposes to poa
+        -> if poa_data is provided, the index must match the datetime_index
+        -> if inverter_names not provided, model will run for all site inverters
 
+    Parameters
+    ----------
+    site : str
+        The name of the solar site. Used to determine model parameters.
+    datetime_index : pd.DatetimeIndex
+        The index to use; determines the start/end dates and frequency of the output data.
+    poa_data : pd.Series, optional
+        The POA data to use for the effective_irradiance in the model. If not provided,
+        will query DTN data for site location and use POA transposed from GHI. Defaults to None.
+        Series must be named either "POA" or "POA_DTN", depending on the source of the data.
+    inverter_names : list, optional
+        The names of the inverters for which to run the pvlib model. If not provided,
+        the model will run for all site inverters. Defaults to None.
+    q : bool, optional
+        Quiet parameter; when False, enables status printouts. Defaults to True.
 
-def run_pvlib_model(site, df_met=None, start_date=None, end_date=None, q=True):
-    qprint = lambda msg, end="\n": None if q else print(msg, end=end)
-    if all(x is None for x in [df_met, start_date, end_date]):
-        qprint("Error: must provide either df_met, or start/end dates")
-        return
-    if df_met is None:
-        if not all(isinstance(d, str) for d in [start_date, end_date]):
-            qprint("Error: start/end times must be strings of format %Y-%m-%d")
-            return
-        try:
-            start, end = map(pd.Timestamp, [start_date, end_date])
-        except Exception as e:
-            qprint(f"Error with start/end dates: {e}")
-            return
+    Returns
+    -------
+    pd.DataFrame
+        A dataframe with a datetime index, the POA data used in the model, and the modeled
+        generation data for the requested inverters. The POA column will be "POA" or "POA_DTN".
+    """
+    qprint = quiet_print_function(q=q)
+    if datetime_index.inferred_freq is None:
+        raise ValueError("Could not infer frequency from provided datetime index.")
 
-        qprint("Querying DTN data")
-        # df_met = run_pvlib_DTN_query(site, start, end)
+    if poa_data is not None:
+        if not poa_data.index.difference(datetime_index).empty:
+            raise ValueError("Index of provided POA data does not match datetime_index.")
 
-        # transpose poa from ghi
-        surface_tilt, surface_azimuth = get_surface_parameters(site, df_met)
-        df_poa = pvlib.irradiance.get_total_irradiance(
-            surface_tilt=surface_tilt,
-            surface_azimuth=surface_azimuth,
-            dni=df_met["dni"],
-            ghi=df_met["ghi"],
-            dhi=df_met["dhi"],
-            dni_extra=df_met["dni_extra"],
-            solar_zenith=df_met["apparent_zenith"],
-            solar_azimuth=df_met["azimuth"],
-            model="perez",
-        )
-        df_met["POA_DTN"] = df_poa["poa_global"].copy()
-        df_met["effective_irradiance"] = df_poa["poa_global"]  # .mul(losses_array)
+    freq_timedelta = datetime_index.to_series().diff().max()
+    start_datetime = datetime_index.min()
+    end_datetime = datetime_index.max()
+
+    if poa_data is None:  # use DTN data (overrides frequency to hourly)
+        POA_COL = "POA_DTN"
+        date_str = lambda d: d.strftime("%Y-%m-%d")
+        start_date = date_str(start_datetime.floor("D"))
+        end_date = date_str(end_datetime.ceil("D"))
+        keep_tz = start_datetime.tzinfo is not None
+
+        # query DTN data (output includes solar position data), then run POA transposition with GHI
+        qprint("Querying DTN weather data")
+        df_meteo = query_dtn_meteo_data(site, start_date, end_date, keep_tz=keep_tz)
+        df_poa = get_poa_from_ghi(site, df_meteo)
+        df_meteo[POA_COL] = df_poa["poa_global"].copy()
 
     else:
-        # verify/format df_met
-        using_dtn = False
-        df_met = pd.DataFrame()  # placeholder
+        POA_COL = poa_data.name
+        if "DTN" in POA_COL and freq_timedelta != pd.Timedelta(hours=1):
+            qprint("Detected resampled DTN data - reverting to native hourly frequency.")
+            poa_data = poa_data.resample("h").mean()  # could happen from processed met file
+            freq_timedelta = pd.Timedelta(hours=1)
+            datetime_index = poa_data.index.copy()
 
-    if df_met.empty:
-        qprint("Error: no valid meteo data (df_met is empty)")
-        return
+        # get solar position data
+        df_meteo = get_pvlib_solar_position(site, datetime_index)
+        df_meteo[POA_COL] = poa_data.copy()
 
-    # get metadata
+    # add effective_irradiance column for use in model
+    array_losses, dc_losses, _ = get_site_model_losses(site)
+    df_meteo["effective_irradiance"] = df_meteo[POA_COL].mul(array_losses).mul(dc_losses).copy()
+
+    # get inverter names and associated configurations
+    if inverter_names is None:
+        inverter_names = get_inverter_names(site)
+
+    inverter_configs = get_inverter_configs(site, inverter_names)
+    n_configs = len(inverter_configs)
     location = get_site_location(site)
 
-    # run models
-    inv_names = get_inverter_names(site)
-    inv_configs = get_inverter_configs(site)
-
-    df_list = []
-    for inv, config in zip(inv_names, inv_configs):
-        meteo_mc = [df_met] * len(config.arrays)
+    pvlib_results = []  # list of pd.Series
+    for n, config in enumerate(inverter_configs):
+        qprint(
+            f"Running model (part {n + 1} of {n_configs})",
+            end="\r" if (n + 1) < n_configs else "\n",
+        )
+        meteo_mc = [df_meteo] * len(config.arrays)
         mc = ModelChain(config, location, aoi_model="physical", spectral_model="no_loss")
         mc.run_model_from_effective_irradiance(meteo_mc)
+        results = mc.results.ac.div(1e3).rename(f"{config.name}_Possible_Power")
+        pvlib_results.append(results)
+    qprint(f"DONE. (note: {POA_COL = })")
 
-        # extract ac results
-        ac_results = mc.results.ac / 1e3
-        df_ = pd.DataFrame({f"{inv}_Possible_Power": ac_results.values}, index=ac_results.index)
-        df_list.append(df_.copy())
-
-    df = pd.concat(df_list, axis=1, ignore_index=False)
-    return df
+    df_pvlib = pd.concat(pvlib_results, axis=1)
+    df_pvlib.insert(0, POA_COL, df_meteo[POA_COL].copy())
+    return df_pvlib
