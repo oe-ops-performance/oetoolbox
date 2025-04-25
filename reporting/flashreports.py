@@ -190,7 +190,7 @@ def generate_monthlyFlashReport(
     # relevant data files in flash report folder
     inv_fileids = ["PIQuery", "Inverters", "csv"]
     ppc_fileids = ["PIQuery", "PPC", "csv"]
-    pvlib_fileids = [f"PVLib_InvAC_{sitename}", "csv"]  # prev. ['PVLib','InvAC','Hourly','csv']
+    pvlib_fileids = [f"PVLib_InvAC", sitename, "csv"]  # prev. ['PVLib','InvAC','Hourly','csv']
 
     def matchingfiles(path, ids_):
         files = [f for f in os.listdir(path) if all(i in f for i in ids_)]
