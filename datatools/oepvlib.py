@@ -347,6 +347,9 @@ def run_pvlib_model(
                 mfp = max((fp.stat().st_ctime, fp) for fp in mfpaths)[1]
                 DF_Met = pd.read_csv(mfp)
                 qprint(f'    >> loaded meteo file: "{mfp.name}"')
+                if "Average_Across_POA" not in DF_Met.columns:
+                    DF_Met = None
+                    qprint("no poa sensor data found; using dtn")
 
             i_files = filtered_files(["Inverters", "PIQuery", ".csv"])
             if i_files:
