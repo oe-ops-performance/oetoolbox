@@ -197,9 +197,7 @@ def get_monthly_ghi_total(site, year, month, force_dtn=False):
     met_fpath = oepaths.latest_file(list(report_dir.glob("PIQuery*MetStations*PROCESSED*.csv")))
     if isinstance(met_fpath, Path) and not force_dtn:
         df = pd.read_csv(met_fpath, index_col=0, parse_dates=True)
-        ghi_total = df["Processed_GHI"].sum() / 1e3
-        if pd.infer_freq(df.index) == pd.Timedelta(minutes=1):
-            ghi_total = ghi_total / 60
+        ghi_total = df["Processed_GHI"].sum() / 1e3 / 60  # minute-level data
     else:
         # query DTN ghi
         tz = oemeta.data["TZ"].get(site)
@@ -213,7 +211,8 @@ def get_monthly_ghi_total(site, year, month, force_dtn=False):
         dtn_ghi_adj = oemeta.data["DTN_GHI_adj"].get(site)
         if dtn_ghi_adj:
             df["DTN_GHI"] = df["DTN_GHI"].mul(dtn_ghi_adj)
-    return df
+        ghi_total = df["DTN_GHI"].sum()
+    return ghi_total
 
 
 KPI_COLUMN_DICT = {

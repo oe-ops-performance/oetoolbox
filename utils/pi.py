@@ -243,11 +243,12 @@ class PIDataset(Dataset):
         """Returns AFTimeSpan object for specifying query frequency/interval"""
         return AFTimeSpan.Parse(freq)
 
-    def get_date_range_list(self, start_date: str, end_date: str):
-        """Returns list of sub date ranges if total duration exceeds 40 days"""
+    def get_date_range_list(self, start_date: str, end_date: str, n_days: int = 10):
+        """Returns list of sub date ranges for query if longer than 10 days"""
         start, end = map(pd.Timestamp, [start_date, end_date])
         total_days = (end - start).days
-        n_days = 40 if total_days > 40 else total_days
+        if total_days < n_days:
+            n_days = total_days
         return segmented_date_ranges(start, end, n_days)
 
     def format_pi_dataframe(
@@ -409,7 +410,7 @@ class PIDataset(Dataset):
         if item_type == "pipoint":
             return {}
 
-    def _check_for_bad_data(self, values, flags):
+    def _check_for_bad_data(self, values, tstamps, flags):
         """Checks outputs of .GetValueArrays() function in query (returns True if data is bad)"""
         condition_1 = (len(list(values)) == 1) and (list(flags)[0].ToString() == "Bad")
         condition_2 = not any(isinstance(x, Number) for x in list(values))
@@ -457,11 +458,13 @@ class PIDataset(Dataset):
         # get AFValues object from IDictionary (.Values method returns an iterator)
         af_values = [vals for vals in query_output.Values].pop()
         values, tstamps, flags = af_values.GetValueArrays()
-        data = np.nan if self._check_for_bad_data(values, flags) else list(values)
-        if data_format == "wide":
-            return pd.DataFrame({item_name: data}, index=list(tstamps))
+        if self._check_for_bad_data(values, tstamps, flags):
+            return pd.DataFrame()
 
-        df_ = pd.DataFrame({"Value": data}, index=list(tstamps))
+        if data_format == "wide":
+            return pd.DataFrame({item_name: list(values)}, index=list(tstamps))
+
+        df_ = pd.DataFrame({"Value": list(values)}, index=list(tstamps))
         if item_type == "pipoint":
             df_["PIPoint"] = item_name
             return df_

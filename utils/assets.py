@@ -8,7 +8,12 @@ from ..datatools.meteoqc import run_meteo_backfill
 from ..datatools.oepvlib import run_pvlib_model
 from ..datatools.qcutils import run_auto_qc
 from ..reporting.flashreports import generate_monthlyFlashReport
-from ..reporting.tools import get_query_attribute_paths
+from ..reporting.functions import (
+    get_kpis_from_flashreport,
+    get_kpis_from_tracker,
+    get_solar_budget_values,
+)
+from ..reporting.tools import get_query_attribute_paths, get_solar_budget_values
 
 
 class PISite:
@@ -84,16 +89,33 @@ class PISite:
             path_parts = ["Gas Fleet"]
         else:
             path_parts = ["Renewable Fleet", f"{self.fleet.capitalize()} Assets"]
-        return "\\".join(PI_DATABASE_PATH, *path_parts, self.name)
+        return "\\".join([PI_DATABASE_PATH, *path_parts, self.name])
 
     def subassets_by_asset(self, asset_group: str):
-        """Returns a dictionary with asset names as keys and list of subasset names as values"""
+        """Returns a list or dictionary with asset names as keys and list of subasset names as values"""
         if asset_group not in self.asset_groups:
             return {}
-        return {
-            asset: dict_.get(f"{asset}_Subassets")
-            for asset, dict_ in self.af_dict[asset_group][f"{asset_group}_Assets"].items()
-        }
+        asset_dict = self.af_dict[asset_group][f"{asset_group}_Assets"]
+        if not asset_dict:
+            return []
+        asset0 = [*asset_dict][0]
+        if not asset_dict[asset0].get(f"{asset0}_Subassets"):
+            return list(asset_dict.keys())
+
+        asset_hierarchy = {}
+        for asset, dict_ in asset_dict.items():
+            subasset_dict = dict_.get(f"{asset}_Subassets")
+            subasset0 = [*subasset_dict][0]
+            if not subasset_dict[subasset0].get(f"{subasset0}_Subassets"):
+                asset_hierarchy[asset] = list(subasset_dict.keys())
+                continue
+
+            asset_hierarchy[asset] = {}
+            for subasset, dict2_ in subasset_dict.items():
+                subasset_dict2 = dict2_.get(f"{subasset}_Subassets")
+                asset_hierarchy[asset][subasset] = list(subasset_dict2.keys())
+
+        return asset_hierarchy
 
     def pi_attributes(self, asset_group: str, asset_name: str = "", subasset_name: str = ""):
         """Returns list of attribute names for a given PI element"""
@@ -139,13 +161,39 @@ class SolarSite(PISite):
         return oemeta.data["Project_Design_Database"].get(self.name)
 
     @property
-    def query_attributes(self) -> list:
+    def query_attributes(self) -> dict:
         """Returns dictionary with asset groups as keys and list of attribute paths as values"""
         try:
             attribute_dict = get_query_attribute_paths(self.name)
         except:
             attribute_dict = {}
         return attribute_dict
+
+    @property
+    def existing_report_periods(self):
+        """Returns list of (year, month) tuples for which a site flashreport folder exists"""
+        is_yyyymm = lambda fp: len(fp.name) == 6 and all(x.isdigit() for x in fp.name)
+        get_year_month = lambda fp: (int(fp.name[:4]), int(fp.name[-2:]))
+
+        year_month_folders = list(filter(is_yyyymm, oepaths.flashreports.iterdir()))
+        year_month_tuples = list(sorted(map(get_year_month, year_month_folders)))
+        return [(y, m) for y, m in year_month_tuples if self.flashreport_folder(y, m).exists()]
+
+    @property
+    def data_files_by_period(self):
+        """Returns a dictionary with strings 'YYYYMM' as keys and list of available PI query
+        filepaths (for that reporting period) as values (ascending order)
+        """
+        return {
+            f"{year}{month:02d}": self.get_flashreport_files(year, month)["query"]
+            for year, month in self.existing_report_periods
+            if len(self.get_flashreport_files(year, month)["query"]) > 0
+        }
+
+    @property
+    def existing_report_periods_with_data(self):
+        """Returns list of (year, month) tuples for periods where site has query data files"""
+        return [(int(key_[:4]), int(key_[-2:])) for key_ in self.data_files_by_period.keys()]
 
     # instance method
     def get_flashreport_files(self, year: int, month: int) -> dict:
@@ -163,7 +211,8 @@ class SolarSite(PISite):
         output_dict = {key_: get_files(str_) for key_, str_ in glob_str_dict.items()}
         captured_files = list(chain.from_iterable(output_dict.values()))
         other_files = [fp for fp in dir.iterdir() if fp.is_file() and fp not in captured_files]
-        output_dict.update({"other": oepaths.sorted_filepaths(other_files)})
+        if other_files:
+            output_dict.update({"other": oepaths.sorted_filepaths(other_files)})
         return output_dict
 
     # instance method
@@ -219,6 +268,32 @@ class SolarSite(PISite):
             return []
         return [fp for fp in query_fp_list if asset_group in fp.name]
 
+    # functions to get kpis and summary metrics
+    def get_monthly_kpis(self, year: int, month: int, source: str):
+        """Returns dataframe of kpis loaded from specified source file.
+
+        Parameters
+        ----------
+        year : int
+            The reporting year
+        month : int
+            The reporting month
+        source : str
+            The file from which to load kpis; either "flashreport" or "tracker"
+
+        Returns
+        -------
+        pandas Dataframe
+        """
+        if source not in ["flashreport", "tracker"]:
+            raise ValueError("Invalid source. Must be either 'flashreport' or 'tracker'.")
+
+        if source == "tracker":
+            df = get_kpis_from_tracker(sitelist=[self.name], yearmonth_list=[(year, month)])
+        else:
+            df = get_kpis_from_flashreport(site=self.name, year=year, month=month)
+        return df
+
     def run_flashreport_qc(
         self, year: int, month: int, asset_group: str, save: bool = False, **kwargs
     ):
@@ -230,13 +305,13 @@ class SolarSite(PISite):
 
         query_filepaths = self.get_data_filepaths(year, month, asset_group)
         is_raw_fp = lambda fp: not any(x in fp.name.casefold() for x in ["cleaned", "processed"])
-        raw_data_filepath = oepaths.latest_file(list(filter(is_raw_fp, query_filepaths)))
-        df_raw = pd.read_csv(raw_data_filepath, index_col=0, parse_dates=True)
+        raw_filepath = oepaths.latest_file(list(filter(is_raw_fp, query_filepaths)))
+        df_raw = pd.read_csv(raw_filepath, index_col=0, parse_dates=True)
         df_clean = run_auto_qc(df_raw=df_raw, site=self.name, **kwargs)
 
         if save:
-            new_filestem = raw_data_filepath.stem + "_CLEANED"
-            savepath = raw_data_filepath.with_stem(new_filestem)
+            new_filestem = raw_filepath.stem + "_CLEANED"
+            savepath = raw_filepath.with_stem(new_filestem)
             df_clean.to_csv(oepaths.validated_savepath(savepath))
 
         return df_clean
@@ -292,28 +367,68 @@ class SolarSite(PISite):
             return output[0]
         return
 
-    @property
-    def existing_report_periods(self):
-        """Returns list of (year, month) tuples for which a site flashreport folder exists"""
-        is_yyyymm = lambda fp: len(fp.name) == 6 and all(x.isdigit() for x in fp.name)
-        get_year_month = lambda fp: (int(fp.name[:4]), int(fp.name[-2:]))
-
-        year_month_folders = list(filter(is_yyyymm, oepaths.flashreports.iterdir()))
-        year_month_tuples = list(sorted(map(get_year_month, year_month_folders)))
-        return [(y, m) for y, m in year_month_tuples if self.flashreport_folder(y, m).exists()]
-
-    @property
-    def data_files_by_period(self):
-        """Returns a dictionary with strings 'YYYYMM' as keys and list of available PI query
-        filepaths (for that reporting period) as values (ascending order)
-        """
+    def get_budget_values(self, year: int, month: int):
+        """Returns dictionary with budgeted POA, Production, and Curtailment from KPI tracker"""
+        budget_vals = get_solar_budget_values(year, month).set_index("Project").loc[self.name]
+        matching_column = lambda key: [c for c in budget_vals.index if key in c.casefold()].pop()
         return {
-            f"{year}{month:02d}": self.get_flashreport_files(year, month)["query"]
-            for year, month in self.existing_report_periods
-            if len(self.get_flashreport_files(year, month)["query"]) > 0
+            key: budget_vals.loc[matching_column(key)]
+            for key in ["poa", "production", "curtailment"]
         }
 
-    @property
-    def existing_report_periods_with_data(self):
-        """Returns list of (year, month) tuples for periods where site has query data files"""
-        return [(int(key_[:4]), int(key_[-2:])) for key_ in self.data_files_by_period.keys()]
+    # def calculate_monthly_variance_kpis(self, year: int, month: int, meter_total: float = None):
+    #     """Calculates monthly variance KPIs for generation, resource, and availability.
+
+    #     >> data requirements / sources
+    #         - total generation (from historian, or PI meter file) <- use meter_total arg to bypass
+    #         - budget generation (from kpi tracker file)
+    #         - insolation (from PROCESSED met station file, or DTN transposition)
+    #         - curtailment (Comanche only - from curtailment report file)
+
+    #     Parameters
+    #     ----------
+    #     year : int
+    #     month : int
+    #     meter_total : float, optional
+    #         When provided, skips loading of historian file or PI data (for use in loop)
+
+    #     Returns
+    #     -------
+    #     A dictionary with the following format:
+    #         variance_dict = {
+    #             "generation": {"value": variance_val, "%": variance_pct},
+    #             "resource": {"value": variance_val, "%": variance_pct},
+    #             "availability": {"%": variance_pct},
+    #         }
+    #     """
+    #     report_status = self.get_flashreport_status(year, month)
+
+    #     start = pd.Timestamp(year, month, 1)
+    #     end = start + pd.DateOffset(months=1)
+    #     start_date, end_date = map(lambda t: t.strftime("%Y-%m-%d"), [start, end])
+
+    #     # get meter generation
+    #     if meter_total is None:
+    #         df_hist = load_meter_historian(year=year, month=month)
+    #         if self.name in df_hist.columns:
+    #             meter_total = df_hist[self.name].sum()
+    #         elif report_status["qc"].get("Meter"):
+    #             kwargs = dict(asset_group="Meter", start_date=start_date, end_date=end_date)
+    #             dataset = SolarDataset.from_existing_query_files(self.name, **kwargs)
+    #             meter_total = dataset.data.iloc[:, 0].sum() / 60  # minute-level data
+    #         else:
+    #             meter_total = 0.0
+
+    #     # get budget generation
+    #     budget_dict = self.get_budget_values(year, month)
+
+    #     # get insolation
+    #     if report_status["backfill"].get("Met Stations"):
+    #         kwargs2 = dict(asset_group="Met Stations", start_date=start_date, end_date=end_date)
+    #         dataset = SolarDataset.from_existing_query_files(self.name, **kwargs2)
+    #         poacol = "POA" if "POA" in dataset.data.columns else "POA_DTN"
+    #         insolation_total = dataset.data[poacol].sum() / 60  # minute-level data
+    #     else:
+    #         # TODO: add function to get transposed poa from dtn
+    #         pass
+    #     return

@@ -5,14 +5,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from ..utils import oepaths, oemeta
-from ..reporting.tools import (
-    get_ppa_rate,
-    latest_file,
-    load_meter_historian,
-    site_frpath,
-)
+from ..reporting.tools import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
 from ..datatools.meteoqc import transposed_POA_from_DTN_GHI
+from ..datatools.meterhistorian import load_meter_historian, METER_HISTORIAN_FILEPATH
 
 
 def load_PIdatafile(filepath, t1, t2):
@@ -194,7 +190,7 @@ def generate_monthlyFlashReport(
     # relevant data files in flash report folder
     inv_fileids = ["PIQuery", "Inverters", "csv"]
     ppc_fileids = ["PIQuery", "PPC", "csv"]
-    pvlib_fileids = [f"PVLib_InvAC_{sitename}", "csv"]  # prev. ['PVLib','InvAC','Hourly','csv']
+    pvlib_fileids = [f"PVLib_InvAC", sitename, "csv"]  # prev. ['PVLib','InvAC','Hourly','csv']
 
     def matchingfiles(path, ids_):
         files = [f for f in os.listdir(path) if all(i in f for i in ids_)]
@@ -226,9 +222,9 @@ def generate_monthlyFlashReport(
     ppcfile = ppc_files[0] if ppc_files else None
 
     """ GET DTN POA INSOLATION """
-    frpath = site_frpath(sitename, year, month)
+    frpath = oepaths.frpath(year, month, ext="solar", site=sitename)
     met_fpaths = list(frpath.glob("PIQuery_MetStations*PROCESSED*.csv"))
-    met_fp = latest_file(met_fpaths)
+    met_fp = oepaths.latest_file(met_fpaths)
     if not met_fp:
         dtn_start = pd.Timestamp(year, month, 1)
         dtn_end = dtn_start + pd.DateOffset(months=1)
@@ -268,7 +264,7 @@ def generate_monthlyFlashReport(
     """GET METER DATA"""
     # utility meter data (if exists)
     if df_util is None:
-        dfum = load_meter_historian(year=year, month=month)
+        dfum = load_meter_historian(year=year, month=month, dropna=True)
     else:
         dfum = df_util.copy()
 
@@ -293,7 +289,10 @@ def generate_monthlyFlashReport(
             qprint(f"!! No PI meter data found for {sitename} !! - replacing with df of zeros.")
             meterpath = None
     else:
-        meterpath = oepaths.meter_generation_historian
+        meterpath = METER_HISTORIAN_FILEPATH
+        expected_rng = pd.date_range(dfm_.index.min(), dfm_.index.max(), freq="h")
+        if len(expected_rng) != dfm_.shape[0]:
+            dfm_ = dfm_.reindex(expected_rng)  # for DST (historian removes/adds tstamps)
         dfm_ = dfm_.reset_index(drop=True)  # for row numbers when writing to excel
         df_meter = dfm_.copy()
         qprint('Loaded Meter file ------ "Meter_Generation_Historian.xlsm"')

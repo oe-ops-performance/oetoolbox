@@ -347,6 +347,9 @@ def run_pvlib_model(
                 mfp = max((fp.stat().st_ctime, fp) for fp in mfpaths)[1]
                 DF_Met = pd.read_csv(mfp)
                 qprint(f'    >> loaded meteo file: "{mfp.name}"')
+                if "Average_Across_POA" not in DF_Met.columns:
+                    DF_Met = None
+                    qprint("no poa sensor data found; using dtn")
 
             i_files = filtered_files(["Inverters", "PIQuery", ".csv"])
             if i_files:
@@ -510,7 +513,7 @@ def run_pvlib_model(
                 )
             mc.run_model_from_effective_irradiance(meteo_mc)
 
-        elif "ghi" in meteo.columns:
+        elif any(c in meteo.columns for c in ["ghi", "ghi_raw"]):
             qprint("Running model with GHI transposed to POA - config #" + str(n + 1))
             POA_irradiance = pvlib.irradiance.get_total_irradiance(
                 surface_tilt=(
