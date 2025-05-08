@@ -9,6 +9,7 @@ import requests
 
 from ..utils import oemeta
 from ..utils.config import DTN_CREDENTIALS
+from ..utils.helpers import with_retries
 
 
 def segmented_date_ranges(start, end, n_days):
@@ -45,7 +46,8 @@ def request_access_token():
 
 
 # note: 10-day maximum -- this function is called in the main query function "query_DTN" (below)
-def query_DTN_weather_data(latitude, longitude, start, end, interval, fields):
+@with_retries(n_max=5)
+def query_DTN_weather_data(latitude, longitude, start, end, interval, fields, q=True):
     """
     all parameters/fields available for hourly historical data
         airTemp - C, F
@@ -119,15 +121,12 @@ def query_DTN_weather_data(latitude, longitude, start, end, interval, fields):
     response = requests.request("GET", api_request_url, headers=headers, params=query_specs)
     response_dict = json.loads(response.text)
     if "content" not in response_dict:
-        print("!! ERROR !!")
-        df = pd.DataFrame()
-        errors_ = response_dict.get("errors")
-        if errors_:
-            error_dict = errors_[0]
-            [print(f"{key}: {val}") for key, val in error_dict.items()]
-        else:
-            print(response_dict)
+        raise KeyError(
+            f"Error retrieving data from DTN; 'content' not in response; {response_dict}"
+        )
     else:
+        if not q:
+            print("Received valid response from DTN API request.")
         data_dict = response_dict["content"]["items"][0].get("parameters").copy()
         df = pd.DataFrame(data_dict)
     return df
@@ -146,15 +145,12 @@ def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
     qprint(f"\nQuerying DTN weather data...")
     df_list = []
     for i, rng_ in enumerate(daterange_list):
+        qprint(f">> sub-range {i+1} of {len(daterange_list)}")
         start_date, end_date = rng_
         start_, end_ = map(fmt_tstamp, [start_date, end_date])
-        df_ = query_DTN_weather_data(lat, lon, start_, end_, interval, fields)
-        qprint(
-            f">> sub-range {i+1} of {len(daterange_list)}",
-            end="\r" if ((i + 1) < len(daterange_list)) else "\n",
-        )
+        df_ = query_DTN_weather_data(lat, lon, start_, end_, interval, fields, q=q)
         df_list.append(df_)
-    qprint("\nDone!")
+    qprint("DTN query completed successfully.")
 
     df = pd.concat(df_list)
     df.index = pd.to_datetime(df.index, utc=True).tz_convert(tz=tz)
