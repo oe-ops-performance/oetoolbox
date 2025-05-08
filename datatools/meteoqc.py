@@ -42,9 +42,9 @@ def grouped_met_columns(column_names):
 
 group_external_reference_dict = {
     "poa": ["poa_global"],
-    "ghi": ["DTN_ghi"],
-    "ambtemp": ["NOAA_AmbTemp", "DTN_temp_air"],
-    "wind": ["NOAA_WindSpeed", "DTN_wind_speed"],
+    "ghi": ["dtn_ghi"],
+    "ambtemp": ["dtn_temp_air"],
+    "wind": ["dtn_wind_speed"],
 }
 
 # function to generate time series subplots
@@ -77,9 +77,11 @@ def meteo_backfill_subplots(df_, resample=False):
         if pd.Timedelta(inferred_freq) < pd.Timedelta(freq):
             df = df.resample(freq).mean().copy()
     dfcols = list(df.columns)
-    sensor_cols = dfcols[
-        : dfcols.index("Hour")
-    ]  #'Hour' is the first column added in backfill script
+    if "Hour" in dfcols:
+        sensor_cols = dfcols[: dfcols.index("Hour")]
+    else:
+        cln_cols = [(i, col) for i, col in enumerate(df.columns) if col.startswith("Cleaned")]
+        sensor_cols = list(df.columns)[: cln_cols[0][0]]
     grouped_sensor_cols = grouped_met_columns(sensor_cols)
     grp_ID_dict = {
         "poa": "POA",

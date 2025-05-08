@@ -26,9 +26,10 @@ def read_rec_file(filepath, delimiter="\t", q=True):
     if not fpath.exists():
         qprint(f"Error: file not found:\n{str(filepath)}")
         return []
-    if fpath.suffix != ".rec":
+    if fpath.suffix not in [".rec", ".re2"]:
         qprint("Error: unsupported file type/extension")
         return []
+    qprint(f"Loading file: {fpath.name}")
     try:
         with open(filepath, "r") as file:
             records = []

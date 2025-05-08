@@ -1,4 +1,39 @@
-import pandas as pd
+from functools import wraps
+
+
+def with_retries(n_max: int = 5, raise_error: bool = True):
+    """Decorator factory - returns retry decorator and supports additional args.
+    -> to be applied at function definition
+    """
+
+    def decorator_retries(func):
+        """Decorator for retry wrapper"""
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            """Wrapper for running a function with retry logic"""
+            printouts = False
+            if "q" in kwargs:
+                printouts = kwargs.get("q") is False
+            qprint = lambda msg: None if not printouts else print(msg)
+            qprint(f"< Implementing retry logic for function: {func.__name__} >")
+            error_messages = []
+            while len(error_messages) < n_max:
+                try:
+                    output = func(*args, **kwargs)
+                    qprint(f"< Function completed after {len(error_messages) + 1} attempts. >")
+                    return output
+                except Exception as e:
+                    error_messages.append(str(e))
+            if not raise_error:
+                return
+            messages = [f"ERROR {i+1}: {e}" for i, e in enumerate(error_messages)]
+            message_str = "\n".join(messages)
+            raise Exception(f"Failed after {n_max} retries.\n{message_str}")
+
+        return wrapper
+
+    return decorator_retries
 
 
 def quiet_print_function(q: bool):

@@ -1,4 +1,5 @@
 import datetime as dt
+from joblib import Parallel, delayed
 import numpy as np
 import pandas as pd
 from pvlib.irradiance import complete_irradiance, dirint, get_extra_radiation, get_total_irradiance
@@ -9,6 +10,7 @@ from pvlib.solarposition import get_solarposition
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 from pvlib.tracking import singleaxis
 
+from ..datatools.backfill import get_meteo_fpath, load_clean_meteo_file
 from ..dataquery.external import load_noaa_weather_data, query_DTN
 from ..utils import oemeta
 from ..utils.datetime import (
@@ -217,8 +219,11 @@ def get_surface_parameters(site, df_met):
     return tracking_profile["surface_tilt"], tracking_profile["surface_azimuth"]
 
 
-def get_inverter_configs(site, inv_names):
+def get_inverter_configs(site, inv_names=None):
+    """Generates a list of PVSystem objects"""
     design_db = design_database(site)
+    if inv_names is None:
+        inv_names = [*design_db]
     inv_configs = []
     for inv, dict_inv in design_db.items():
         if inv not in inv_names:
@@ -282,7 +287,7 @@ def apply_dst_shift_to_dtn_data(df_dtn):
     df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
     df_dates["offset"] = df_dates.index.strftime("%z")
     tz_offsets = list(df_dates["offset"].unique())
-    shift_date = df_dates.loc[df_dates["tz_offset"].eq(tz_offsets[0])].index[-1]
+    shift_date = df_dates.loc[df_dates["offset"].eq(tz_offsets[0])].index[-1]
     shifted = df.index >= shift_date
     for col in df.columns:
         df.loc[shifted, col] = df.loc[shifted, col].shift(1)
@@ -386,6 +391,66 @@ def get_poa_from_ghi(site, df):
     return total_irrad
 
 
+def format_meteo_data_for_pvlib(df_met, site):
+    # check for POA data from sensors (use dtn from file if not exist)
+    POA_COL = "POA" if "Average_Across_POA" in df_met.columns else "POA_DTN"
+    freq_timedelta = df_met.index.to_series().diff().max()
+    if "DTN" in POA_COL and freq_timedelta != pd.Timedelta(hours=1):
+        df_met = df_met.resample("1h").mean()
+        freq_timedelta = pd.Timedelta(hours=1)
+
+    # note: processed POA column = poa_global when no good sensor data
+    rename_cols = {
+        "Processed_AmbTemp": "ambient_temperature",
+        "Processed_Wind": "wind_speed",
+        "Processed_ModTemp": "module_temperature",
+        "Processed_POA": "effective_irradiance",
+    }
+    keep_cols = [c for c in rename_cols if c in df_met.columns]
+    df = df_met[keep_cols].rename(columns=rename_cols).copy()
+
+    # make a copy of the POA data (losses only applied to effective_irr)
+    df[POA_COL] = df["effective_irradiance"].copy()
+    if "POA_all_bad" in df_met.columns:
+        df["POA_all_bad"] = df_met["POA_all_bad"].copy()
+
+    if "Average_Across_ModTemp" not in df_met.columns:
+        if not all(c in df.columns for c in ["ambient_temperature", "wind_speed"]):
+            raise ValueError("must have either module temp, or amb temp and wind speed.")
+        if df["ambient_temperature"].sum() == 0:
+            raise ValueError("must have valid ambient temp data if no module temp.")
+
+        param_a = TEMPERATURE_PARAMETERS["a"]
+        param_b = TEMPERATURE_PARAMETERS["b"]
+        scaling_factor = np.exp(param_a + (param_b * df["wind_speed"]))
+        df["module_temperature"] = df[POA_COL].mul(scaling_factor).add(df["ambient_temperature"])
+
+    # apply losses to effective_irradiance column for use in model
+    array_losses, dc_losses, _ = get_site_model_losses(site)
+    df["effective_irradiance"] = df["effective_irradiance"].mul(array_losses).mul(dc_losses)
+
+    # get solar position data for model
+    df_sun = get_pvlib_solar_position(site, df.index)
+    df = df_sun.join(df)
+    return df
+
+
+def run_model_chain(system, location, weather_data):
+    """Runs model chain for a single PVSystem"""
+    data = [weather_data] * len(system.arrays)
+    mc = ModelChain(system, location, aoi_model="physical", spectral_model="no_loss")
+    mc.run_model_from_effective_irradiance(data=data)
+    return mc.results.ac.div(1e3).rename(f"{system.name}_Possible_Power")
+
+
+def run_parallel_pvlib_models(inverter_configs, location, weather_data):
+    """Runs multiple model chains simultaneously for list of PVSystem objects"""
+    results = Parallel(n_jobs=len(inverter_configs))(
+        delayed(run_model_chain)(system, location, weather_data) for system in inverter_configs
+    )
+    return results
+
+
 def run_pvlib_model(
     site: str,
     datetime_index: pd.DatetimeIndex,
@@ -485,3 +550,42 @@ def run_pvlib_model(
     df_pvlib = pd.concat(pvlib_results, axis=1)
     df_pvlib.insert(0, POA_COL, df_meteo[POA_COL].copy())
     return df_pvlib
+
+
+def run_flashreport_pvlib_model(site, year, month, localized=True, force_dtn=False, q=True):
+    """Runs pvlib model for selected reporting period using site data or DTN"""
+    # check for pi query file in flashreport folder
+    met_fpath = get_meteo_fpath(site, year, month, version="processed")
+    if met_fpath is None:
+        force_dtn = True
+
+    tz = oemeta.data["TZ"].get(site)
+    start_datetime = pd.Timestamp(year, month, 1, tz=tz if localized else None)
+    end_datetime = start_datetime + pd.DateOffset(months=1)
+
+    start_date, end_date = map(lambda x: x.strftime("%Y-%m-%d"), [start_datetime, end_datetime])
+
+    if force_dtn:
+        POA_COL = "POA_DTN"
+        df = query_dtn_meteo_data(site, start_date, end_date, keep_tz=localized)
+        df_poa = get_poa_from_ghi(site, df)
+        df[POA_COL] = df_poa["poa_global"].copy()
+        df["effective_irradiance"] = df[POA_COL].copy()
+    else:
+        df = load_clean_meteo_file(site, met_fpath, q=q)
+        df = format_meteo_data_for_pvlib(df, site)
+        POA_COL = "POA" if "POA" in df.columns else "POA_DTN"
+
+    # apply losses to effective_irradiance column for use in model
+    array_losses, dc_losses, _ = get_site_model_losses(site)
+    df["effective_irradiance"] = df["effective_irradiance"].mul(array_losses).mul(dc_losses)
+
+    # get site location & system/inverter configurations
+    inverter_configs = get_inverter_configs(site)
+    location = get_site_location(site)
+
+    # run model chain
+    mc_results = run_parallel_pvlib_models(inverter_configs, location, weather_data=df)
+    df_model = pd.concat(mc_results, axis=1)
+    df_model.insert(0, POA_COL, df[POA_COL].copy())
+    return df_model
