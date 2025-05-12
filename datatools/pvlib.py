@@ -10,9 +10,8 @@ from pvlib.solarposition import get_solarposition
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 from pvlib.tracking import singleaxis
 
-from ..datatools.backfill import get_meteo_fpath, load_clean_meteo_file
 from ..dataquery.external import load_noaa_weather_data, query_DTN
-from ..utils import oemeta
+from ..utils import oemeta, oepaths
 from ..utils.datetime import (
     create_localized_index,
     create_naive_index,
@@ -555,7 +554,12 @@ def run_pvlib_model(
 def run_flashreport_pvlib_model(site, year, month, localized=True, force_dtn=False, q=True):
     """Runs pvlib model for selected reporting period using site data or DTN"""
     # check for pi query file in flashreport folder
-    met_fpath = get_meteo_fpath(site, year, month, version="processed")
+    met_fpath = None
+    dir = oepaths.frpath(year, month, ext="solar", site=site)
+    if dir.exists():
+        met_fpaths = list(dir.glob("PIQuery*MetStations*CLEANED*PROCESSED*.csv"))
+        met_fpath - oepaths.latest_file(met_fpaths)
+
     if met_fpath is None:
         force_dtn = True
 
@@ -572,7 +576,17 @@ def run_flashreport_pvlib_model(site, year, month, localized=True, force_dtn=Fal
         df[POA_COL] = df_poa["poa_global"].copy()
         df["effective_irradiance"] = df[POA_COL].copy()
     else:
-        df = load_clean_meteo_file(site, met_fpath, q=q)
+        df = pd.read_csv(met_fpath, index_col=0, parse_dates=True)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            # this can happen if .csv already has tz info & an error prevents parsing (e.g. dst)
+            df.index = pd.to_datetime(
+                df.index,
+                format="%Y-%m-%d %H:%M:%S%z",
+                utc=True,
+            ).tz_convert(tz=tz)
+        elif df.index.tz is None:
+            df = localize_naive_datetimeindex(df, site=site)
+
         df = format_meteo_data_for_pvlib(df, site)
         POA_COL = "POA" if "POA" in df.columns else "POA_DTN"
 
