@@ -69,7 +69,7 @@ class SolarDataset(Dataset):
         return []  # not sure if needed here.. but can use for PVLibDataset (i.e. expected columns)
 
     @classmethod
-    def from_existing_query_files(
+    def from_existing_data_files(
         cls, site_name: str, asset_group: str, start_date: str = None, end_date: str = None
     ):
         """Loads data from existing query files in flashreport folders
@@ -79,7 +79,7 @@ class SolarDataset(Dataset):
         site_name : str
             Name of site (used to initialize SolarSite instance)
         asset_group : str
-            The particular asset group to load data for
+            The particular asset group to load data for. Includes PVLib.
         start_date : str, optional
             The target start date for the dataset, default = None
         end_date : str, optional
@@ -87,19 +87,18 @@ class SolarDataset(Dataset):
         """
         site = SolarSite(site_name)
         dataset = cls(site)
-        dataset._load_data_from_query_files(asset_group, start_date, end_date)
+        dataset._load_data_from_files(asset_group, start_date, end_date)
         return dataset
 
-    def _load_data_from_query_files(
-        self, asset_group: str, start_date: str = None, end_date: str = None
-    ):
-        if asset_group not in self.site.asset_groups:
+    def _load_data_from_files(self, asset_group: str, start_date: str = None, end_date: str = None):
+        valid_groups = self.site.asset_groups + ["pvlib"]
+        if asset_group not in valid_groups:
             raise ValueError("Invalid asset group specified")
-        group = asset_group.replace(" ", "")
+        group = asset_group.replace(" ", "").lower()
         fpaths_by_period = {
-            key_: [fp for fp in fpath_list if group in fp.name]
+            key_: [fp for fp in fpath_list if group in fp.name.lower()]
             for key_, fpath_list in self.site.data_files_by_period.items()
-            if any(group in fp.name for fp in fpath_list)
+            if any(group in fp.name.lower() for fp in fpath_list)
         }
         get_year_month = lambda yyyymm: (int(yyyymm[:4]), int(yyyymm[-2:]))
         valid_year_month_list = list(map(get_year_month, fpaths_by_period.keys()))
@@ -133,15 +132,23 @@ class SolarDataset(Dataset):
                 df_ = pd.read_csv(latest_fp, index_col=0, parse_dates=True)
                 if df_.index.duplicated().any():
                     df_ = df_.loc[~df_.index.duplicated(keep="first")]
+                df_ = df_.rename(columns={"POA_DTN": "POA"})
+                if "pvlib" in latest_fp.name.lower():
+                    df_.columns = df_.columns.map(str.lower)
                 df_list.append(df_)
                 self.source_files.append(str(latest_fp))
             except:
                 raise ValueError("Problem loading data")
 
-        common_cols = [c for c in df_list[0].columns if all((c in df_.columns) for df_ in df_list)]
-        formatted_df_list = [df_[common_cols].copy() for df_ in df_list]
-        df = pd.concat(formatted_df_list, axis=0)
-        if df.index.duplicated().any():
-            df = df.loc[~df.index.duplicated(keep="first")]
-        df = df.reindex(expected_index)
-        self.data = df
+        if len(df_list) > 0:
+            common_cols = [
+                c for c in df_list[0].columns if all((c in df_.columns) for df_ in df_list)
+            ]
+            formatted_df_list = [df_[common_cols].copy() for df_ in df_list]
+            df = pd.concat(formatted_df_list, axis=0)
+            if df.index.duplicated().any():
+                df = df.loc[~df.index.duplicated(keep="first")]
+            df = df.reindex(expected_index)
+            self.data = df
+        else:
+            self.data = pd.DataFrame()

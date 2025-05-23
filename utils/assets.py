@@ -185,9 +185,9 @@ class SolarSite(PISite):
         filepaths (for that reporting period) as values (ascending order)
         """
         return {
-            f"{year}{month:02d}": self.get_flashreport_files(year, month)["query"]
+            f"{year}{month:02d}": self.get_flashreport_files(year, month, types=["query", "pvlib"])
             for year, month in self.existing_report_periods
-            if len(self.get_flashreport_files(year, month)["query"]) > 0
+            if len(self.get_flashreport_files(year, month, types=["query", "pvlib"])) > 0
         }
 
     @property
@@ -195,10 +195,40 @@ class SolarSite(PISite):
         """Returns list of (year, month) tuples for periods where site has query data files"""
         return [(int(key_[:4]), int(key_[-2:])) for key_ in self.data_files_by_period.keys()]
 
+    @property
+    def pvlib_files_by_period(self):
+        return {
+            f"{year}{month:02d}": self.get_flashreport_files(year, month, types=["pvlib"])
+            for year, month in self.existing_report_periods
+            if len(self.get_flashreport_files(year, month, types=["pvlib"])) > 0
+        }
+
+    @property
+    def existing_report_periods_with_pvlib_data(self):
+        """Returns list of (year, month) tuples for periods where site has query data files"""
+        return [(int(key_[:4]), int(key_[-2:])) for key_ in self.pvlib_files_by_period.keys()]
+
+    def existing_periods_with_data_files(self, key: str) -> list:
+        valid_keys = list(map(str.lower, self.asset_groups)) + ["pvlib"]
+        if key not in valid_keys:
+            raise KeyError("Invalid key; must be one of the site asset groups, or 'pvlib'")
+        key = key.replace(" ", "").lower()
+        fpaths_by_period = {
+            ym_str: [fp for fp in fpath_list if key in fp.name.lower()]
+            for ym_str, fpath_list in self.data_files_by_period.items()
+            if any(key in fp.name.lower() for fp in fpath_list)
+        }
+        if not fpaths_by_period:
+            return []
+        get_year_month = lambda ym_str: (int(ym_str[:4]), int(ym_str[-2:]))
+        return list(map(get_year_month, fpaths_by_period.keys()))
+
     # instance method
-    def get_flashreport_files(self, year: int, month: int) -> dict:
+    def get_flashreport_files(self, year: int, month: int, types=[]) -> dict:
         """Returns a dictionary with categories as keys and list of filepaths as values, sorted
         by date created (newest first)
+
+        If types specified, returns single list of filepaths corresponding to keys in types
         """
         dir = self.flashreport_folder(year, month)
         get_files = lambda str_: oepaths.sorted_filepaths(list(dir.glob(str_)))
@@ -213,7 +243,14 @@ class SolarSite(PISite):
         other_files = [fp for fp in dir.iterdir() if fp.is_file() and fp not in captured_files]
         if other_files:
             output_dict.update({"other": oepaths.sorted_filepaths(other_files)})
-        return output_dict
+        if not types:
+            return output_dict
+        file_list = []
+        for key in types:
+            files = output_dict.get(key)
+            if files:
+                file_list.extend(files)
+        return file_list
 
     # instance method
     def get_flashreport_status(self, year: int, month: int):
