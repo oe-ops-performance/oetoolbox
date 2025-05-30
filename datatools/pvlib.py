@@ -140,7 +140,9 @@ def get_inverter_names(site):
     """Returns a list of inverter names for a given site"""
     af_dict = oemeta.data["AF_Solar_V3"].get(site)
     inv_dict = af_dict.get("Inverters")
-    return [*inv_dict["Inverters_Assets"]] if inv_dict else []
+    if inv_dict:
+        return [*inv_dict["Inverters_Assets"]]
+    return list(design_database(site).keys())
 
 
 def get_combiner_list(dict_inv):
@@ -526,9 +528,6 @@ def run_pvlib_model(
     df_meteo["effective_irradiance"] = df_meteo[POA_COL].mul(array_losses).mul(dc_losses).copy()
 
     # get inverter names and associated configurations
-    if inverter_names is None:
-        inverter_names = get_inverter_names(site)
-
     inverter_configs = get_inverter_configs(site, inverter_names)
     n_configs = len(inverter_configs)
     location = get_site_location(site)
