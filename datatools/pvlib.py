@@ -10,6 +10,7 @@ from pvlib.solarposition import get_solarposition
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 from pvlib.tracking import singleaxis
 
+from ..datatools.backfill import get_supporting_data
 from ..dataquery.external import load_noaa_weather_data, query_DTN
 from ..utils import oemeta, oepaths
 from ..utils.datetime import (
@@ -444,9 +445,9 @@ def run_model_chain(system, location, weather_data):
     return mc.results.ac.div(1e3).rename(f"{system.name}_Possible_Power")
 
 
-def run_parallel_pvlib_models(inverter_configs, location, weather_data):
+def run_parallel_pvlib_models(inverter_configs, location, weather_data, q=True):
     """Runs multiple model chains simultaneously for list of PVSystem objects"""
-    results = Parallel(n_jobs=len(inverter_configs))(
+    results = Parallel(n_jobs=len(inverter_configs), verbose=0 if q else 100)(
         delayed(run_model_chain)(system, location, weather_data) for system in inverter_configs
     )
     return results
@@ -550,31 +551,33 @@ def run_pvlib_model(
     return df_pvlib
 
 
-def run_flashreport_pvlib_model(site, year, month, localized=True, force_dtn=False, q=True):
-    """Runs pvlib model for selected reporting period using site data or DTN"""
+def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=False, q=True):
+    """Runs pvlib model for selected reporting period using site data or DTN
+    -> note: uses multithreading to improve speed
+    """
+    qprint = quiet_print_function(q=q)
+    qprint("Begin PVLib script.")
+
     # check for pi query file in flashreport folder
     met_fpath = None
     dir = oepaths.frpath(year, month, ext="solar", site=site)
     if dir.exists():
         met_fpaths = list(dir.glob("PIQuery*MetStations*CLEANED*PROCESSED*.csv"))
-        met_fpath - oepaths.latest_file(met_fpaths)
+        met_fpath = oepaths.latest_file(met_fpaths)
 
     if met_fpath is None:
         force_dtn = True
 
-    tz = oemeta.data["TZ"].get(site)
-    start_datetime = pd.Timestamp(year, month, 1, tz=tz if localized else None)
-    end_datetime = start_datetime + pd.DateOffset(months=1)
-
-    start_date, end_date = map(lambda x: x.strftime("%Y-%m-%d"), [start_datetime, end_datetime])
-
     if force_dtn:
+        qprint("Using external weather data from DTN.\n")
         POA_COL = "POA_DTN"
-        df = query_dtn_meteo_data(site, start_date, end_date, keep_tz=localized)
-        df_poa = get_poa_from_ghi(site, df)
-        df[POA_COL] = df_poa["poa_global"].copy()
+        # df = query_dtn_meteo_data(site, start_date, end_date, keep_tz=localized)
+        # df_poa = get_poa_from_ghi(site, df)
+        df = get_supporting_data(site, year, month)  # tz-aware
+        df[POA_COL] = df["poa_global"].copy()
         df["effective_irradiance"] = df[POA_COL].copy()
     else:
+        qprint("Using weather data from PI query file.\n")
         df = pd.read_csv(met_fpath, index_col=0, parse_dates=True)
         if not isinstance(df.index, pd.DatetimeIndex):
             # this can happen if .csv already has tz info & an error prevents parsing (e.g. dst)
@@ -582,10 +585,9 @@ def run_flashreport_pvlib_model(site, year, month, localized=True, force_dtn=Fal
                 df.index,
                 format="%Y-%m-%d %H:%M:%S%z",
                 utc=True,
-            ).tz_convert(tz=tz)
+            ).tz_convert(tz=oemeta.data["TZ"].get(site))
         elif df.index.tz is None:
             df = localize_naive_datetimeindex(df, site=site)
-
         df = format_meteo_data_for_pvlib(df, site)
         POA_COL = "POA" if "POA" in df.columns else "POA_DTN"
 
@@ -598,7 +600,11 @@ def run_flashreport_pvlib_model(site, year, month, localized=True, force_dtn=Fal
     location = get_site_location(site)
 
     # run model chain
-    mc_results = run_parallel_pvlib_models(inverter_configs, location, weather_data=df)
+    mc_results = run_parallel_pvlib_models(inverter_configs, location, weather_data=df, q=q)
     df_model = pd.concat(mc_results, axis=1)
     df_model.insert(0, POA_COL, df[POA_COL].copy())
+
+    if not localized:
+        df_model = remove_tzinfo_and_standardize_index(df_model)
+
     return df_model
