@@ -13,7 +13,6 @@ import pvlib
 from sklearn.metrics import r2_score
 
 from ..dataquery.external import query_DTN
-from ..datatools.pvlib import get_surface_parameters
 from ..utils import oemeta, oepaths
 from ..utils.datetime import localize_naive_datetimeindex, remove_tzinfo_and_standardize_index
 from ..utils.helpers import quiet_print_function
@@ -247,6 +246,25 @@ def get_dtn_data(site, start_date, end_date):
     return df
 
 
+def get_surface_parameters(site, df_met):
+    """Returns the tilt/azimuth parameters (used for POA transposition from GHI data)"""
+    design_db = oemeta.data["Project_Design_Database"].get(site)
+    dict_inv = list(design_db.values())[0]
+    racking_tilt = int(dict_inv["Tilt Angle (Deg)"])
+
+    if dict_inv.get("Racking Type") != "Tracker":  # same for all inv
+        return racking_tilt, 180
+
+    tracking_profile = pvlib.tracking.singleaxis(
+        df_met["apparent_zenith"],
+        df_met["azimuth"],
+        max_angle=racking_tilt,
+        backtrack=True,
+        gcr=dict_inv["Racking GCR"],
+    )
+    return tracking_profile["surface_tilt"], tracking_profile["surface_azimuth"]
+
+
 def transpose_poa_from_dtn_data(df, site):
     """uses DTN and pvlib clearsky data to transpose POA values and add to input df"""
     dirint = pvlib.irradiance.dirint(
@@ -311,9 +329,7 @@ def load_supporting_data(site, start_date, end_date):
 
 
 def get_supporting_data(site, year, month, freq="1h", q=True):
-    """loads dtn data from files in flashreport dtn folder if exists, otherwise queries/saves
-    -> IMPORTANT: returns dataframe with first timestamp of next month (for upsampling using ffill)
-    """
+    """loads dtn data from files in flashreport dtn folder if exists, otherwise queries/saves"""
     qprint = quiet_print_function(q=q)
     if not oepaths.frpath(year, month).exists():
         raise ValueError("No FlashReport folder exists for selected year/month")
@@ -703,3 +719,145 @@ def process_and_backfill_meteo_data(filepath, site, n_clearsky=5, r2_diff=0.1, q
         changes_dict["backfilled_data"] = backfilled_data
 
     return df, changes_dict
+
+
+def meteo_backfill_subplots(df_, resample=False):
+    df = df_.copy()
+    freq = None  # init
+    if resample is True:
+        freq = "1h"
+    elif resample in ["h", "1h", "15min"]:
+        freq = resample if any(x.isdigit() for x in resample) else f"1{resample}"
+    if freq is not None:
+        inferred_freq = pd.infer_freq(df.index)
+        if not inferred_freq:
+            print("Error: could not resample dataframe")
+            return
+        if not any(x.isdigit() for x in inferred_freq):
+            inferred_freq = f"1{inferred_freq}"
+        if pd.Timedelta(inferred_freq) < pd.Timedelta(freq):
+            df = df.resample(freq).mean().copy()
+    dfcols = list(df.columns)
+    if "Hour" in dfcols:
+        sensor_cols = dfcols[: dfcols.index("Hour")]
+    else:
+        cln_cols = [(i, col) for i, col in enumerate(df.columns) if col.startswith("Cleaned")]
+        sensor_cols = list(df.columns)[: cln_cols[0][0]]
+    grouped_sensor_cols = grouped_meteo_columns(sensor_cols)
+    grp_ID_dict = {
+        "poa": "POA",
+        "ghi": "GHI",
+        "modtemp": "ModTemp",
+        "ambtemp": "AmbTemp",
+        "wind": "Wind",
+    }
+    grp_IDs = [grp_ID_dict[grp] for grp in grouped_sensor_cols]
+
+    n_rows = len(grouped_sensor_cols)
+    s_titles = [f"<b>{grpID} sensor data</b>" for grpID in grp_IDs]
+
+    fig = make_subplots(
+        rows=n_rows,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=s_titles,
+        vertical_spacing=0.2 / n_rows,
+    )
+
+    htemplate = (
+        "<b>%{fullData.name}</b><br>Value: %{y:.2f}<br>" "<i>%{x|%Y-%m-%d %H:%M}</i><extra></extra>"
+    )
+    group_external_reference_dict = {
+        "poa": ["poa_global"],
+        "ghi": ["dtn_ghi"],
+        "ambtemp": ["dtn_temp_air"],
+        "wind": ["dtn_wind_speed"],
+    }
+    kwargs = dict(x=df.index, mode="lines", hovertemplate=htemplate)
+
+    for grp, grp_cols in grouped_sensor_cols.items():
+        grpID = grp_ID_dict[grp]
+        row_ = grp_IDs.index(grpID) + 1
+        grp_kwargs = dict(
+            legendgroup=grpID, legendgrouptitle_text=f"<b>{grpID}</b>", legendrank=row_
+        )
+
+        proc_col = f"Processed_{grpID}"
+        bad_col = f"{grpID}_all_bad"
+
+        # add trace with shading to show backfilled sections (i.e. where all sensors had bad/missing data)
+        yvals = df[proc_col].mask(df[bad_col].eq(0), 0)
+        fig.add_trace(
+            go.Scattergl(
+                **kwargs,
+                **grp_kwargs,
+                y=yvals,
+                name=f"Backfilled {grpID}",
+                line_width=0,
+                fill="tozeroy",
+                fillcolor="rgba(255,191,0,0.3)",
+            ),
+            row=row_,
+            col=1,
+        )
+
+        ## NEW ## -- add reference trace(s) for comparison to external data
+        reference_cols = group_external_reference_dict.get(grp)
+        if reference_cols:
+            dfr = df.resample("h").mean().copy()
+            for col in reference_cols:
+                fig.add_trace(
+                    go.Scattergl(
+                        **grp_kwargs,
+                        x=dfr.index,
+                        y=dfr[col],
+                        name=col,
+                        mode="lines",
+                        hovertemplate=htemplate,
+                        line=dict(
+                            color="rgba(0,0,0,0.3)",
+                            width=3.5 if grp != "wind" else 2.5,
+                        ),
+                    ),
+                    row=row_,
+                    col=1,
+                )
+
+        # add traces with original sensor data
+        for col in grp_cols:
+            fig.add_trace(
+                go.Scattergl(**kwargs, **grp_kwargs, y=df[col], name=col), row=row_, col=1
+            )
+
+        # add processed trace (backfilled)
+        fig.add_trace(
+            go.Scattergl(
+                **kwargs,
+                **grp_kwargs,
+                y=df[proc_col],
+                name=proc_col,
+                line_dash="dot",
+                line_color="#000000",
+                line_width=1.5,
+            ),
+            row=row_,
+            col=1,
+        )
+
+    fig.update_xaxes(tickformat="%m/%d", tick0=df.index[0], dtick=str(86400000 * 7))
+    fig.update_layout(
+        font_size=9,
+        paper_bgcolor="#fbfbfb",
+        margin=dict(t=30, r=20, b=10, l=20),
+        legend=dict(
+            x=1.01,
+            xanchor="left",
+            groupclick="toggleitem",
+            grouptitlefont=dict(size=11),
+            tracegroupgap=16,
+        ),
+    )
+    # format subplot titles (are actually annotations in subplot figures)
+    for i in range(len(fig.layout.annotations)):
+        fig.layout.annotations[i].update(font=dict(size=12), x=0, xanchor="left")
+    return fig
