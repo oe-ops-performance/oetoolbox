@@ -571,8 +571,6 @@ def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=Fa
     if force_dtn:
         qprint("Using external weather data from DTN.\n")
         POA_COL = "POA_DTN"
-        # df = query_dtn_meteo_data(site, start_date, end_date, keep_tz=localized)
-        # df_poa = get_poa_from_ghi(site, df)
         df = get_supporting_data(site, year, month)  # tz-aware
         df[POA_COL] = df["poa_global"].copy()
         df["effective_irradiance"] = df[POA_COL].copy()
