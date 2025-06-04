@@ -446,8 +446,10 @@ def run_model_chain(system, location, weather_data):
 
 
 def run_parallel_pvlib_models(inverter_configs, location, weather_data, q=True):
-    """Runs multiple model chains simultaneously for list of PVSystem objects"""
-    results = Parallel(n_jobs=-1, verbose=0 if q else 100)(
+    """Runs multiple model chains simultaneously for list of PVSystem objects
+    -> n_jobs = -2 tells joblib to use all available CPU cores except for 1
+    """
+    results = Parallel(n_jobs=-2, verbose=0 if q else 100)(
         delayed(run_model_chain)(system, location, weather_data) for system in inverter_configs
     )
     return results
@@ -556,7 +558,7 @@ def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=Fa
     -> note: uses joblib Parallel to improve speed by running multiple configs in parallel
     """
     qprint = quiet_print_function(q=q)
-    qprint("Begin PVLib script.")
+    qprint(f"\nBegin PVLib script. ({site = })")
 
     # check for pi query file in flashreport folder
     met_fpath = None
@@ -569,13 +571,13 @@ def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=Fa
         force_dtn = True
 
     if force_dtn:
-        qprint("Using external weather data from DTN.\n")
+        qprint("Using external weather data from DTN.")
         POA_COL = "POA_DTN"
         df = get_supporting_data(site, year, month)  # tz-aware
         df[POA_COL] = df["poa_global"].copy()
         df["effective_irradiance"] = df[POA_COL].copy()
     else:
-        qprint("Using weather data from PI query file.\n")
+        qprint("Using weather data from PI query file.")
         df = pd.read_csv(met_fpath, index_col=0, parse_dates=True)
         if not isinstance(df.index, pd.DatetimeIndex):
             # this can happen if .csv already has tz info & an error prevents parsing (e.g. dst)
@@ -598,6 +600,7 @@ def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=Fa
     location = get_site_location(site)
 
     # run model chain
+    qprint(f"Running models for {len(inverter_configs)} inverter configurations:")
     mc_results = run_parallel_pvlib_models(inverter_configs, location, weather_data=df, q=q)
     df_model = pd.concat(mc_results, axis=1)
     df_model.insert(0, POA_COL, df[POA_COL].copy())
@@ -605,4 +608,5 @@ def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=Fa
     if not localized:
         df_model = remove_tzinfo_and_standardize_index(df_model)
 
+    qprint("Done.")
     return df_model
