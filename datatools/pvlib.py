@@ -447,7 +447,7 @@ def run_model_chain(system, location, weather_data):
 
 def run_parallel_pvlib_models(inverter_configs, location, weather_data, q=True):
     """Runs multiple model chains simultaneously for list of PVSystem objects"""
-    results = Parallel(n_jobs=len(inverter_configs), verbose=0 if q else 100)(
+    results = Parallel(n_jobs=-1, verbose=0 if q else 100)(
         delayed(run_model_chain)(system, location, weather_data) for system in inverter_configs
     )
     return results
@@ -553,7 +553,7 @@ def run_pvlib_model(
 
 def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=False, q=True):
     """Runs pvlib model for selected reporting period using site data or DTN
-    -> note: uses multithreading to improve speed
+    -> note: uses joblib Parallel to improve speed by running multiple configs in parallel
     """
     qprint = quiet_print_function(q=q)
     qprint("Begin PVLib script.")
