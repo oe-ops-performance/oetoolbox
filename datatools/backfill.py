@@ -747,8 +747,8 @@ def meteo_backfill_subplots(df_, resample=False):
     grp_ID_dict = {
         "poa": "POA",
         "ghi": "GHI",
-        "modtemp": "ModTemp",
-        "ambtemp": "AmbTemp",
+        "mod_temp": "ModTemp",
+        "amb_temp": "AmbTemp",
         "wind": "Wind",
     }
     grp_IDs = [grp_ID_dict[grp] for grp in grouped_sensor_cols]
@@ -770,7 +770,7 @@ def meteo_backfill_subplots(df_, resample=False):
     group_external_reference_dict = {
         "poa": ["poa_global"],
         "ghi": ["dtn_ghi"],
-        "ambtemp": ["dtn_temp_air"],
+        "amb_temp": ["dtn_temp_air"],
         "wind": ["dtn_wind_speed"],
     }
     kwargs = dict(x=df.index, mode="lines", hovertemplate=htemplate)
