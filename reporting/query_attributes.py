@@ -254,8 +254,11 @@ def monthly_query_attribute_paths(site) -> dict:
     """returns dictionary with asset groups as keys and lists of attribute paths as values
     -> only groups with existing attributes will be included in output
     """
+    query_groups = list(get_af_dict(site).keys())
+    if "Meter" not in query_groups:
+        query_groups.append("Meter")
     output = {
         asset_group: get_reporting_attribute_paths(site, asset_group)
-        for asset_group in get_af_dict(site).keys()
+        for asset_group in query_groups
     }
     return {key: val for key, val in output.items() if val}
