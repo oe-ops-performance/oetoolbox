@@ -54,6 +54,31 @@ class PISite:
         return oemeta.data[self.fleet_key].get(self.name)
 
     @property
+    def asset_heirarchy(self) -> dict:
+        """Returns nested dictionary with asset groups, assets, subassets as keys
+        -> if no assets, {asset_group: []}
+        -> assets in list if no subassets, otherwise keys of dict w/ list of subassets as values
+        """
+        if not self.af_dict:
+            return
+        heirarchy = {}
+        subassets_exist = lambda dict_: any(dict_[a].get(f"{a}_Subassets") for a in dict_)
+        for asset_group, group_dict in self.af_dict.items():
+            asset_dict = group_dict.get(f"{asset_group}_Assets")  # asset names as keys
+            if not asset_dict:
+                heirarchy[asset_group] = []
+                continue
+            if not subassets_exist(asset_dict):
+                heirarchy[asset_group] = list(asset_dict.keys())
+                continue
+            # note: does not catch further subasset levels if exist
+            heirarchy[asset_group] = {
+                asset: list(dict_[f"{asset}_Subassets"].keys())
+                for asset, dict_ in asset_dict.items()
+            }
+        return heirarchy
+
+    @property
     def asset_groups(self) -> list:
         """Returns the top level elements from the PI AF structure
         all groups: ["Inverters", "Met Stations", "Meter", "PPC", "SubSt", "Trackers"]
@@ -143,10 +168,6 @@ class PISite:
 
         return element_dict.get(f"{element}_Attributes")
 
-    def flashreport_folder(self, year: int, month: int) -> Path:
-        """Returns filepath to site flashreport folder for given year/month"""
-        return oepaths.frpath(year=year, month=month, ext=self.fleet, site=self.name)
-
 
 class SolarSite(PISite):
     """Class for solar sites existing in the PI AF structure. Inherits from PISite."""
@@ -208,6 +229,10 @@ class SolarSite(PISite):
     def existing_report_periods_with_pvlib_data(self):
         """Returns list of (year, month) tuples for periods where site has query data files"""
         return [(int(key_[:4]), int(key_[-2:])) for key_ in self.pvlib_files_by_period.keys()]
+
+    def flashreport_folder(self, year: int, month: int) -> Path:
+        """Returns filepath to site flashreport folder for given year/month"""
+        return oepaths.frpath(year=year, month=month, ext=self.fleet, site=self.name)
 
     def existing_periods_with_data_files(self, key: str) -> list:
         valid_keys = list(map(str.lower, self.asset_groups)) + ["pvlib"]
