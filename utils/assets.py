@@ -13,7 +13,8 @@ from ..reporting.functions import (
     get_kpis_from_tracker,
     get_solar_budget_values,
 )
-from ..reporting.tools import get_query_attribute_paths, get_solar_budget_values
+from ..reporting.tools import get_solar_budget_values
+from ..reporting.query_attributes import monthly_query_attribute_paths
 
 
 class PISite:
@@ -164,7 +165,7 @@ class SolarSite(PISite):
     def query_attributes(self) -> dict:
         """Returns dictionary with asset groups as keys and list of attribute paths as values"""
         try:
-            attribute_dict = get_query_attribute_paths(self.name)
+            attribute_dict = monthly_query_attribute_paths(self.name)
         except:
             attribute_dict = {}
         return attribute_dict
