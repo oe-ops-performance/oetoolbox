@@ -271,6 +271,8 @@ class PIDataset(Dataset):
         -------
         pd.DataFrame with a datetime index
         """
+        if dataframe.empty:
+            return dataframe
         df = dataframe.copy()
         is_object_col = lambda col: col.endswith("_ID") or col in ["Attribute", "PIPoint"]
         numeric_cols = [c for c in df.columns if not is_object_col(c)]
@@ -348,12 +350,22 @@ class PIDataset(Dataset):
             main_df_list.append(df_)
 
         df = pd.concat(main_df_list, axis=0, ignore_index=False)
+
+        # check index
+        expected_tz = self.site.timezone if keep_tzinfo else None
+        expected_index = pd.date_range(
+            start_date, end_date, inclusive="left", freq=pd.Timedelta(freq), tz=expected_tz
+        )
+        if not all(x in df.index for x in expected_index):
+            df = df.reindex(expected_index)
         self.data = df.copy()
 
     def _attpath_meta(self, attpath: str):
         """Returns a dictionary of metadata for given attribute path"""
         path_parts = attpath.replace("|", "\\").split("\\")
         group_index = path_parts.index(self.site.name) + 1
+        if f"{self.site.name}|" in attpath:  # if site-level (e.g. Meter)
+            group_index -= 1  # make site the group
         related_elements = path_parts[group_index:-1]
         return {
             "parts": path_parts,
@@ -374,11 +386,13 @@ class PIDataset(Dataset):
 
     def _column_name_from_attpath(self, attpath: str, skip_asset_group: bool = True):
         """Returns a column name for use in wide-format dataframe"""
-        path_parts = attpath.replace("|", "\\").split("\\")
-        start_index = path_parts.index(self.site.name) + 1  # asset group index
+        path_parts = self._attpath_meta(attpath)["parts"]
+        group_index = path_parts.index(self.site.name) + 1  # asset group index
+        if path_parts[-2] == self.site.name:
+            group_index -= 1  # make site the group
         if skip_asset_group:
-            start_index += 1
-        return "_".join(reversed(path_parts[start_index:]))
+            group_index += 1
+        return "_".join(reversed(path_parts[group_index:]))
 
     def _columns_from_attpaths(self, attpath_list: list, data_format: str):
         """Returns a list of columns names for query"""
