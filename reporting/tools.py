@@ -538,15 +538,13 @@ def load_solar_flashreport(site, year, month, q=True, use_tempdir=True, return_d
     site_fp = Path(oepaths.frpath(year, month, ext="Solar"), site)
     frfpaths = list(site_fp.glob("*FlashReport*.xlsx"))
     frfp = latest_file(frfpaths)
-
+    qprint(f'{(site+"..").ljust(20)}', end="")
     if frfp is None:
         qprint("no FlashReport file found!")
         return pd.DataFrame()
 
-    qprint(f'{(site+"..").ljust(20)}', end="")
-    with open(frfp, "r") as fr_file:
-        df = pd.read_excel(frfp, sheet_name="FlashReport", engine="openpyxl")
-    qprint(f'loaded file: "{frfp.name}"')
+    df = pd.read_excel(frfp, sheet_name="FlashReport", engine="openpyxl")
+    qprint(f'loaded report file: "{frfp.name}"')
 
     # check if equations have been calculated
     summary_is_blank = lambda df_FR: df_FR.iloc[6:9, 1:3].isna().all().all()
@@ -697,8 +695,17 @@ def get_flashreport_kpis(site, year, month, q=True, return_df_and_fpath=False):
         ghi_total = df_dtn["DTN_GHI"].sum() / 1e3
     else:
         dfm = pd.read_csv(mfp_, index_col=0, parse_dates=True)
-        qprint(f"loaded GHI from file: {mfp_.name}")
-        ghi_total = dfm["Processed_GHI"].sum() / 1e3 / 60  # minute-level data
+        matching_dtn_ghi_cols = [
+            c for c in dfm.columns if all(i in c.lower() for i in ["dtn", "ghi"])
+        ]
+        if not matching_dtn_ghi_cols:
+            ghi_source = "measured"
+            ghi_total = dfm["Processed_GHI"].sum() / 1e3 / 60  # minute-level data
+        else:
+            ghi_source = "DTN"
+            ghi_col = matching_dtn_ghi_cols[0]
+            ghi_total = dfm[ghi_col].sum() / 1e3  # hourly data
+        qprint(f"loaded {ghi_source} GHI from file: {mfp_.name}")
 
     df["GHI Insolation (kWh/m2)"] = (
         ghi_total  # column was previously inserted at the correct location
