@@ -427,10 +427,6 @@ def format_meteo_data_for_pvlib(df_met, site):
         scaling_factor = np.exp(param_a + (param_b * df["wind_speed"]))
         df["module_temperature"] = df[POA_COL].mul(scaling_factor).add(df["ambient_temperature"])
 
-    # apply losses to effective_irradiance column for use in model
-    array_losses, dc_losses, _ = get_site_model_losses(site)
-    df["effective_irradiance"] = df["effective_irradiance"].mul(array_losses).mul(dc_losses)
-
     # get solar position data for model
     df_sun = get_pvlib_solar_position(site, df.index)
     df = df_sun.join(df)
