@@ -210,22 +210,7 @@ def get_dtn_data(site, start_date, end_date):
         hours=1
     )  # add hour for upsample to min
 
-    n_retries = 5
-    args = [lat, lon, dtn_start, dtn_end, interval, fields]
-    errors = []
-    while n_retries > 0:
-        try:
-            df = query_DTN(*args, tz=tz)
-            break
-        except Exception as e:
-            errors.append(e)
-            n_retries -= 1
-
-    if n_retries == 0:
-        print("Note: Could not successfully retrieve DTN data after 5 retries.")
-        return errors
-    elif n_retries < 5:
-        print(f"Note: DTN data was retrieved after {5 - n_retries} additional attempt(s).")
+    df = query_DTN(lat, lon, dtn_start, dtn_end, interval, fields, tz=tz)
 
     # rename columns
     df = df.rename(columns=dtn_columns)
