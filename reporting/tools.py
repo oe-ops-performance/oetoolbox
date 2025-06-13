@@ -684,7 +684,7 @@ def get_flashreport_kpis(site, year, month, q=True, return_df_and_fpath=False):
         if col not in df.columns:
             df.insert(i + 1, col, np.nan)
 
-    ## get GHI data from processed met file
+    ## get GHI data from processed met file (use DTN)
     fp_dict = get_solar_fr_filepaths(site, year, month)
     mfp_ = fp_dict.get("met2")
     qprint(" " * 20, end="")
@@ -694,17 +694,19 @@ def get_flashreport_kpis(site, year, month, q=True, return_df_and_fpath=False):
         qprint("done!")
         ghi_total = df_dtn["DTN_GHI"].sum() / 1e3
     else:
-        dfm = pd.read_csv(mfp_, index_col=0, parse_dates=True)
-        matching_dtn_ghi_cols = [
-            c for c in dfm.columns if all(i in c.lower() for i in ["dtn", "ghi"])
-        ]
-        if not matching_dtn_ghi_cols:
-            ghi_source = "measured"
-            ghi_total = dfm["Processed_GHI"].sum() / 1e3 / 60  # minute-level data
-        else:
-            ghi_source = "DTN"
+        dfm = pd.read_csv(mfp_, index_col=0, parse_dates=True)  # met files should have freq=1min
+        ghi_source = "measured" if "Average_Across_GHI" in dfm.columns else "DTN"
+        ghi_col = "Processed_GHI"
+        if ghi_col not in dfm.columns:
+            matching_dtn_ghi_cols = [
+                c for c in dfm.columns if all(i in c.lower() for i in ["dtn", "ghi"])
+            ]
             ghi_col = matching_dtn_ghi_cols[0]
-            ghi_total = dfm[ghi_col].sum() / 1e3  # hourly data
+
+        ghi_total = dfm[ghi_col].sum() / 1e3  # if hourly data
+        if dfm.index.to_series().diff().min() == pd.Timedelta(minutes=1):
+            ghi_total = ghi_total / 60  # minute-level data
+
         qprint(f"loaded {ghi_source} GHI from file: {mfp_.name}")
 
     df["GHI Insolation (kWh/m2)"] = (
