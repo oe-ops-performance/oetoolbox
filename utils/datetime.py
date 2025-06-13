@@ -95,3 +95,32 @@ def segmented_date_ranges(start: pd.Timestamp, end: pd.Timestamp, n_days: int):
         if t1 > end:
             t1 = end
     return date_range_list
+
+
+def year_month_list(start_date: str, end_date: str):
+    """Returns list of (year, month) tuples that exist in range between given start and end dates.
+
+    Parameters
+    ----------
+    start_date : str
+        Start date for target range, format: "%Y-%m-%d"
+    end_date : str
+        End date for target range, format: "%Y-%m-%d"
+
+    Returns
+    -------
+    list of tuple
+        A list of year/month tuples corresponding to the input dates.
+    """
+    # validate input dates
+    start, end = map(pd.Timestamp, [start_date, end_date])
+    fmt = lambda tstamp: tstamp.strftime("%Y-%m-%d")
+    if fmt(start) != start_date or fmt(end) != end_date:
+        raise ValueError("Input start/end dates must have format '%Y-%m-%d'")
+    if start > end:
+        start_date, end_date = end_date, start_date
+
+    # generate year/month list
+    unique_year_month = pd.date_range(start_date, end_date).strftime("%Y_%m").unique().to_list()
+    tuple_from_string = lambda ym_str: tuple(map(lambda x: int(x), ym_str.split("_")))
+    return list(map(tuple_from_string, unique_year_month))

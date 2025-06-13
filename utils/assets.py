@@ -260,7 +260,7 @@ class SolarSite(PISite):
         get_files = lambda str_: oepaths.sorted_filepaths(list(dir.glob(str_)))
         glob_str_dict = {
             "query": "PIQuery_*.csv",
-            "pvlib": f"PVLib_InvAC_{self.name}*.csv",
+            "pvlib": f"PVLib*InvAC*{self.name}*.csv",
             "report": "*FlashReport*.xlsx",
             "plots": "*.html",
         }
@@ -329,7 +329,7 @@ class SolarSite(PISite):
         query_fp_list = self.get_flashreport_files(year, month)["query"]
         if not query_fp_list:
             return []
-        return [fp for fp in query_fp_list if asset_group in fp.name]
+        return [fp for fp in query_fp_list if asset_group.replace(" ", "") in fp.name]
 
     # functions to get kpis and summary metrics
     def get_monthly_kpis(self, year: int, month: int, source: str):
