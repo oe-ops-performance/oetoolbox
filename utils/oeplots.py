@@ -102,8 +102,8 @@ def histplots(site, df, keys_=None, onlydaylight=False):
         if keys_
         else list(df.columns)
     )
-    if onlydaylight:
-        df = filter_daylight(site, df)
+    # if onlydaylight:
+    #     df = filter_daylight(site, df)  # TODO resolve this
     fig = make_subplots(rows=len(col_list), cols=1)
     for i, col in enumerate(col_list):
         fig.add_trace(go.Histogram(x=df[col], name=col), row=i + 1, col=1)
