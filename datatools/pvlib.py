@@ -416,6 +416,10 @@ def format_meteo_data_for_pvlib(df_met, site):
     if "POA_all_bad" in df_met.columns:
         df["POA_all_bad"] = df_met["POA_all_bad"].copy()
 
+    if "Average_Across_ModTemp" in df_met.columns:
+        if df_met["Average_Across_ModTemp"].isna().all():
+            df_met = df_met.drop(columns=["Average_Across_ModTemp"])
+
     if "Average_Across_ModTemp" not in df_met.columns:
         if not all(c in df.columns for c in ["ambient_temperature", "wind_speed"]):
             raise ValueError("must have either module temp, or amb temp and wind speed.")
@@ -528,25 +532,16 @@ def run_pvlib_model(
 
     # get inverter names and associated configurations
     inverter_configs = get_inverter_configs(site, inverter_names)
-    n_configs = len(inverter_configs)
     location = get_site_location(site)
 
-    pvlib_results = []  # list of pd.Series
-    for n, config in enumerate(inverter_configs):
-        qprint(
-            f"Running model (part {n + 1} of {n_configs})",
-            end="\r" if (n + 1) < n_configs else "\n",
-        )
-        meteo_mc = [df_meteo] * len(config.arrays)
-        mc = ModelChain(config, location, aoi_model="physical", spectral_model="no_loss")
-        mc.run_model_from_effective_irradiance(meteo_mc)
-        results = mc.results.ac.div(1e3).rename(f"{config.name}_Possible_Power")
-        pvlib_results.append(results)
-    qprint(f"DONE. (note: {POA_COL = })")
+    # run model chain
+    qprint(f"Running models for {len(inverter_configs)} inverter configurations:")
+    mc_results = run_parallel_pvlib_models(inverter_configs, location, weather_data=df_meteo, q=q)
+    df_model = pd.concat(mc_results, axis=1)
+    df_model.insert(0, POA_COL, df_meteo[POA_COL].copy())
+    qprint(f"Done. (note: {POA_COL = })")
 
-    df_pvlib = pd.concat(pvlib_results, axis=1)
-    df_pvlib.insert(0, POA_COL, df_meteo[POA_COL].copy())
-    return df_pvlib
+    return df_model
 
 
 def run_flashreport_pvlib_model(site, year, month, localized=False, force_dtn=False, q=True):
