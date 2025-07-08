@@ -4,6 +4,7 @@ from functools import wraps
 def with_retries(n_max: int = 5, raise_error: bool = True):
     """Decorator factory - returns retry decorator and supports additional args.
     -> to be applied at function definition
+    -> if keyword argument "q=True" exists in target function, enables retry status printouts
     """
 
     def decorator_retries(func):
