@@ -137,6 +137,18 @@ def expected_datetime_index(year, month, freq, tz=None):
     return pd.date_range(start, end, freq=freq, tz=tz)[:-1]
 
 
+def date_cols_to_index(df, drop=False):
+    if not all(c in df.columns for c in ["Day", "Hour"]):
+        raise KeyError("Invalid columns.")
+    df.index = pd.to_datetime(
+        df["Day"].astype(str) + " " + df["Hour"].sub(1).astype(str).str.zfill(2) + ":00:00",
+        format="%Y-%m-%d %H:%M:%S",
+    )
+    if drop:
+        df = df.drop(columns=["Day", "Hour"])
+    return df
+
+
 # all functions return dataframe with "Day", "Hour", "MWh" columns
 # fall DST - extra hour is included for all sites
 # spring DST - missing hour is added back to df with value = 0
