@@ -287,16 +287,16 @@ def monthly_summary_subplots(
     """PLOT"""
     # define subplot figure
     n_inv = len(invcols)
-    n_rows = n_inv + 2  # changed; +added new subplot of meter data (before inverters)
-    plot1_height = 380  # 400
-    plot2_height = 100
-    plotX_height = 80
-    total_height = plot1_height + plot2_height + plotX_height * (n_inv)
+    n_rows = n_inv + 3  # top row (scatter, kpi table) + meter bar chart + meter time series
+    plot1_height = 380
+    mplot_height = 100  # for rows 2 and 3
+    plotX_height = 80  # for inverter plots
+    total_height = plot1_height + mplot_height + mplot_height + plotX_height * (n_inv)
 
     p1_ratio = plot1_height / total_height
-    p2_ratio = plot2_height / total_height
+    p2_ratio = mplot_height / total_height
     pX_ratio = plotX_height / total_height
-    row_height_list = [p1_ratio] + [p2_ratio] + [pX_ratio] * (n_inv)
+    row_height_list = [p1_ratio, p2_ratio, p2_ratio] + [pX_ratio] * (n_inv)
 
     fig = make_subplots(
         rows=n_rows,
@@ -306,7 +306,7 @@ def monthly_summary_subplots(
         horizontal_spacing=0.035,  # default 0.2/n_cols
         vertical_spacing=0.2 / n_rows,  # default 0.3/n_rows
         specs=[[{"colspan": 2}, None, {"type": "table"}]]
-        + [[{}, {"colspan": 2}, None]] * (n_inv + 1),
+        + [[{}, {"colspan": 2}, None]] * (n_inv + 2),
     )
 
     colors_ = plotly.colors.qualitative.Plotly
@@ -319,7 +319,7 @@ def monthly_summary_subplots(
     htemplate_sc = "<b>%{fullData.name}</b><br>POA: %{x:.2f} kW/m2<br>Power: %{y:.2f} kW<br><i>%{customdata|%Y-%m-%d %H:%M}</i><extra></extra>"
 
     # ROW 1: scatter plot -- actual v. possible v. meter
-    if data_freq == "1h":
+    if data_freq == "1min":
         df_ = df.resample("15min").mean().copy()
     else:
         df_ = df.copy()
@@ -376,7 +376,7 @@ def monthly_summary_subplots(
     else:
         dfH = df.copy()
 
-    # add utility meter data if exists (use hourly poa data for trace)
+    # add utility meter data to scatter plot if exists (use hourly poa data for trace)
     if site in dfu.columns:
         um_kwargs = dict(
             x=dfH[poacol],
@@ -436,18 +436,20 @@ def monthly_summary_subplots(
         marker=dict(color=colors_[2], size=2),
         **sc_kwargs,
     )
-    fig.add_trace(sc_trace_possible, row=2, col=1)
-    fig.add_trace(sc_trace_actual, row=2, col=1)
-    fig.add_trace(sc_trace_pi_meter, row=2, col=1)
-    if site in dfu.columns:
-        sc_trace_util = go.Scatter(
-            x=dfH[poacol],
-            y=dfu[site],
-            name=util_col,
-            marker=dict(color=colors_[1], size=2),
-            **sc_kwargs,
-        )
-        fig.add_trace(sc_trace_util, row=2, col=1)
+    # temp: duplicating scatter plots for meter bar + line graphs
+    for row in (2, 3):
+        fig.add_trace(sc_trace_possible, row=row, col=1)
+        fig.add_trace(sc_trace_actual, row=row, col=1)
+        fig.add_trace(sc_trace_pi_meter, row=row, col=1)
+        if site in dfu.columns:
+            sc_trace_util = go.Scatter(
+                x=dfH[poacol],
+                y=dfu[site],
+                name=util_col,
+                marker=dict(color=colors_[1], size=2),
+                **sc_kwargs,
+            )
+            fig.add_trace(sc_trace_util, row=row, col=1)
 
     # ROW 2, COL 2: stacked bar charts -- daily generation
     bar_cols = [poss_col, act_col, pi_col]
@@ -497,7 +499,44 @@ def monthly_summary_subplots(
         )
         fig.add_trace(bar_trace_util, row=2, col=2)
 
-    # ROWS 3 to END
+    # ROW 3, COL 2: time-series subplot of site-level generation
+    ts_trace_possible = go.Scattergl(
+        y=dfH[poss_col],
+        name=poss_col,
+        **ts_kwargs,
+        **pvl_kwargs,
+        legendgroup="timeseries",
+    )
+    ts_trace_actual = go.Scattergl(
+        y=dfH[act_col],
+        name=act_col,
+        **ts_kwargs,
+        line_color="#1929f8",
+        line_width=1.5,
+        legendgroup="timeseries",
+    )
+    ts_trace_pi_meter = go.Scattergl(
+        y=dfH[pi_col],
+        name=pi_col,
+        **ts_kwargs,
+        line_color=colors_[2],
+        line_width=1.5,
+        legendgroup="timeseries",
+    )
+    for trc in [ts_trace_possible, ts_trace_actual, ts_trace_pi_meter]:
+        fig.add_trace(trc, row=3, col=2)
+    if site in dfu.columns:
+        ts_trace_util = go.Scattergl(
+            y=dfu[site],
+            name=util_col,
+            **ts_kwargs,
+            line_color=colors_[1],
+            line_width=1.5,
+            legendgroup="timeseries",
+        )
+        fig.add_trace(ts_trace_util, row=3, col=2)
+
+    # ROWS 4 to END
     for i, col in enumerate(invcols):
         scatter_trace = go.Scattergl(
             x=dfH[poacol],
@@ -507,7 +546,7 @@ def monthly_summary_subplots(
             marker_size=2,
             **sc_kwargs,
         )
-        fig.add_trace(scatter_trace, row=i + 3, col=1)
+        fig.add_trace(scatter_trace, row=i + 4, col=1)
 
         pvl_trace = go.Scattergl(
             y=dfH[pvlinvcols[i]],
@@ -516,7 +555,7 @@ def monthly_summary_subplots(
             **pvl_kwargs,
             showlegend=False,
         )
-        fig.add_trace(pvl_trace, row=i + 3, col=2)
+        fig.add_trace(pvl_trace, row=i + 4, col=2)
 
         inv_trace = go.Scattergl(
             y=dfH[col].fillna(0),
@@ -526,7 +565,7 @@ def monthly_summary_subplots(
             **inv_kwargs,
             showlegend=False,
         )
-        fig.add_trace(inv_trace, row=i + 3, col=2)
+        fig.add_trace(inv_trace, row=i + 4, col=2)
 
     # FORMATTING
     title_txt = f'<b>{site} - {dfH.index[0].date().strftime("%B %Y")}</b>'
@@ -576,6 +615,7 @@ def monthly_summary_subplots(
     )
 
     fig.update_xaxes(row=2, col=2, **xkwargs_)
+    fig.update_xaxes(row=3, col=2, **xkwargs_)
 
     for row_ in range(3, n_rows + 1):
         fig.update_xaxes(
@@ -599,13 +639,22 @@ def monthly_summary_subplots(
         showgrid=False,
         title=dict(text=f"<b>Meter</b>", standoff=0),
     )
+    fig.update_yaxes(
+        row=3,
+        col=2,
+        fixedrange=True,
+        range=[0, ymax_],
+        showgrid=False,
+        title=dict(text=f"<b>Meter</b>", standoff=4),
+    )
 
-    fig.update_yaxes(row=2, col=1, fixedrange=True, range=[0, ymax_])
-    fig.update_xaxes(row=2, col=1, fixedrange=True)
+    for row in (2, 3):
+        fig.update_yaxes(row=row, col=1, fixedrange=True, range=[0, ymax_])
+        fig.update_xaxes(row=row, col=1, fixedrange=True)
 
     ymax = max([dfH[pvlinvcols].max().max(), dfH[invcols].max().max()]) * 1.05
     for i, inv in enumerate(invnames):
-        rw = i + 3  # start at row 3
+        rw = i + 4  # start at row 4
         fig.update_yaxes(
             row=rw,
             col=2,
