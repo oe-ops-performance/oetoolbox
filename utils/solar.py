@@ -28,6 +28,7 @@ class SolarDataset(Dataset):
         self.end_date = end_date
         self.tz = site.timezone
         self.source_files = []  # init
+        self.invalid_items = []  # from pi query
 
     @property
     def columns(self):
@@ -154,14 +155,15 @@ class SolarDataset(Dataset):
             q=q,
         )
         self.data = pi_dataset.data
+        self.invalid_items = pi_dataset.invalid_items
 
     @classmethod
-    def from_pi_for_monthly_reporting(
+    def from_pi_for_monthly_report(
         cls,
-        site_name: str,
-        asset_group: str,
+        site: str,
         year: int,
         month: int,
+        asset_group: str,
         freq: str = None,
         q: bool = True,
     ):
@@ -172,4 +174,4 @@ class SolarDataset(Dataset):
         if freq is None:
             freq = "1m" if asset_group in ["Inverters", "Met Stations", "Meter"] else "1h"
         kwargs = dict(start_date=start_date, end_date=end_date, freq=freq, q=q)
-        return cls.from_defined_query_attributes(site_name, **kwargs, asset_group=asset_group)
+        return cls.from_defined_query_attributes(site_name=site, **kwargs, asset_group=asset_group)
