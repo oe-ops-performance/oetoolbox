@@ -103,12 +103,7 @@ MET_STATION_ATTRIBUTE_DICT = {
     "Kent South": {
         "Met3": ["OE.POA", "PnlTemp_C", "WindSpdAvg_mps", "GHIrr_Wm2"],
     },
-    "Maplewood 1": {
-        "MET009": ["OE.POA", "PO_BOMAvg_degC", "FI_Wthr1WS_ms"],
-        "MET022": ["OE.POA", "PO_BOMAvg_degC", "FI_Wthr1WS_ms"],
-        "MET044": ["PO_BOMAvg_degC", "FI_Wthr1WS_ms"],
-        "MET066": ["OE.POA", "PO_BOMAvg_degC", "FI_Wthr1WS_ms"],
-    },
+    "Maplewood 1": ["OE.POA", "PO_BOMAvg_degC", "FI_Wthr1WS_ms"],
     "Maplewood 2": ["OE.POA", "FI_Wthr1WS_ms"],
     "Maricopa West": {
         "Met1": ["OE.POA", "OE.Module_Temp", "OE.Wind_Speed", "Global Horizontal Irradiance"],
@@ -146,6 +141,23 @@ MET_STATION_ATTRIBUTE_DICT = {
         "Met1": ["OE.POA", "OE.Module_Temp", "OE.Wind_Speed", "Irradiance GHI"],
         "Met2": ["OE.POA", "OE.Wind_Speed", "Irradiance GHI"],
     },
+}
+
+# minute-level data
+INV_MODULE_ATTRIBUTE_DICT = {
+    "Adams East": [f"M{n}.Sts.Running" for n in range(1, 5)],
+    "FL4": ["Mod_Num_Run"],  # should be number from 0 to 6 (g.t. 0)
+    "GA3": ["Module_1_AC_Power_Active", "Module_2_AC_Power_Active"],  #  (g.t. 0)
+    "GA4": [f"Module 00{n}.Sts.P_kW" for n in range(1, 7)],  #  (g.t. 0)
+    "Grand View East": ["OE.OnlineModules"],  # inverter-level attribute
+    "Grand View West": ["OE.OnlineModules"],  # inverter-level attribute
+    "Imperial Valley": [f"MOD{n}_P_3PHASE" for n in range(1, 5)],  # (g.t. 0)
+    "Kansas": [f"M{n}.Sts.Running" for n in range(1, 5)],
+    "Kent South": [f"M{n}.Sts.Running" for n in range(1, 5)],
+    "Maplewood 1": [f"INV_FI_Mod{n}_P_kW" for n in range(1, 7)],
+    "Maplewood 2": [f"INV_FI_Mod{n}_P_kW" for n in range(1, 7)],
+    "Old River One": [f"M{n}.Sts.Running" for n in range(1, 5)],
+    "Sweetwater": ["U1.Active_power", "U2.Active_power"],
 }
 
 
