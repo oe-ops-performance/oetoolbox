@@ -84,7 +84,7 @@ def validate_query_item_list(item_list: list):
         raise ValueError("No query items/tags specified.")
     all_attpaths = all(item.startswith(PI_DATABASE_PATH) for item in item_list)
     all_pipoints = not any(PI_DATABASE_PATH in item for item in item_list)
-    if not all_attpaths or all_pipoints:
+    if not (all_attpaths or all_pipoints):
         raise ValueError(
             "All items must be of the same type (i.e. all attribute paths, or all pipoints)"
         )
@@ -322,7 +322,7 @@ class PIDataset(Dataset):
         for i, sub_range in enumerate(date_range_list):
             qprint(f"Querying range {i+1} of {len(date_range_list)}")
             time_range = self.get_af_time_range(*sub_range)
-            df_ = self._query_summaries(data_object, time_range, **afsdk_kwargs, **kwargs, q=q)
+            df_ = self._query_summaries(data_object, time_range, **afsdk_kwargs, **kwargs)
             df_ = self._format_pi_data(df_, data_format)
             df_list.append(df_)
 
@@ -441,7 +441,6 @@ class PIDataset(Dataset):
         paging_configuration: PIPagingConfiguration,
         data_format: Literal["long", "wide"],
         item_metadata: list,
-        q=True,  # temp
     ) -> pd.DataFrame:
         """queries data using the .Summaries() method from AFSDK on the given data object"""
         id_columns = self.id_columns if data_format == "long" else []
