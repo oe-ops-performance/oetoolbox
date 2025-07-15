@@ -1,4 +1,4 @@
-from itertools import chain
+import itertools
 import pandas as pd
 from pathlib import Path
 
@@ -14,7 +14,7 @@ from ..reporting.functions import (
     get_solar_budget_values,
 )
 from ..reporting.tools import get_solar_budget_values
-from ..reporting.query_attributes import monthly_query_attribute_paths
+from ..reporting.query_attributes import attribute_path, monthly_query_attribute_paths
 
 
 class PISite:
@@ -116,6 +116,54 @@ class PISite:
         else:
             path_parts = ["Renewable Fleet", f"{self.fleet.capitalize()} Assets"]
         return "\\".join([PI_DATABASE_PATH, *path_parts, self.name])
+
+    def get_attribute_paths(
+        self, asset_group: str, asset_names: list, attributes: list, only_valid=True
+    ):
+        """Returns a list of attribute paths for the selected parameters.
+        -> note: does not currently support sub-assets
+        """
+        if asset_group not in self.asset_groups:
+            raise KeyError("Invalid asset group.")
+
+        if not asset_names:
+            invalid_atts = [a for a in attributes if a not in self.pi_attributes(asset_group)]
+            if invalid_atts and only_valid:
+                raise ValueError("One or more group-level attributes does not exist.")
+            for bad_att in invalid_atts:
+                attributes.remove(bad_att)
+            if not attributes:
+                raise ValueError("None of the specified attributes exist.")
+
+            return [
+                attribute_path(self.name, asset_heirarchy=[asset_group], attribute=att)
+                for att in attributes
+            ]
+
+        invalid_assets = [a for a in asset_names if a not in self.asset_names_by_group[asset_group]]
+        if invalid_assets and only_valid:
+            raise ValueError("One or more asset names are invalid.")
+        for bad_asset in invalid_assets:
+            asset_names.remove(bad_asset)
+        if not asset_names:
+            raise ValueError("None of the specified assets exist.")
+
+        attribute_path_list = []
+        for asset in asset_names:
+            notvalid = lambda att: att not in self.pi_attributes(asset_group, asset_name=asset)
+            invalid_atts = list(filter(notvalid, attributes))
+            if invalid_atts and only_valid:
+                raise ValueError(f"One or more specified attributes for {asset=} is invalid.")
+            valid_att_paths = [
+                attribute_path(self.name, asset_heirarchy=[asset_group, asset], attribute=att)
+                for att in attributes
+                if att not in invalid_atts
+            ]
+            attribute_path_list.extend(valid_att_paths)
+
+        if not attribute_path_list:
+            raise ValueError("None of the specified attributes exist.")
+        return attribute_path_list
 
     def subassets_by_asset(self, asset_group: str):
         """Returns a list or dictionary with asset names as keys and list of subasset names as values"""
@@ -265,7 +313,7 @@ class SolarSite(PISite):
             "plots": "*.html",
         }
         output_dict = {key_: get_files(str_) for key_, str_ in glob_str_dict.items()}
-        captured_files = list(chain.from_iterable(output_dict.values()))
+        captured_files = list(itertools.chain.from_iterable(output_dict.values()))
         other_files = [fp for fp in dir.iterdir() if fp.is_file() and fp not in captured_files]
         if other_files:
             output_dict.update({"other": oepaths.sorted_filepaths(other_files)})
