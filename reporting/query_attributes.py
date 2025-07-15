@@ -235,6 +235,14 @@ def get_reporting_attribute_paths(site, asset_group) -> list:
     elif asset_group == "Meter":
         return [attribute_path(site, asset_heirarchy=[], attribute="OE.MeterMW")]  # site-level
 
+    elif asset_group == "Modules" and site in INV_MODULE_ATTRIBUTE_DICT:
+        group_af_dict = get_af_dict(site, asset_group="Inverters")
+        asset_names = list(group_af_dict.keys())
+        return [
+            attribute_path(site, asset_heirarchy=["Inverters", inv], attribute=att)
+            for inv, att in itertools.product(asset_names, INV_MODULE_ATTRIBUTE_DICT[site])
+        ]
+
     # get group asset names from af dict (if exist)
     group_af_dict = get_af_dict(site, asset_group=asset_group)
     if not group_af_dict:
@@ -269,6 +277,12 @@ def monthly_query_attribute_paths(site) -> dict:
     query_groups = list(get_af_dict(site).keys())
     if "Meter" not in query_groups:
         query_groups.append("Meter")
+
+    # check for inverter module attributes
+    inv_mod_atts = INV_MODULE_ATTRIBUTE_DICT.get(site)
+    if inv_mod_atts:
+        query_groups.append("Modules")
+
     output = {
         asset_group: get_reporting_attribute_paths(site, asset_group)
         for asset_group in query_groups
