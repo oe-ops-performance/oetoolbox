@@ -332,10 +332,10 @@ def load_multiple_meter_files(year, month, sitelist, return_fpaths=False):
 
     if not df_list:
         return
-    else:
-        df = pd.concat(df_list, axis=1)
-        ordered_cols = [c for c in ALL_HISTORIAN_SITES if c in df.columns]
-        df = df[ordered_cols]
+
+    df = pd.concat(df_list, axis=1)
+    ordered_cols = ["Day", "Hour"] + [c for c in ALL_HISTORIAN_SITES if c in df.columns]
+    df = df[ordered_cols]
 
     if return_fpaths:
         return df, fpath_dict
