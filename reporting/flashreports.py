@@ -365,6 +365,7 @@ def generate_monthlyFlashReport(
     df_avail = dfi.copy()
     kw_threshold = 0.1  # inv kw threshold
 
+    # TODO - add POA threshold condition - if below threshold (25), default to available --- i.e. always 60 unless inv not performing when it should be
     if invfile:
         df_avail = df_avail.mask(df_avail > kw_threshold, 1).copy()
         df_avail = df_avail.mask(df_avail <= kw_threshold, 0).copy()

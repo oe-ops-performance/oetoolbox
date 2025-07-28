@@ -118,11 +118,19 @@ class PISite:
         return "\\".join([PI_DATABASE_PATH, *path_parts, self.name])
 
     def get_attribute_paths(
-        self, asset_group: str, asset_names: list, attributes: list, only_valid=True
+        self,
+        asset_group: str = "",
+        asset_names: list = [],
+        attributes: list = [],
+        only_valid: bool = True,
     ):
         """Returns a list of attribute paths for the selected parameters.
-        -> note: does not currently support sub-assets
+        -> note 1: does not currently support sub-assets
+        -> note 2: does not support validation of site-level attributes
         """
+        if not asset_group:
+            return [attribute_path(self.name, asset_heirarchy=[], attribute=a) for a in attributes]
+
         if asset_group not in self.asset_groups:
             raise KeyError("Invalid asset group.")
 

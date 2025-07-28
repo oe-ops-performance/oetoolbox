@@ -348,7 +348,11 @@ def run_auto_qc(df_raw, site, q=True, q_xtra=True):
 
                 ## ac module outage condition
                 lmt_ = 25 if not isMETER(col) else 0.02
-                if isINV(col) and (pctnight < 0.05) and (df_grp[col].mean() > lmt_):
+                if (
+                    (isINV(col) or isMETER(col))
+                    and (pctnight < 0.05)
+                    and (df_grp[col].mean() > lmt_)
+                ):
                     # if isMETER(col) and (df_grp[d1_col].abs().mean() < .01)
                     # if (df_grp[d1_col].abs().mean() < 1):
                     xprint(

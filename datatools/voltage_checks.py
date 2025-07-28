@@ -144,8 +144,8 @@ def create_excursion_plot(df_query, site):
         fig.add_vrect(
             x0=x0,
             x1=x1,
-            fillcolor="navajowhite",
-            opacity=0.3,
+            fillcolor="lightsalmon",
+            opacity=0.4,
             layer="below",
             line_width=0,
         )
