@@ -8,7 +8,7 @@ from .assets import PISite
 from .config import PI_DATABASE_PATH
 from .dataset import Dataset
 from .datetime import segmented_date_ranges
-from .helpers import with_retries
+from .helpers import quiet_print_function, with_retries
 
 # add reference path for PI AFSDK import
 sys.path.append(r"C:\Program Files (x86)\PIPC\AF\PublicAssemblies\4.0")
@@ -16,7 +16,7 @@ clr.AddReference("OSIsoft.AFSDK")
 import OSIsoft  # type: ignore
 from OSIsoft.AF import PISystems  # type: ignore
 from OSIsoft.AF.Search import AFEventFrameSearch  # type: ignore
-from OSIsoft.AF.Asset import AFAttribute, AFAttributeList, AFSearchMode  # type: ignore
+from OSIsoft.AF.Asset import AFAttribute, AFAttributeList, AFSearchMode, AFValues  # type: ignore
 from OSIsoft.AF.PI import (  # type: ignore
     PIPageType,
     PIPagingConfiguration,
@@ -39,41 +39,55 @@ from OSIsoft.AF.Data import (  # type: ignore
     AFTimestampCalculation,
 )
 
-# reference for enumerations from AF SDK classes (used with query function inputs)
-SUMMARY_TYPES = {
-    "average": AFSummaryTypes.Average,
-    "minimum": AFSummaryTypes.Minimum,
-    "maximum": AFSummaryTypes.Maximum,
-    "total": AFSummaryTypes.Total,
-}
-
-CALCULATION_BASIS = {
-    "event_weighted": AFCalculationBasis.EventWeighted,
-    "time_weighted": AFCalculationBasis.TimeWeighted,
-    "time_weighted_continuous": AFCalculationBasis.TimeWeightedContinuous,
-    "time_weighted_discrete": AFCalculationBasis.TimeWeightedDiscrete,
-}
-
-TIMESTAMP_CALCULATION = {
-    "auto": AFTimestampCalculation.Auto,
-    "earliest": AFTimestampCalculation.EarliestTime,
-    "most_recent": AFTimestampCalculation.MostRecentTime,
-}
-
-PAGING_CONFIGURATION = PIPagingConfiguration(PIPageType.TagCount, 1000)
-
-QUERY_PARAMETERS = {
-    "summary_type": SUMMARY_TYPES,
-    "calculation_basis": CALCULATION_BASIS,
-    "timestamp_calculation": TIMESTAMP_CALCULATION,
+# dictionary for referencing OSIsoft objects/enumerations
+AFSDK = {
+    "boundary_type": {
+        "inside": AFBoundaryType.Inside,
+        "outside": AFBoundaryType.Outside,
+        "interpolated": AFBoundaryType.Interpolated,
+    },
+    "calculation_basis": {
+        "time_weighted": AFCalculationBasis.TimeWeighted,
+        "event_weighted": AFCalculationBasis.EventWeighted,
+        "time_weighted_continuous": AFCalculationBasis.TimeWeightedContinuous,
+        "time_weighted_discrete": AFCalculationBasis.TimeWeightedDiscrete,
+    },
+    "paging_configuration": {
+        "default": PIPagingConfiguration(PIPageType.TagCount, 1000),
+    },
+    "summary_type": {
+        "total": AFSummaryTypes.Total,
+        "average": AFSummaryTypes.Average,
+        "minimum": AFSummaryTypes.Minimum,
+        "maximum": AFSummaryTypes.Maximum,
+        "range": AFSummaryTypes.Range,
+        "count": AFSummaryTypes.Count,
+        "percent_good": AFSummaryTypes.PercentGood,
+    },
+    "timestamp_calculation": {
+        "auto": AFTimestampCalculation.Auto,
+        "earliest": AFTimestampCalculation.EarliestTime,
+        "most_recent": AFTimestampCalculation.MostRecentTime,
+    },
 }
 
 DEFAULT_QUERY_PARAMETERS = {
-    "summary_type": SUMMARY_TYPES["average"],
-    "calculation_basis": CALCULATION_BASIS["time_weighted"],
-    "timestamp_calculation": TIMESTAMP_CALCULATION["auto"],
-    "paging_configuration": PAGING_CONFIGURATION,
+    "summaries": {
+        "summary_type": "average",
+        "calculation_basis": "time_weighted",
+        "timestamp_calculation": "auto",
+        "paging_configuration": "default",
+    },
+    "recorded_values": {
+        "boundary_type": "interpolated",  # only affects end points
+        "filter_expression": "",
+        "include_filtered_values": False,
+        "paging_configuration": "default",
+        "max_count": 0,  # If > 0, sets the maximum number of values to be returned
+    },
 }
+
+QUERY_ARGS = {method: list(params.keys()) for method, params in DEFAULT_QUERY_PARAMETERS.items()}
 
 
 def validate_query_item_list(item_list: list):
@@ -112,16 +126,33 @@ class PIDataset(Dataset):
         original_item_list: list,
         start_date: str,
         end_date: str,
+        method: Literal["summaries", "recorded_values"],
         freq: str,
-        keep_tzinfo: bool = False,
+        keep_tzinfo: bool,
+        data_format: Literal["long", "wide"],
     ):
         super().__init__()
         self.site = site
-        self.item_type = validate_query_item_list(original_item_list)  # confirms all same type
         self.start_date = start_date
         self.end_date = end_date
         self.freq = freq
         self.tz = site.timezone if keep_tzinfo else None
+
+        self.item_type = validate_query_item_list(original_item_list)  # confirms all same type
+
+        if method not in ["summaries", "recorded_values"]:
+            raise KeyError("Invalid method.")
+        self.method = method
+
+        if data_format not in ["long", "wide"]:
+            raise KeyError("Invalid data format.")
+        self.data_format = data_format
+        if method == "recorded_values" and data_format == "wide":
+            print(
+                "Note: specified 'wide' format, overriding to 'long' due to "
+                "the nature of recorded values (i.e. irregular timestamps)."
+            )
+            self.data_format = "long"
 
         # database related
         self.piserver = PIServers().DefaultPIServer
@@ -135,6 +166,8 @@ class PIDataset(Dataset):
     @property
     def expected_index(self):
         """note: freq is formatted for PI (not Pandas)"""
+        if self.method == "recorded_values":
+            return None
         return pd.date_range(
             start=self.start_date,
             end=self.end_date,
@@ -159,8 +192,10 @@ class PIDataset(Dataset):
         pipoint_names: list,
         start_date: str,
         end_date: str,
-        freq: str,
+        method: str = "summaries",
+        freq: str = None,
         keep_tzinfo: bool = False,
+        data_format: str = "wide",
         raise_not_found: bool = False,
         q: bool = True,
         **query_kwargs,
@@ -184,10 +219,17 @@ class PIDataset(Dataset):
         q : bool, optional
             Quiet parameter (i.e. suppress status printouts), by default True
         """
-        site = PISite(site_name)
-        dataset = cls(site, pipoint_names, start_date, end_date, freq, keep_tzinfo)
-        kwargs = dict(data_format="wide", raise_not_found=raise_not_found, q=q) | query_kwargs
-        dataset._run_query(**kwargs)
+        dataset = cls(
+            site=PISite(site_name),
+            original_item_list=pipoint_names,
+            start_date=start_date,
+            end_date=end_date,
+            method=method,
+            freq=freq,
+            keep_tzinfo=keep_tzinfo,
+            data_format=data_format,
+        )
+        dataset._run_query(raise_not_found=raise_not_found, q=q, **query_kwargs)
         return dataset
 
     @classmethod
@@ -197,10 +239,11 @@ class PIDataset(Dataset):
         attribute_paths: list,
         start_date: str,
         end_date: str,
-        freq: str,
+        method: str = "summaries",
+        freq: str = None,
         keep_tzinfo: bool = False,
-        raise_not_found: bool = False,
         data_format: str = "wide",
+        raise_not_found: bool = False,
         q: bool = True,
         **query_kwargs,
     ):
@@ -225,10 +268,17 @@ class PIDataset(Dataset):
         q : bool, optional
             Quiet parameter (i.e. suppress status printouts), by default True
         """
-        site = PISite(site_name)
-        dataset = cls(site, attribute_paths, start_date, end_date, freq, keep_tzinfo)
-        kwargs = dict(data_format=data_format, raise_not_found=raise_not_found, q=q) | query_kwargs
-        dataset._run_query(**kwargs)
+        dataset = cls(
+            site=PISite(site_name),
+            original_item_list=attribute_paths,
+            start_date=start_date,
+            end_date=end_date,
+            method=method,
+            freq=freq,
+            keep_tzinfo=keep_tzinfo,
+            data_format=data_format,
+        )
+        dataset._run_query(raise_not_found=raise_not_found, q=q, **query_kwargs)
         return dataset
 
     def create_af_object_list(self, raise_not_found: bool):
@@ -259,13 +309,6 @@ class PIDataset(Dataset):
             return af_obj_list
         return af_obj_list.Data
 
-    def get_item_names(self, data_format: str):
-        if self.item_type == "pipoint":
-            item_names = self.item_list  # list of pipoint names
-        else:
-            item_names = self._columns_from_attpaths(data_format)
-        return item_names
-
     def get_af_time_range(self, start_date: str, end_date: str):
         """Returns AFTimeRange object for given dates with site- and user- specific timezone info"""
         aftimezone = AFTimeZone().CurrentAFTimeZone
@@ -288,33 +331,28 @@ class PIDataset(Dataset):
             sub_range = total_days
         return segmented_date_ranges(start, end, sub_range)
 
-    def _run_query(
-        self,
-        data_format: str = "wide",
-        raise_not_found: bool = False,
-        q: bool = True,
-        **query_kwargs,
-    ):
+    def _run_query(self, raise_not_found: bool = False, q: bool = True, **query_kwargs):
         """Runs PI query for the specified date range and parameters"""
-        qprint = lambda msg, end="\n": None if q else print(msg, end=end)
+        qprint = quiet_print_function(q=q)
 
         # get AFSDK data object for query (checks item_list & removes invalid items)
         data_object = self.create_data_object(raise_not_found=raise_not_found)
-        item_names = self.get_item_names(data_format)
 
         # get AFSDK-specific query parameters
-        afsdk_kwargs = DEFAULT_QUERY_PARAMETERS
-        afsdk_kwargs["time_span"] = self.af_time_span
+        afsdk_param_vals = DEFAULT_QUERY_PARAMETERS[self.method]
+        afsdk_kwargs = {}
+        for param, val in afsdk_param_vals.items():
+            param_dict = AFSDK.get(param)
+            param_val = val if not param_dict else param_dict.get(val)
+            afsdk_kwargs[param] = param_val
+
+        if self.method == "summaries":
+            afsdk_kwargs["time_span"] = self.af_time_span
 
         # check for any default parameter overrides
         custom_kwargs = self._validate_query_kwargs(query_kwargs)
-        for key in afsdk_kwargs.keys():
-            if key in custom_kwargs:
-                afsdk_kwargs.update({key: custom_kwargs[key]})
-
-        # additional keyword arguments for query function
-        item_metadata = [(name, item) for name, item in zip(item_names, self.item_list)]
-        kwargs = dict(data_format=data_format, item_metadata=item_metadata)
+        for param, val in custom_kwargs.items():
+            afsdk_kwargs.update({param: AFSDK[param][val]})
 
         # split date range & run query for sub ranges
         date_range_list = self.get_date_range_list(sub_range=11)
@@ -322,27 +360,26 @@ class PIDataset(Dataset):
         for i, sub_range in enumerate(date_range_list):
             qprint(f"Querying range {i+1} of {len(date_range_list)}")
             time_range = self.get_af_time_range(*sub_range)
-            df_ = self._query_summaries(data_object, time_range, **afsdk_kwargs, **kwargs)
-            df_ = self._format_pi_data(df_, data_format)
+            df_ = self._query_pi_data(data_object, time_range, **afsdk_kwargs)
+            df_ = self._format_pi_data(df_)
             df_list.append(df_)
 
         df = pd.concat(df_list, axis=0, ignore_index=False)
-        if not all(x in df.index for x in self.expected_index):  # validate index
-            df = df.reindex(self.expected_index)
-        df = df.rename_axis("Timestamp")
+        if self.method == "summaries":
+            if not all(x in df.index for x in self.expected_index):  # validate index
+                df = df.reindex(self.expected_index)
 
+        df = df.rename_axis("Timestamp")
         self.data = df.copy()
         qprint(f"Done. {df.shape = }")
 
-    def _format_pi_data(self, dataframe: pd.DataFrame, data_format: str) -> pd.DataFrame:
+    def _format_pi_data(self, dataframe: pd.DataFrame) -> pd.DataFrame:
         """Formats the data output from PI query.
 
         Parameters
         ----------
         dataframe : pd.DataFrame
             A dataframe consisting of values and timestamps from the .GetValueArrays method
-        data_format : str
-            The format for the output dataframe; either "wide" or "long"
 
         Returns
         -------
@@ -358,7 +395,7 @@ class PIDataset(Dataset):
         df = df.tz_convert(tz=self.site.timezone)
         if self.tz is None:
             df = df.tz_localize(None)
-        if data_format == "wide":
+        if self.data_format == "wide":
             start, end = df.index.min(), df.index.max()
             expected_index = pd.date_range(start, end, freq=self.freq.replace("m", "min"))
             if df.index.duplicated().any():
@@ -382,46 +419,75 @@ class PIDataset(Dataset):
             "level": len(related_elements),
         }
 
-    def _attpath_list_meta(self, attpath_list: list):
-        """Returns a dictionary of metadata for given list of attribute paths"""
-        all_asset_groups = [self._attpath_meta(p)["asset_group"] for p in attpath_list]
-        all_attribute_levels = [self._attpath_meta(p)["level"] for p in attpath_list]
-        return {
-            "all_same_group": len(set(all_asset_groups)) == 1,
-            "all_same_level": len(set(all_attribute_levels)) == 1,
-            "max_level": max(all_attribute_levels),
-        }
-
-    def _column_name_from_attpath(self, attpath: str, skip_asset_group: bool = True):
-        """Returns a column name for use in wide-format dataframe"""
-        path_parts = self._attpath_meta(attpath)["parts"]
-        group_index = path_parts.index(self.site.name) + 1  # asset group index
-        if path_parts[-2] == self.site.name:
-            group_index -= 1  # make site the group
-        if skip_asset_group:
-            group_index += 1
-        return "_".join(reversed(path_parts[group_index:]))
-
-    def _columns_from_attpaths(self, data_format: str):
-        """Returns a list of columns names for query"""
-        skip_group = self._attpath_list_meta(self.item_list)["all_same_group"]
-        if data_format == "wide":
-            return [self._column_name_from_attpath(p, skip_group) for p in self.item_list]
+    @property
+    def all_same_asset_group(self) -> bool:
+        if self.item_type == "pipoint":
+            return False
+        all_asset_groups = [self._attpath_meta(p)["asset_group"] for p in self.item_list]
+        return len(set(all_asset_groups)) == 1
 
     @property
-    def id_columns(self):
+    def all_same_attribute_levels(self) -> bool:  # not sure if needed
+        if self.item_type == "pipoint":
+            return False
+        all_attribute_levels = [self._attpath_meta(p)["level"] for p in self.item_list]
+        return len(set(all_attribute_levels)) == 1
+
+    @property
+    def max_attribute_path_level(self) -> int:
+        if self.item_type == "pipoint":
+            return 0
+        return max([self._attpath_meta(p)["level"] for p in self.item_list])
+
+    @property
+    def columns_from_attribute_paths(self) -> list:
+        if self.item_type == "pipoint":
+            return []
+        column_names = []
+        for attpath in self.item_list:
+            path_parts = self._attpath_meta(attpath)["parts"]
+            group_index = path_parts.index(self.site.name) + 1  # asset group index
+            if path_parts[-2] == self.site.name:
+                group_index -= 1  # make site the group
+            if self.all_same_asset_group:
+                group_index += 1  # skip asset group in name
+            col = "_".join(reversed(path_parts[group_index:]))
+            column_names.append(col)
+        return column_names
+
+    @property
+    def item_names(self) -> list:
+        """Returns list equal in length to self.item_list"""
+        if self.item_type == "pipoint":
+            return self.item_list  # list of pipoint names
+        return self.columns_from_attribute_paths  # list of columns derived from attribute paths
+
+    @property
+    def id_columns(self) -> list:
         """Returns a list of necessary ID columns for use with long-format data
         -> note: currently only supports attribute paths
         """
+        if self.data_format == "wide":
+            return []  # only long format
         if self.item_type == "pipoints":
-            return []  # long format not currently supported for pipoints
-        n_elements_max = self._attpath_list_meta(self.item_list)["max_level"]
+            return []  # long format for pipoints not currently supported
+        n_elements_max = self.max_attribute_path_level
         id_columns = ["Group_ID", "Asset_ID", "Subasset_ID", "Subasset2_ID"]
         if n_elements_max <= 4:
             return id_columns[:n_elements_max]
         for i in range(n_elements_max - 4):
             id_columns.append(f"Subasset{i+3}_ID")
         return id_columns
+
+    def _get_item_elements(self, item: str) -> list:
+        """Returns list of values corresponding to ID columns for long format data
+        -> note: currently only supports attribute paths
+        """
+        n_cols = len(self.id_columns)
+        item_elements = self._attpath_meta(attpath=item)["elements"]
+        if len(item_elements) < n_cols:
+            item_elements += [np.nan] * (n_cols - len(item_elements))
+        return item_elements
 
     def _check_for_bad_data(self, values, tstamps, flags):
         """Checks outputs of .GetValueArrays() function in query (returns True if data is bad)"""
@@ -430,7 +496,43 @@ class PIDataset(Dataset):
         return any([condition_1, condition_2])
 
     @with_retries(n_max=3)
-    def _query_summaries(
+    def _query_pi_data(
+        self,
+        data_object: Union[PIPointList, AFListData],
+        time_range: AFTimeRange,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """queries data using the defined method from AFSDK"""
+        if self.method == "recorded_values":
+            df = self._query_pi_recorded_values(data_object, time_range, **kwargs)
+        else:
+            df = self._query_pi_summaries(data_object, time_range, **kwargs)
+        return df
+
+    def _query_pi_recorded_values(
+        self,
+        data_object: Union[PIPointList, AFListData],
+        time_range: AFTimeRange,
+        boundary_type: AFBoundaryType,
+        filter_expression: str,
+        include_filtered_values: bool,
+        paging_configuration: PIPagingConfiguration,
+        max_count: int,
+    ) -> pd.DataFrame:
+        """queries data using the .RecordedValues() method from AFSDK on the given data object"""
+        # note: should always return long format data, as datetime index will differ for each tag
+        recorded_values = data_object.RecordedValues(
+            time_range,
+            boundary_type,
+            filter_expression,
+            include_filtered_values,
+            paging_configuration,
+            max_count,
+        )
+        df = self._extract_data_from_query_output(query_output=recorded_values)
+        return df
+
+    def _query_pi_summaries(
         self,
         data_object: Union[PIPointList, AFListData],
         time_range: AFTimeRange,
@@ -439,49 +541,31 @@ class PIDataset(Dataset):
         calculation_basis: AFCalculationBasis,
         timestamp_calculation: AFTimestampCalculation,
         paging_configuration: PIPagingConfiguration,
-        data_format: Literal["long", "wide"],
-        item_metadata: list,
     ) -> pd.DataFrame:
         """queries data using the .Summaries() method from AFSDK on the given data object"""
-        id_columns = self.id_columns if data_format == "long" else []
-        query_args = [summary_type, calculation_basis, timestamp_calculation, paging_configuration]
-        summaries = data_object.Summaries(time_range, time_span, *query_args)
-        df_list = []
-        for output, item_meta in zip(summaries, item_metadata):
-            item_name, item = item_meta
-            args = [output, data_format, item_name, self.item_type]
-            kwargs = {}
-            if data_format == "long" and self.item_type == "attribute":
-                item_elements = self._attpath_meta(attpath=item)["elements"]
-                if len(item_elements) < len(id_columns):
-                    item_elements += [np.nan] * (len(id_columns) - len(item_elements))
-                kwargs = dict(item_elements=item_elements, id_columns=id_columns)
-            df_ = self._retrieve_query_output_data(*args, **kwargs)
-            df_list.append(df_)
-
-        if not df_list:
-            raise ValueError("Error retrieving data.")
-
-        if data_format == "wide":
-            df = pd.concat(df_list, axis=1)
-            # confirm all columns exist in output
-            for i, item_meta in enumerate(item_metadata):
-                item_name, _ = item_meta
-                if item_name not in df.columns:
-                    df.insert(i, item_name, np.nan)
-        else:  # long format  TODO
-            df = pd.concat(df_list, axis=0)
+        summaries = data_object.Summaries(
+            time_range,
+            time_span,
+            summary_type,
+            calculation_basis,
+            timestamp_calculation,
+            paging_configuration,
+        )
+        df = self._extract_data_from_query_output(query_output=summaries)
         return df
 
-    def _retrieve_query_output_data(
-        self,
-        query_output,
-        data_format: str,
-        item_name: str,
-        item_type: str,
-        item_elements: list = [],
-        id_columns: list = [],
-    ):
+    def _extract_data_from_query_output(self, query_output):
+        """Iterates over query output object and gets data from AFValues."""
+        df_list = []
+        for output, item_name, item in zip(query_output, self.item_names, self.item_list):
+            # note: type(output) = IDictionary if method="summaries", else AFValues
+            df_ = self._retrieve_data(output, item_name, item)
+            df_list.append(df_)
+        if not df_list:
+            raise ValueError("Error retrieving data.")
+        return self._concatenate_data(df_list)
+
+    def _retrieve_data(self, output, item_name: str, item: str):
         """Iterates over the AFValues collection and returns a dataframe with the associated data
 
         note: the .Summaries() query method returns an object of the following type:
@@ -491,16 +575,10 @@ class PIDataset(Dataset):
         ----------
         query_output : System.Collections.Generic.IDictionary[AFSummaryTypes,AFValues]
             A dictionary-like object with query summary types as keys and data as values.
-        data_format : str
-            The target output format for the data; either "wide" or "long"
         item_name : str
             The name to use for the data column (if wide format) or asset ID (if long format)
-        item_type : str
-            The type/origin of data, either "attribute" or "pipoint"
-        item_elements : list, optional
-            The list of elements associated with attribute; only applies for "long" data
-        id_columns : list, optional
-            The element ID columns to include; only applies for "long" data from attribute paths
+        item : str
+            The attribute path associated with the item name; only applies for "long" data
 
         Returns
         -------
@@ -509,32 +587,73 @@ class PIDataset(Dataset):
             note: dtype is usually float but not guaranteed.
             If all data is bad, returns empty dataframe.
         """
-        # get AFValues object from IDictionary (.Values method returns an iterator)
-        af_values = [vals for vals in query_output.Values].pop()
+        if isinstance(output, AFValues):
+            # RecordedValues method -> query_output = IEnumerable<AFValues>
+            af_values = output
+        else:
+            # Summaries method -> query_output = IEnumerable<IDictionary<AFSummaryTypes, AFValues>>
+            af_values = [vals for vals in output.Values].pop()
         values, tstamps, flags = af_values.GetValueArrays()
         if self._check_for_bad_data(values, tstamps, flags):
             return pd.DataFrame()
 
-        if data_format == "wide":
+        if self.data_format == "wide":
+            # item_name is either pipoint, or column name derived from attribute path
             return pd.DataFrame({item_name: list(values)}, index=list(tstamps))
 
+        # long format data
         df_ = pd.DataFrame({"Value": list(values)}, index=list(tstamps))
-        if item_type == "pipoint":
+        if self.item_type == "pipoint":
             df_["PIPoint"] = item_name
             return df_
 
+        # long format for attribute paths
         df_["Attribute"] = item_name
-        for element, id_col in zip(item_elements, id_columns):
+        for element, id_col in zip(self._get_item_elements(item), self.id_columns):
             df_[id_col] = element
         return df_
 
+    def _concatenate_data(self, df_list: list):
+        if self.data_format == "wide":
+            df = pd.concat(df_list, axis=1)
+            # confirm all columns exist in output
+            for i, item_name in enumerate(self.item_names):
+                if item_name not in df.columns:
+                    df.insert(i, item_name, np.nan)
+        else:  # long format  TODO
+            df = pd.concat(df_list, axis=0)
+        return df
+
     def _validate_query_kwargs(self, kwargs):
-        """Returns dictionary of keys/values that exist in query parameter dict"""
+        """Returns dictionary of keys/values that exist in AFSDK namespace."""
         valid_kwargs = {}
         for key, val in kwargs.items():
-            param_dict = QUERY_PARAMETERS.get(key)
-            if not param_dict:
+            # normalize to lower case
+            key = key.lower()
+
+            # case 1: max_count for recorded values query (only parameter with non-string value)
+            if key == "max_count":
+                if isinstance(val, int):
+                    if val > 0:
+                        valid_kwargs.update({key: val})
+                        continue
                 continue
-            if val in param_dict:
-                valid_kwargs.update({key: val})
+
+            # confirm value is a string
+            if not isinstance(val, str):
+                continue
+
+            # normalize to lower case
+            val = val.lower()
+
+            # confirm key is valid
+            if key not in DEFAULT_QUERY_PARAMETERS[self.method]:
+                continue
+
+            # verify value has a defined AFSDK object
+            if val not in AFSDK[key]:
+                continue
+
+            valid_kwargs.update({key: val})
+
         return valid_kwargs

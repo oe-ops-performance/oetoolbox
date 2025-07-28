@@ -138,25 +138,33 @@ class GADSSite(PISite):
         super().__init__(name)  # raises ValueError if site does not exist in AF structure
         if self.fleet == "gas":
             raise ValueError("Gas sites are currently not supported.")
-        # self.site = site
         self.gads_attributes = GADS_ATTRIBUTES[self.fleet]
+        self.site_level_attributes = self.gads_attributes["site"]
         self.asset_group = list(self.gads_attributes["asset"].keys())[0]  # temp
+        self.asset_names = self.asset_names_by_group[self.asset_group]
+        self.asset_level_attributes = self.gads_attributes["asset"][self.asset_group]
 
     def __str__(self):
-        fmt_row = lambda item, val: f"{item.rjust(26)}| {val}"
-        n_assets = len(self.asset_names_by_group[self.asset_group])
+        fmt_row = lambda item, val: "  ".join([item.rjust(29), "-->", str(val)])
         asset_abbr = self.asset_group[:3].lower()
+        n_site_atts = len(self.site_level_attributes)
+        n_atts_per_asset = len(self.asset_level_attributes)
+        n_asset_atts = n_atts_per_asset * len(self.asset_names)
+        n_expected = n_asset_atts + n_site_atts
+        n_valid = len(self.query_attributes)
         return "\n".join(
             [
-                "-> Instance of oetoolbox.reporting.gads.GADSSite",
-                fmt_row("name", self.name),
-                fmt_row("fleet", self.fleet),
+                "oetoolbox.reporting.gads.GADSSite",
+                fmt_row("site name", self.name),
+                fmt_row("fleet", self.fleet.capitalize()),
                 fmt_row("ac_capacity", f"{self.ac_capacity} MW"),
-                fmt_row("", ""),
-                fmt_row("n_attributes (site-level)", len(self.gads_attributes["site"])),
-                fmt_row("n_attributes (asset-level)", len(self.gads_attributes["asset"])),
-                fmt_row("", f"(n_{asset_abbr} = {n_assets})"),
-                fmt_row("n_attributes (total)", len(self.query_attributes)),
+                fmt_row(f"n_{asset_abbr}", len(self.asset_names)),
+                fmt_row("n_attributes / asset", n_atts_per_asset),
+                fmt_row("n_attributes (asset-level)", n_asset_atts),
+                fmt_row("n_attributes (site-level)", n_site_atts),
+                fmt_row("n_total (expected)", n_expected),
+                fmt_row("n_total (valid)", n_valid),
+                fmt_row("n_missing", n_expected - n_valid),
             ]
         )
 
@@ -168,24 +176,14 @@ class GADSSite(PISite):
 
     @property
     def query_attributes(self) -> list:
-
-        # get site level attribute paths
-        att_paths = [attribute_path(self.name, [], att) for att in fleet_atts["site"]]
-
-        # add asset-level attribute paths
-        asset_attributes = fleet_atts[self.asset_group]
-        asset_names = self.site.subassets_by_asset(asset_group=self.asset_group)
-        if isinstance(asset_names, dict):
-            asset_names = [*asset_names]
-        att_paths.extend(
-            [
-                attribute_path(
-                    site=self.name, asset_heirarchy=[self.asset_group, asset], attribute=att
-                )
-                for asset, att in itertools.product(asset_names, asset_attributes)
-            ]
+        site_level_atts = self.get_attribute_paths(attributes=self.site_level_attributes)
+        asset_level_atts = self.get_attribute_paths(
+            asset_group=self.asset_group,
+            asset_names=self.asset_names,
+            attributes=self.asset_level_attributes,
+            only_valid=False,  # omits non-existent attributes
         )
-        return att_paths
+        return site_level_atts + asset_level_atts
 
     def quarterly_gads_path(self, year: int, quarter: int):
         fleet_folder = self.fleet.capitalize()
