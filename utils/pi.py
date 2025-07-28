@@ -41,10 +41,14 @@ from OSIsoft.AF.Data import (  # type: ignore
 
 # dictionary for referencing OSIsoft objects/enumerations
 AFSDK = {
-    "boundary_type": {"interpolated": AFBoundaryType.Interpolated},
+    "boundary_type": {
+        "inside": AFBoundaryType.Inside,
+        "outside": AFBoundaryType.Outside,
+        "interpolated": AFBoundaryType.Interpolated,
+    },
     "calculation_basis": {
-        "event_weighted": AFCalculationBasis.EventWeighted,
         "time_weighted": AFCalculationBasis.TimeWeighted,
+        "event_weighted": AFCalculationBasis.EventWeighted,
         "time_weighted_continuous": AFCalculationBasis.TimeWeightedContinuous,
         "time_weighted_discrete": AFCalculationBasis.TimeWeightedDiscrete,
     },
@@ -52,10 +56,13 @@ AFSDK = {
         "default": PIPagingConfiguration(PIPageType.TagCount, 1000),
     },
     "summary_type": {
+        "total": AFSummaryTypes.Total,
         "average": AFSummaryTypes.Average,
         "minimum": AFSummaryTypes.Minimum,
         "maximum": AFSummaryTypes.Maximum,
-        "total": AFSummaryTypes.Total,
+        "range": AFSummaryTypes.Range,
+        "count": AFSummaryTypes.Count,
+        "percent_good": AFSummaryTypes.PercentGood,
     },
     "timestamp_calculation": {
         "auto": AFTimestampCalculation.Auto,
@@ -344,9 +351,8 @@ class PIDataset(Dataset):
 
         # check for any default parameter overrides
         custom_kwargs = self._validate_query_kwargs(query_kwargs)
-        for key in afsdk_kwargs.keys():
-            if key in custom_kwargs:
-                afsdk_kwargs.update({key: custom_kwargs[key]})
+        for param, val in custom_kwargs.items():
+            afsdk_kwargs.update({param: AFSDK[param][val]})
 
         # split date range & run query for sub ranges
         date_range_list = self.get_date_range_list(sub_range=11)
