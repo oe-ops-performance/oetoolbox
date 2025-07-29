@@ -112,12 +112,52 @@ class PIDataset(Dataset):
     Additional Parameters
     ---------------------
     site : oetoolbox.utils.assets.PISite
-        An instance of a PI site, providing relevant attributes/methods for obtaining data
+        An instance of a PI site, providing relevant attributes/methods for obtaining data.
+    original_item_list : list[str]
+        A list of pipoint names or attribute paths to query. Must be one or the other, not a mix.
+    start_date : str
+        The start date for the query range. Format = "%Y-%m-%d".
+    end_date : str
+        The end date for the query range. Format = "%Y-%m-%d".
+    method : Literal["summaries", "recorded_values"]
+        The type of query to execute.
+    freq : str
+        The data interval, formatted for PI (e.g. "1m", "5m", "1h").
+        Must specify when using the summaries method.
+    keep_tzinfo : bool
+        Whether to return a tz-aware dataset.
+    data_format : Literal["long", "wide"]
+        The format of the output dataframe. Only applies when using the summaries method;
+        forced to False when querying recorded_values due to discontinuous nature of readings.
+    raise_not_found : bool, optional
+        Determines whether to raise an Exception when query tag(s) do not exist. Default = False.
 
     Additional Attributes
     ---------------------
-    site : oetoolbox.utils.assets.PISite
-        An instance of a PI site, providing relevant attributes/methods for obtaining data
+    site : PISite
+    start_date : str
+    end_date : str
+    method : str
+    freq : str
+    data_format : str
+    tz : str
+        The timezone for the output data. If keep_tzinfo=True, uses tz from SolarSite object.
+    piserver : OSIsoft.AF.PI.PIServer
+        The default PIServer configured for the current client machine.
+    afserver : OSIsoft.AF.PISystem
+        The default PISystem configured in the AF SDK.
+    database : OSIsoft.AF.AFDatabase
+        The database that contains data for Onward Energy fleet assets.
+    af_data_object : Union[OSIsoft.AF.Data.AFListData, OSIsoft.AF.PI.PIPointList]
+        The AFSDK object for the specified pipoints or attribute paths.
+    item_type : Literal["attribute", "pipoint"]
+        The type of item designated in original_item_list.
+    item_list : list[str]
+        A list of validated items from original_item_list. Initializes with original list;
+        if raise_not_found=False, invalid items are removed from the list.
+    invalid_items : list[str]
+        A list of invalid items from original_item_list. Initializes as empty list; if
+        raise_not_found=False, appends any invalid items to the list.
     """
 
     def __init__(
@@ -130,38 +170,43 @@ class PIDataset(Dataset):
         freq: str,
         keep_tzinfo: bool,
         data_format: Literal["long", "wide"],
+        raise_not_found: bool = False,
     ):
         super().__init__()
         self.site = site
         self.start_date = start_date
         self.end_date = end_date
+        self.method = method
         self.freq = freq
         self.tz = site.timezone if keep_tzinfo else None
+        self.data_format = data_format
 
-        self.item_type = validate_query_item_list(original_item_list)  # confirms all same type
-
+        # validate specified query method and data format
         if method not in ["summaries", "recorded_values"]:
             raise KeyError("Invalid method.")
-        self.method = method
-
         if data_format not in ["long", "wide"]:
             raise KeyError("Invalid data format.")
-        self.data_format = data_format
+
+        # force data format to long if querying recorded values
         if method == "recorded_values" and data_format == "wide":
+            self.data_format = "long"
             print(
                 "Note: specified 'wide' format, overriding to 'long' due to "
                 "the nature of recorded values (i.e. irregular timestamps)."
             )
-            self.data_format = "long"
 
         # database related
         self.piserver = PIServers().DefaultPIServer
         self.afserver = PISystems().DefaultPISystem
         self.database = self.afserver.Databases.get_Item("Onward Energy")
 
-        # for tracking items that don't exist in database
+        # validate specified query items/tags
+        self.item_type = validate_query_item_list(original_item_list)  # confirms all same type
         self.item_list = original_item_list  # init
         self.invalid_items = []  # init
+
+        # get af data object for specified query items (includes validation)
+        self.af_data_object = self._create_data_object(raise_not_found=raise_not_found)
 
     @property
     def expected_index(self):
@@ -183,7 +228,14 @@ class PIDataset(Dataset):
 
     @property
     def columns(self):
-        return []  # not sure if needed here.. TODO: revisit origin in Dataset class
+        return []  # TODO - evaluate parent class & determine if needed
+
+    def expected_columns(self):
+        """Returns list of columns for expected output dataframe"""
+        if self.data_format == "wide":
+            return self.item_names
+        data_col = "PIPoint" if self.item_type == "pipoint" else "Attribute"
+        return ["Value", data_col, *self.id_columns]
 
     @classmethod
     def from_pipoints(
@@ -239,8 +291,8 @@ class PIDataset(Dataset):
         attribute_paths: list,
         start_date: str,
         end_date: str,
-        method: str = "summaries",
         freq: str = None,
+        method: str = "summaries",
         keep_tzinfo: bool = False,
         data_format: str = "wide",
         raise_not_found: bool = False,
@@ -281,7 +333,7 @@ class PIDataset(Dataset):
         dataset._run_query(raise_not_found=raise_not_found, q=q, **query_kwargs)
         return dataset
 
-    def create_af_object_list(self, raise_not_found: bool):
+    def _create_af_object_list(self, raise_not_found: bool):
         """creates either PIPointList or AFAttributeList object using defined item_list"""
         obj_list = PIPointList() if self.item_type == "pipoint" else AFAttributeList()
         for item in self.item_list:
@@ -298,11 +350,11 @@ class PIDataset(Dataset):
             return obj_list
         raise ValueError(f"No valid {self.item_type}s found in list.")
 
-    def create_data_object(self, raise_not_found: bool):
+    def _create_data_object(self, raise_not_found: bool):
         """Returns data object using defined item_list
         -> when raise_not_found=False, invalid items are removed from self.item_list
         """
-        af_obj_list = self.create_af_object_list(raise_not_found=raise_not_found)
+        af_obj_list = self._create_af_object_list(raise_not_found=raise_not_found)
         for item in self.invalid_items:
             self.item_list.remove(item)
         if self.item_type == "pipoint":
@@ -331,12 +383,9 @@ class PIDataset(Dataset):
             sub_range = total_days
         return segmented_date_ranges(start, end, sub_range)
 
-    def _run_query(self, raise_not_found: bool = False, q: bool = True, **query_kwargs):
+    def _run_query(self, q: bool = True, **query_kwargs):
         """Runs PI query for the specified date range and parameters"""
         qprint = quiet_print_function(q=q)
-
-        # get AFSDK data object for query (checks item_list & removes invalid items)
-        data_object = self.create_data_object(raise_not_found=raise_not_found)
 
         # get AFSDK-specific query parameters
         afsdk_param_vals = DEFAULT_QUERY_PARAMETERS[self.method]
@@ -360,7 +409,7 @@ class PIDataset(Dataset):
         for i, sub_range in enumerate(date_range_list):
             qprint(f"Querying range {i+1} of {len(date_range_list)}")
             time_range = self.get_af_time_range(*sub_range)
-            df_ = self._query_pi_data(data_object, time_range, **afsdk_kwargs)
+            df_ = self._query_pi_data(time_range, **afsdk_kwargs)
             df_ = self._format_pi_data(df_)
             df_list.append(df_)
 
@@ -469,8 +518,8 @@ class PIDataset(Dataset):
         """
         if self.data_format == "wide":
             return []  # only long format
-        if self.item_type == "pipoints":
-            return []  # long format for pipoints not currently supported
+        if self.item_type == "pipoint":
+            return []  # does not currently support inferred assets from pipoints
         n_elements_max = self.max_attribute_path_level
         id_columns = ["Group_ID", "Asset_ID", "Subasset_ID", "Subasset2_ID"]
         if n_elements_max <= 4:
@@ -496,22 +545,16 @@ class PIDataset(Dataset):
         return any([condition_1, condition_2])
 
     @with_retries(n_max=3)
-    def _query_pi_data(
-        self,
-        data_object: Union[PIPointList, AFListData],
-        time_range: AFTimeRange,
-        **kwargs,
-    ) -> pd.DataFrame:
+    def _query_pi_data(self, time_range: AFTimeRange, **kwargs) -> pd.DataFrame:
         """queries data using the defined method from AFSDK"""
         if self.method == "recorded_values":
-            df = self._query_pi_recorded_values(data_object, time_range, **kwargs)
+            df = self._query_pi_recorded_values(time_range, **kwargs)
         else:
-            df = self._query_pi_summaries(data_object, time_range, **kwargs)
+            df = self._query_pi_summaries(time_range, **kwargs)
         return df
 
     def _query_pi_recorded_values(
         self,
-        data_object: Union[PIPointList, AFListData],
         time_range: AFTimeRange,
         boundary_type: AFBoundaryType,
         filter_expression: str,
@@ -521,7 +564,7 @@ class PIDataset(Dataset):
     ) -> pd.DataFrame:
         """queries data using the .RecordedValues() method from AFSDK on the given data object"""
         # note: should always return long format data, as datetime index will differ for each tag
-        recorded_values = data_object.RecordedValues(
+        recorded_values = self.af_data_object.RecordedValues(
             time_range,
             boundary_type,
             filter_expression,
@@ -534,7 +577,6 @@ class PIDataset(Dataset):
 
     def _query_pi_summaries(
         self,
-        data_object: Union[PIPointList, AFListData],
         time_range: AFTimeRange,
         time_span: AFTimeSpan,
         summary_type: AFSummaryTypes,
@@ -543,7 +585,7 @@ class PIDataset(Dataset):
         paging_configuration: PIPagingConfiguration,
     ) -> pd.DataFrame:
         """queries data using the .Summaries() method from AFSDK on the given data object"""
-        summaries = data_object.Summaries(
+        summaries = self.af_data_object.Summaries(
             time_range,
             time_span,
             summary_type,
