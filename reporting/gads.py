@@ -1,11 +1,14 @@
 import itertools
 import pandas as pd
+import numpy as np
 from pathlib import Path
 
 from ..reporting.query_attributes import attribute_path
 from ..utils import oemeta, oepaths
 from ..utils.assets import PISite
+from ..utils.helpers import quiet_print_function
 from ..utils.pi import PIDataset
+from ..utils.solar import SolarDataset
 
 
 GADS_DIR = Path(oepaths.operations, "Compliance", "GADS")
@@ -20,7 +23,10 @@ GADS_CAPACITY_LIMITS = {
 }
 GADS_ATTRIBUTES = {
     "solar": {
-        "site": ["OE.MeterMW", "OE.InvertersOnline", "OE.AvgPOA", "OE.AvgAmbientTemp"],
+        "site": [
+            "OE.MeterMW",
+            "OE.InvertersOnline",
+        ],  # "OE.MeterMW", "OE.AvgPOA", "OE.AvgAmbientTemp"] -> from files
         "asset": {
             "Inverters": [
                 "OE.ActivePower",
@@ -62,20 +68,24 @@ GADS_METADATA = pd.DataFrame.from_dict(
         "Willow Creek": [72.0, 48, 1.5, 14],
     },
     orient="index",
-    columns=["capacity", "n_turbines", "wtg_rating", "min_wtg_offline"],
+    columns=["capacity", "n_assets", "asset_rating", "min_offline"],
 )
 
 
-def eligible_gads_sites(year: int) -> list:
+def eligible_gads_sites(year: int, by_fleet=True) -> list:
     """Returns list of sites at or above the GADS capacity limit for selected year."""
-    eligible_sites = []
+    eligible_sites = {}
     for fleet in ["solar", "wind"]:
         min_capacity = GADS_CAPACITY_LIMITS[fleet].get(str(year))
         if not min_capacity:
             raise KeyError(f"The capacity limit for {year=} is not defined.")
         sitelist = GADS_METADATA.loc[GADS_METADATA["capacity"].ge(min_capacity)].index.to_list()
-        eligible_sites.extend(list(sorted(sitelist)))
-    return eligible_sites
+        eligible_sites[fleet] = list(
+            sorted([s for s in sitelist if s in oemeta.PI_SITES_BY_FLEET[fleet]])
+        )
+    if by_fleet:
+        return eligible_sites
+    return list(itertools.chain.from_iterable(eligible_sites.values()))
 
 
 def gads_metadata():
@@ -91,7 +101,7 @@ def gads_metadata():
         df_meta = df_meta.set_index('site').rename_axis(None)
         df_meta['min_wtg_offline'] = (20 / df_meta['wtg_rating']).apply(lambda x: np.ceil(x)).astype(int)
     """
-    meta_index = ["capacity", "n_turbines", "wtg_rating", "min_wtg_offline"]
+    meta_index = ["capacity", "n_assets", "asset_rating", "min_offline"]
     meta_data = {
         "Maplewood 1": [222, 77, 3.15, 7],
         "GA4": [200, 68, 3.0, 7],
@@ -139,6 +149,10 @@ class GADSSite(PISite):
         if self.fleet == "gas":
             raise ValueError("Gas sites are currently not supported.")
         self.gads_attributes = GADS_ATTRIBUTES[self.fleet]
+        try:
+            self.metadata = GADS_METADATA.loc[self.name].to_dict()
+        except KeyError:
+            self.metadata = {}
         self.site_level_attributes = self.gads_attributes["site"]
         self.asset_group = list(self.gads_attributes["asset"].keys())[0]  # temp
         self.asset_names = self.asset_names_by_group[self.asset_group]
@@ -152,13 +166,23 @@ class GADSSite(PISite):
         n_asset_atts = n_atts_per_asset * len(self.asset_names)
         n_expected = n_asset_atts + n_site_atts
         n_valid = len(self.query_attributes)
-        return "\n".join(
+        row_list = [
+            "oetoolbox.reporting.gads.GADSSite",
+            " ",
+            fmt_row("fleet", self.fleet.capitalize()),
+            fmt_row("site_name", self.name),
+            fmt_row("ac_capacity", f"{self.ac_capacity} MW"),
+            fmt_row("n_assets", len(self.asset_names)),
+        ]
+        if self.metadata:
+            for key in ["asset_rating", "min_offline"]:
+                val = self.metadata[key]
+                if "offline" in key:
+                    val = int(val)
+                row_list.append(fmt_row(key, val))
+        row_list.extend(
             [
-                "oetoolbox.reporting.gads.GADSSite",
-                fmt_row("site name", self.name),
-                fmt_row("fleet", self.fleet.capitalize()),
-                fmt_row("ac_capacity", f"{self.ac_capacity} MW"),
-                fmt_row(f"n_{asset_abbr}", len(self.asset_names)),
+                " ",
                 fmt_row("n_attributes / asset", n_atts_per_asset),
                 fmt_row("n_attributes (asset-level)", n_asset_atts),
                 fmt_row("n_attributes (site-level)", n_site_atts),
@@ -167,6 +191,7 @@ class GADSSite(PISite):
                 fmt_row("n_missing", n_expected - n_valid),
             ]
         )
+        return "\n".join(row_list)
 
     @property
     def ac_capacity(self) -> int:
@@ -184,6 +209,18 @@ class GADSSite(PISite):
             only_valid=False,  # omits non-existent attributes
         )
         return site_level_atts + asset_level_atts
+
+    def gads_folder(self, year: int) -> Path:
+        folder = Path(GADS_DIR, self.fleet.capitalize(), str(year))
+        if not folder.exists():
+            folder.mkdir(parents=True)
+        return folder
+
+    def monthly_gads_path(self, year: int, month: int):
+        ym_path = self.gads_folder(year).joinpath(str(month))
+        if not ym_path.exists():
+            ym_path.mkdir()
+        return ym_path
 
     def quarterly_gads_path(self, year: int, quarter: int):
         fleet_folder = self.fleet.capitalize()
@@ -217,14 +254,178 @@ class GADSSite(PISite):
             attribute_paths=self.query_attributes,
             start_date=start_date,
             end_date=end_date,
-            freq="1h",
+            freq="1h",  # query non-inverter attributes at minute-level (grab inv data from files) and then resample to hourly with average aggregation & use .floor to round down
             keep_tzinfo=False,
             q=q,
         )
-        return dataset.data
+        df = dataset.data
+        fmt_col = lambda c: c if "_" not in c else "_".join(c.split("_")[:-1])
+        df.columns = df.columns.map(fmt_col)  # removes asset group
+        if self.fleet == "solar":
+            # add pvlib data from file
+            dfp = self._get_pvlib_data(start_date, end_date)
+            keepcols = list(filter(lambda c: "possible" in c, dfp.columns))
+            dfp = dfp.resample("h").mean()
+            df = df.join(dfp)
+            if "OE.AvgPOA" in df.columns:
+                df = df.drop(columns=["OE.AvgPOA"])
+            df = df.rename(columns={"poa": "OE.AvgPOA"})
+        return self._formatted_query_output(df)
 
-    # def _formatted_query_output(self, df_out):
+    def query_monthly_pi_data(self, year, month, q=True):
+        start_ = pd.Timestamp(year, month, 1)
+        end_ = start_ + pd.DateOffset(months=1)
+        start_date, end_date = map(lambda t: t.strftime("%Y-%m-%d"), [start_, end_])
+        return self.query_pi_data(start_date=start_date, end_date=end_date, q=q)
+
+    def get_monthly_data(
+        self, year: int, month: int, save: bool = True, q: bool = True
+    ) -> dict[str, pd.DataFrame]:
+        """Queries data from PI, then generates events and saves both files to GADS directory."""
+        qprint = quiet_print_function(q=q)
+        df_data = self.query_monthly_pi_data(year, month, q=q)
+        df_events = self.generate_gads_events(df_data)
+        if save:
+            data_fp = self._get_savepath(year, month, file_type="data")
+            df_data.to_csv(data_fp)
+            qprint("  >> saved: ..\\" + "\\".join(data_fp.parts[-7:]))
+
+            events_fp = self._get_savepath(year, month, file_type="events")
+            df_events.to_csv(events_fp, index=False)
+            qprint("  >> saved: ..\\" + "\\".join(events_fp.parts[-7:]))
+        return dict(data=df_data, events=df_events)
+
+    def _get_pvlib_data(self, start_date, end_date):
+        """Loads pvlib data from file (should always exist)"""
+        pvlib_dataset = SolarDataset.from_existing_data_files(
+            site_name=self.name,
+            asset_group="pvlib",
+            start_date=start_date,
+            end_date=end_date,
+        )
+        df_pvlib = pvlib_dataset.data.copy()
+        inv_names = self.asset_names_by_group["Inverters"]
+        col_mapping = {inv.lower(): inv for inv in inv_names}
+        new_pvl_cols = []
+        for col in df_pvlib.columns:
+            if not col.endswith("possible_power"):
+                new_pvl_cols.append(col)
+                continue
+            lower_id = col.split("_")[0]
+            new_col = col_mapping[lower_id] + "_possible_power"
+            new_pvl_cols.append(new_col)
+
+        df_pvlib.columns = new_pvl_cols
+        return df_pvlib
+
+    def _formatted_query_output(self, df_out):
+        """processes pi data file from query_pi_data function to add/normalize columns"""
+        # rename meter column
+        df = df_out.rename(columns={"OE.MeterMW": "Site_Meter_MW"}).copy()
+
+        # get column names for actual & possible generation
+        filtered_cols = lambda x: [c for c in df.columns if x in c]
+        col_keys = ["Grid.Power", "Grid.PossiblePower"]
+        if self.fleet == "wind":
+            col_keys = ["Grid.Power", "Grid.PossiblePower"]
+        else:
+            col_keys = ["OE.ActivePower", "possible_power"]
+        actual_cols, possible_cols = map(filtered_cols, col_keys)
+
+        # add columns for site-level generation & estimated loss
+        df["Site_Actual_MW"] = df[actual_cols].sum(axis=1).div(1e3)
+        df["Site_Possible_MW"] = df[possible_cols].sum(axis=1).div(1e3)
+        df["lost_MW"] = df["Site_Possible_MW"].sub(df["Site_Actual_MW"])
+        df.loc[df["lost_MW"].lt(0), "lost_MW"] = 0
+
+        # create n_offline column (inverse)
+        n_assets = self.metadata["n_assets"]
+        online_col = "OE.CountOnline" if self.fleet == "wind" else "OE.InvertersOnline"
+        df["n_offline"] = np.floor(n_assets - df[online_col])
+        if self.fleet == "solar":
+            c1 = df["OE.AvgPOA"] < 250  # increased from 200
+            c2 = df["Site_Possible_MW"].le(0)
+            df.loc[(c1 | c2), "n_offline"] = 0
+
+        return df
+
+    def _process_gads_offline_events(self, df) -> list[pd.DataFrame]:
+        """Uses formatted df from query function"""
+        offline_threshold = self.metadata["min_offline"]
+        conditions_ = df["n_offline"].ge(offline_threshold)
+        breaks_ = (df["n_offline"].lt(offline_threshold)).cumsum()
+        groupby_obj = df[conditions_].groupby(breaks_)
+        grouped_df_list = [dfg for _, dfg in groupby_obj]
+        return grouped_df_list
+
+    def generate_gads_events(self, df) -> pd.DataFrame:
+        """Uses formatted df from query function"""
+        grouped_df_list = self._process_gads_offline_events(df)
+        dfcols = ["event_start", "event_end", "event_hours", "n_offline", "lost_MWh"]
+        data_list = []
+        for dfg in grouped_df_list:
+            event_start = dfg.index.min()
+            event_end = dfg.index.max() + pd.Timedelta(hours=1)
+            event_hours = (event_end - event_start).seconds / 3600
+            avg_offline = dfg["n_offline"].mean()
+            lost_energy = dfg["lost_MW"].sum()
+            data_list.append([event_start, event_end, event_hours, avg_offline, lost_energy])
+        return pd.DataFrame(data_list, columns=dfcols)
 
     def _get_query_filename(self, start_date, end_date):
         date_0, date_1 = map(lambda t: pd.Timestamp(t).strftime("%Y%m%d"), [start_date, end_date])
         return f"{self.name}_GADS_PIdata_{date_0}_to_{date_1}.csv"
+
+    def _get_data_filename(self, year: int, month: int, file_type: str):
+        if file_type not in ["data", "events", "plot"]:
+            raise ValueError(f"Invalid {file_type = }.")
+        start_date = pd.Timestamp(year, month, 1)
+        end_date = start_date + pd.DateOffset(months=1)
+        start_ym, end_ym = map(lambda t: t.strftime("%Y%m"), [start_date, end_date])
+        ext = ".csv" if file_type != "plot" else ".html"
+        return f"{self.name}_GADS-{file_type.upper()}_{start_ym}_to_{end_ym}" + ext
+
+    def _get_savepath(self, year, month, file_type):
+        """Generates new (unique) filepath for saving data. Creates folder is not exist."""
+        save_dir = self.monthly_gads_path(year, month)
+        folder = Path(save_dir, file_type)
+        if not folder.exists():
+            folder.mkdir()
+        filename = self._get_data_filename(year, month, file_type)
+        return oepaths.validated_savepath(Path(folder, filename))
+
+    def _get_data_filepath(self, year: int, month: int, file_type: str):
+        """Note: returns None if no files exist. Used for loading data."""
+        if file_type not in ["data", "events"]:
+            raise ValueError("Loading html files is currently not supported.")
+        gads_path = self.monthly_gads_path(year, month)
+        data_folder = Path(gads_path, file_type)
+        if not data_folder.exists():
+            return
+        filestem = self._get_data_filename(year, month, file_type).split(".csv")[0]
+        data_fpaths = list(data_folder.glob(f"{filestem}*csv"))
+        if not data_fpaths:
+            return
+        return oepaths.latest_file(data_fpaths)
+
+    def load_data_from_file(self, year: int, month: int, file_type: str, q: bool = True):
+        """Loads data or events file from GADS folder for specified year/month"""
+        if file_type not in ["data", "events"]:
+            raise ValueError("Loading html files is outside the scope of this function.")
+
+        qprint = quiet_print_function(q=q)
+        data_fpath = self._get_data_filepath(year, month, file_type)
+        if not data_fpath:
+            qprint("No file found.")
+            return
+
+        if file_type == "data":
+            df = pd.read_csv(data_fpath, index_col=0, parse_dates=True)
+        else:
+            df = pd.read_csv(data_fpath)
+            df["event_start"] = pd.to_datetime(df["event_start"])
+            df["event_end"] = pd.to_datetime(df["event_end"])
+            df["event_hours"] = df["event_hours"].astype(int)
+        fpath_str = '"..\\' + "\\".join(data_fpath.parts[-8:]) + '"'
+        qprint(f"Loaded {file_type} file ->   {fpath_str}")
+        return df
