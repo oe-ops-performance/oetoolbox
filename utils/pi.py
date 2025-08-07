@@ -641,7 +641,16 @@ class PIDataset(Dataset):
 
         if self.data_format == "wide":
             # item_name is either pipoint, or column name derived from attribute path
-            return pd.DataFrame({item_name: list(values)}, index=list(tstamps))
+            if self.item_type == "pipoint":
+                item_name_ = af_values.PIPoint.Name
+            else:
+                item_name_ = af_values.Attribute.Name
+                if not self.all_same_attribute_levels:
+                    element_ = af_values.Attribute.Element
+                    while element_.Name != self.site.name:
+                        item_name_ += f"_{element_.Name}"
+                        element_ = element_.Parent
+            return pd.DataFrame({item_name_: list(values)}, index=list(tstamps))
 
         # long format data
         df_ = pd.DataFrame({"Value": list(values)}, index=list(tstamps))
@@ -659,9 +668,9 @@ class PIDataset(Dataset):
         if self.data_format == "wide":
             df = pd.concat(df_list, axis=1)
             # confirm all columns exist in output
-            for i, item_name in enumerate(self.item_names):
-                if item_name not in df.columns:
-                    df.insert(i, item_name, np.nan)
+            # for i, item_name in enumerate(self.item_names):
+            #     if item_name not in df.columns:
+            #         df.insert(i, item_name, np.nan)
         else:  # long format  TODO
             df = pd.concat(df_list, axis=0)
         return df
