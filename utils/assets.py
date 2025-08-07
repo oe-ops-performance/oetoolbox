@@ -387,6 +387,14 @@ class SolarSite(PISite):
             return []
         return [fp for fp in query_fp_list if asset_group.replace(" ", "") in fp.name]
 
+    def load_query_file(self, year: int, month: int, asset_group: str):
+        """Loads most recent PIQuery file (if exists) for specified asset group."""
+        fpath = oepaths.latest_file(self.get_data_filepaths(year, month, asset_group))
+        if not fpath:
+            # raise ValueError("No file found.")
+            return
+        return pd.read_csv(fpath, index_col=0, parse_dates=True)
+
     # functions to get kpis and summary metrics
     def get_monthly_kpis(self, year: int, month: int, source: str):
         """Returns dataframe of kpis loaded from specified source file.

@@ -172,6 +172,6 @@ class SolarDataset(Dataset):
         end = start + pd.DateOffset(months=1)
         start_date, end_date = map(lambda d: d.strftime("%Y-%m-%d"), [start, end])
         if freq is None:
-            freq = "1m" if asset_group in ["Inverters", "Met Stations", "Meter"] else "1h"
+            freq = "1m" if asset_group in ["Inverters", "Met Stations", "Meter", "PPC"] else "1h"
         kwargs = dict(start_date=start_date, end_date=end_date, freq=freq, q=q)
         return cls.from_defined_query_attributes(site_name=site, **kwargs, asset_group=asset_group)

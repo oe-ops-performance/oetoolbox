@@ -95,6 +95,28 @@ def tsplot(df, keys_=None, resample_=False, height=400):
     return fig
 
 
+def timeseries_plot(df, columns: list, y2_columns: list = None, height=400):
+    if not all(c in df.columns for c in columns + y2_columns):
+        raise ValueError("One or more specified columns are invalid.")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Dataframe must have a datetime index.")
+    kwargs = dict(x=df.index, mode="lines")
+    fig = go.Figure()
+    y1_traces = [go.Scatter(y=df[col], name=col, **kwargs) for col in columns]
+    y2_traces = [go.Scatter(y=df[c], name=c, yaxis="y2", **kwargs) for c in y2_columns]
+    for trace in y1_traces + y2_traces:
+        fig.add_trace(trace)
+    fig.update_layout(
+        height=height,
+        margin=dict(t=20, r=20, b=20, l=20),
+    )
+    if y2_columns:
+        fig.update_layout(
+            yaxis2=dict(side="right", overlaying="y", rangemode="tozero", showgrid=False)
+        )
+    return fig
+
+
 def histplots(site, df, keys_=None, onlydaylight=False):
     df = df.select_dtypes(include="number").copy()
     col_list = (
@@ -177,6 +199,17 @@ def ts_subplots(df, row_col_list, row_height_list=[], fig_height=None, resample_
     if fig_height != "skip":
         fig.update_layout(height=fig_height)
 
+    return fig
+
+
+def ts_subplots_with_shaded_ranges(
+    df, row_col_list, event_range_list, row_height_list=[], fig_height=None
+):
+    fig = ts_subplots(df, row_col_list, row_height_list, fig_height)
+    for x0, x1 in event_range_list:
+        fig.add_vrect(
+            x0=x0, x1=x1, line_width=0.5, opacity=0.4, layer="below", fillcolor="lightsalmon"
+        )
     return fig
 
 

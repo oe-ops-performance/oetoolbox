@@ -259,30 +259,32 @@ def monthly_summary_subplots(
     dfb = dfb_.loc[dfb_["Project"].eq(site)].reset_index(drop=True).copy()
 
     # load kpis from flashreport for current year/month & merge with budget values
-    dfkpi = get_flashreport_kpis(site, year, month, q=True)
-    dfkpi = dfkpi.merge(dfb, how="left", on="Project").set_index("Project")
-    dfkpi = dfkpi.apply(pd.to_numeric).fillna(0)
+    frfpaths = list(oepaths.frpath(year, month, ext="solar", site=site).glob("*FlashReport*.xlsx"))
+    if len(frfpaths) > 0:
+        dfkpi = get_flashreport_kpis(site, year, month, q=True)
+        dfkpi = dfkpi.merge(dfb, how="left", on="Project").set_index("Project")
+        dfkpi = dfkpi.apply(pd.to_numeric).fillna(0)
 
-    val_ = lambda col_: dfkpi.at[site, col_]
-    dfkpi["Performance Availability (%)"] = 1 + (
-        (
+        val_ = lambda col_: dfkpi.at[site, col_]
+        dfkpi["Performance Availability (%)"] = 1 + (
             (
-                val_("Meter Generation (MWh)")
-                + val_("Snow Derate Loss (MWh)")
-                + val_("Insurance BI Adjustment (MWh)")
+                (
+                    val_("Meter Generation (MWh)")
+                    + val_("Snow Derate Loss (MWh)")
+                    + val_("Insurance BI Adjustment (MWh)")
+                )
+                + (val_("Curtailment - Total (MWh)") - val_("Budgeted Curtailment (MWh)"))
+                - (val_("POA Insolation (kWh/m2)") / val_("Budgeted POA (kWh/m2)"))
+                * val_("Budgeted Production (MWh)")
             )
-            + (val_("Curtailment - Total (MWh)") - val_("Budgeted Curtailment (MWh)"))
-            - (val_("POA Insolation (kWh/m2)") / val_("Budgeted POA (kWh/m2)"))
-            * val_("Budgeted Production (MWh)")
+            / val_("Budgeted Production (MWh)")
         )
-        / val_("Budgeted Production (MWh)")
-    )
 
-    # add current kpis from report (b/c probably haven't been transferred to tracker yet)
-    newcol = f"{year}-{month:02d}"
-    dfk[newcol] = 0.0  # init
-    for kcol in dfk.iloc[:, 0].values:
-        dfk.loc[dfk["Reporting Metric / KPI"].eq(kcol), newcol] = val_(kcol)
+        # add current kpis from report (b/c probably haven't been transferred to tracker yet)
+        newcol = f"{year}-{month:02d}"
+        dfk[newcol] = 0.0  # init
+        for kcol in dfk.iloc[:, 0].values:
+            dfk.loc[dfk["Reporting Metric / KPI"].eq(kcol), newcol] = val_(kcol)
 
     """PLOT"""
     # define subplot figure
@@ -684,6 +686,8 @@ def monthly_summary_subplots(
             oepaths.frpath(year, month, ext="solar", site=site) if (savepath is None) else savepath
         )
         sfile_ = f"{site}_{calendar.month_abbr[month]}{year}_summary_plots.html"
+        if len(frfpaths) == 0:
+            sfile_ = sfile_.split(".html")[0] + "_rev0.html"
         spath_ = Path(sfolder_, sfile_)
         spath_ = oepaths.validated_savepath(spath_)
         fig.write_html(spath_, config=config_)
