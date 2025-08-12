@@ -161,8 +161,8 @@ def get_utility_filename_patterns(year: int, month: int, by_fleet: bool = False)
 
     wind_filepatterns = {
         "Bingham": f"*Bingham*{month_name}_{yyyy}.xlsx",
-        "Hancock": f"*Hancock*{month_name}_{yyyy}.xlsx",
-        "Oakfield": f"*Oakfield*{month_name}_{yyyy}.xlsx",
+        "Hancock": f"*Hancock*{month_name}_{yyyy}*",
+        "Oakfield": f"*Oakfield*{month_name}_{yyyy}*",
         "Palouse": f"*{month_abbr}*{yyyy}*Palouse*Gen*.xlsx",
         "Route 66": "*Shadow*Real*Time*Energy*Imbalance*Detail*RT66*",
         "South Plains II": "*Shadow*Real*Time*Energy*Imbalance*Detail*SP2*",
