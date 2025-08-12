@@ -167,7 +167,10 @@ def load_wind_data_1(filepath, site, localized=True):
     tz = get_timezone(site)
     datecol = wind_date_columns[site]
 
-    df_ = pd.read_excel(filepath, engine="calamine")
+    if "xls" in Path(filepath).suffix:
+        df_ = pd.read_excel(filepath, engine="calamine")
+    else:
+        df_ = pd.read_csv(filepath)
     header_index = df_[df_.isin([datecol]).any(axis=1)].index[0]
     df_.columns = df_.loc[header_index].values
 
