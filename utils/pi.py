@@ -249,6 +249,7 @@ class PIDataset(Dataset):
         keep_tzinfo: bool = False,
         data_format: str = "wide",
         raise_not_found: bool = False,
+        n_segment: int = 11,
         q: bool = True,
         **query_kwargs,
     ):
@@ -268,6 +269,13 @@ class PIDataset(Dataset):
             The frequency/interval, formatted for PI (e.g. "1m", "5m", "1h")
         keep_tzinfo : bool, optional
             Whether to return a tz-aware dataset, by default False
+        data_format : str, optional
+            The format of the output dataframe; either "wide" or "long", default "wide"
+        raise_not_found : bool, optional
+            Whether to raise an error if any of the specified attributes does not exist.
+            Defaults to False, which excludes non-existent items.
+        n_segment : int, optional
+            The number of days by which to segment the query range. Default = 11.
         q : bool, optional
             Quiet parameter (i.e. suppress status printouts), by default True
         """
@@ -280,8 +288,9 @@ class PIDataset(Dataset):
             freq=freq,
             keep_tzinfo=keep_tzinfo,
             data_format=data_format,
+            raise_not_found=raise_not_found,
         )
-        dataset._run_query(raise_not_found=raise_not_found, q=q, **query_kwargs)
+        dataset._run_query(n_segment=n_segment, q=q, **query_kwargs)
         return dataset
 
     @classmethod
@@ -296,6 +305,7 @@ class PIDataset(Dataset):
         keep_tzinfo: bool = False,
         data_format: str = "wide",
         raise_not_found: bool = False,
+        n_segment: int = 11,
         q: bool = True,
         **query_kwargs,
     ):
@@ -317,6 +327,11 @@ class PIDataset(Dataset):
             Whether to return a tz-aware dataset, by default False
         data_format : str, optional
             The format of the output dataframe; either "wide" or "long", default "wide"
+        raise_not_found : bool, optional
+            Whether to raise an error if any of the specified attributes does not exist.
+            Defaults to False, which excludes non-existent items.
+        n_segment : int, optional
+            The number of days by which to segment the query range. Default = 11.
         q : bool, optional
             Quiet parameter (i.e. suppress status printouts), by default True
         """
@@ -329,8 +344,9 @@ class PIDataset(Dataset):
             freq=freq,
             keep_tzinfo=keep_tzinfo,
             data_format=data_format,
+            raise_not_found=raise_not_found,
         )
-        dataset._run_query(raise_not_found=raise_not_found, q=q, **query_kwargs)
+        dataset._run_query(n_segment=n_segment, q=q, **query_kwargs)
         return dataset
 
     def _create_af_object_list(self, raise_not_found: bool):
@@ -369,21 +385,21 @@ class PIDataset(Dataset):
         end = pd.Timestamp(end_date, tz=self.site.timezone)
         return AFTimeRange(str(start), str(end), aftz_fmtprovider)
 
-    def get_date_range_list(self, sub_range: int = 10):
-        """Returns list of sub date ranges for query if longer than 10 days
+    def get_date_range_list(self, n_segment):
+        """Returns list of sub date ranges for query.
 
         Parameters
         ----------
-        sub_range : int
+        n_segment : int
             The number of days for each sub date range.
         """
         start, end = map(pd.Timestamp, [self.start_date, self.end_date])
         total_days = (end - start).days
-        if total_days < sub_range:
-            sub_range = total_days
-        return segmented_date_ranges(start, end, sub_range)
+        if total_days < n_segment:
+            n_segment = total_days
+        return segmented_date_ranges(start, end, n_days=n_segment)
 
-    def _run_query(self, q: bool = True, **query_kwargs):
+    def _run_query(self, n_segment: int, q: bool = True, **query_kwargs):
         """Runs PI query for the specified date range and parameters"""
         qprint = quiet_print_function(q=q)
 
@@ -404,7 +420,7 @@ class PIDataset(Dataset):
             afsdk_kwargs.update({param: AFSDK[param][val]})
 
         # split date range & run query for sub ranges
-        date_range_list = self.get_date_range_list(sub_range=11)
+        date_range_list = self.get_date_range_list(n_segment=n_segment)
         df_list = []
         for i, sub_range in enumerate(date_range_list):
             qprint(f"Querying range {i+1} of {len(date_range_list)}")
@@ -413,6 +429,8 @@ class PIDataset(Dataset):
             df_ = self._format_pi_data(df_)
             df_list.append(df_)
 
+        if self.data_format == "wide":
+            df_list.insert(0, pd.DataFrame(columns=self.expected_columns()))  # ensures all cols
         df = pd.concat(df_list, axis=0, ignore_index=False)
         if self.method == "summaries":
             if not all(x in df.index for x in self.expected_index):  # validate index
@@ -451,6 +469,11 @@ class PIDataset(Dataset):
                 df = df.loc[~df.index.duplicated(keep="first")]
             if df.shape[0] != expected_index.shape[0]:
                 df = df.reindex(expected_index)
+            # missing_cols = [c for c in self.expected_columns() if c not in df.columns]
+            # if missing_cols:
+            #     for col in missing_cols:
+            #         df[col] = np.nan
+            #     df = df[self.expected_columns()].copy()  # reorder
         df = df.rename_axis("Timestamp")
         return df
 
@@ -605,7 +628,8 @@ class PIDataset(Dataset):
             df_list.append(df_)
         if not df_list:
             raise ValueError("Error retrieving data.")
-        return self._concatenate_data(df_list)
+        # return self._concatenate_data(df_list)
+        return pd.concat(df_list, axis=1 if self.data_format == "wide" else 0)
 
     def _retrieve_data(self, output, item_name: str, item: str):
         """Iterates over the AFValues collection and returns a dataframe with the associated data
@@ -645,11 +669,15 @@ class PIDataset(Dataset):
                 item_name_ = af_values.PIPoint.Name
             else:
                 item_name_ = af_values.Attribute.Name
-                if not self.all_same_attribute_levels:
-                    element_ = af_values.Attribute.Element
-                    while element_.Name != self.site.name:
-                        item_name_ += f"_{element_.Name}"
-                        element_ = element_.Parent
+                element_ = af_values.Attribute.Element
+                limit_ = (
+                    self._attpath_meta(attpath=item)["asset_group"]
+                    if self.all_same_asset_group
+                    else self.site.name
+                )
+                while element_.Name != limit_:
+                    item_name_ += f"_{element_.Name}"
+                    element_ = element_.Parent
             return pd.DataFrame({item_name_: list(values)}, index=list(tstamps))
 
         # long format data
