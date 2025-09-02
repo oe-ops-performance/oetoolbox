@@ -101,6 +101,8 @@ class SolarDataset(Dataset):
                 df_ = df_.rename(columns={"POA_DTN": "POA"})
                 if "pvlib" in latest_fp.name.lower():
                     df_.columns = df_.columns.map(str.lower)
+                elif "meter" in latest_fp.name.lower():
+                    df_.columns = df_.columns.str.replace("_", ".")  # should be OE.MeterMW
                 df_list.append(df_)
                 self.source_files.append(str(latest_fp))
             except:
