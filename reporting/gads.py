@@ -200,15 +200,21 @@ class GADSSite(PISite):
         return oemeta.data["SystemSize"]["MWAC"].get(self.name)  # returns None if not in json
 
     @property
-    def query_attributes(self) -> list:
-        site_level_atts = self.get_attribute_paths(attributes=self.site_level_attributes)
-        asset_level_atts = self.get_attribute_paths(
+    def site_level_attribute_paths(self) -> list:
+        return self.get_attribute_paths(attributes=self.site_level_attributes)
+
+    @property
+    def asset_level_attribute_paths(self) -> list:
+        return self.get_attribute_paths(
             asset_group=self.asset_group,
             asset_names=self.asset_names,
             attributes=self.asset_level_attributes,
             only_valid=False,  # omits non-existent attributes
         )
-        return site_level_atts + asset_level_atts
+
+    @property
+    def query_attributes(self) -> list:
+        return self.site_level_atts + self.asset_level_atts
 
     def gads_folder(self, year: int) -> Path:
         folder = Path(GADS_DIR, self.fleet.capitalize(), str(year))
@@ -249,16 +255,16 @@ class GADSSite(PISite):
 
         -> note: for date range, inclusive="left" (to end_date, not through)
         """
-        dataset = PIDataset.from_attribute_paths(
-            site_name=self.name,
-            attribute_paths=self.query_attributes,
-            start_date=start_date,
-            end_date=end_date,
-            freq="1h",  # query non-inverter attributes at minute-level (grab inv data from files) and then resample to hourly with average aggregation & use .floor to round down
-            keep_tzinfo=False,
-            q=q,
+        df_list = []
+        kwargs = dict(
+            site_name=self.name, start_date=start_date, end_date=end_date, keep_tzinfo=False, q=q
         )
-        df = dataset.data
+        for attpaths in [self.site_level_attribute_paths, self.asset_level_attribute_paths]:
+            # note: query non-inverter attributes at minute-level (grab inv data from files) and then resample to hourly with average aggregation & use .floor to round down
+            dataset = PIDataset.from_attribute_paths(**kwargs, attribute_paths=attpaths, freq="1h")
+            df_list.append(dataset.data)
+
+        df = pd.concat(df_list, axis=1)
         fmt_col = lambda c: c if "_" not in c else "_".join(c.split("_")[:-1])
         df.columns = df.columns.map(fmt_col)  # removes asset group
         if self.fleet == "solar":
