@@ -60,8 +60,8 @@ def load_meter_historian(year=None, month=None, dropna=True):
         df = df.dropna(axis=1, how="all").copy()
 
     convert_cols = [c for c in df.columns if c not in df.select_dtypes("number").columns]
-    if convert_cols:
-        df[convert_cols] = df[convert_cols].apply(pd.to_numeric)
+    for c in convert_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
     return df
 
