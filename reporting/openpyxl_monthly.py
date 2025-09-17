@@ -1590,16 +1590,16 @@ def create_monthly_report(
 
         print_event("calculating formulas...")
         # pythoncom.CoInitialize()
-        # xw_app = xw.App(visible=False)
-        # wb2 = xw_app.books.open(temp_fpath)
-        # xw_app.calculate()
-        wb2 = xw.Book(temp_fpath)
-        wb2.app.calculate()
+        xw_app = xw.App(visible=False)
+        wb2 = xw_app.books.open(temp_fpath)
+        xw_app.calculate()
+        # wb2 = xw.Book(temp_fpath)
+        # wb2.app.calculate()
 
         print_event("saving workbook...")
         wb2.save()
         wb2.close()
-        # xw_app.quit()
+        xw_app.quit()
         # pythoncom.CoUninitialize()
         shutil.copy2(temp_fpath, savepath)
 
