@@ -321,6 +321,8 @@ class SolarSite(PISite):
             "plots": "*.html",
         }
         output_dict = {key_: get_files(str_) for key_, str_ in glob_str_dict.items()}
+        if output_dict["pvlib"]:
+            output_dict["pvlib"] = [fp for fp in output_dict["pvlib"] if "_x_" not in fp.name]
         captured_files = list(itertools.chain.from_iterable(output_dict.values()))
         other_files = [fp for fp in dir.iterdir() if fp.is_file() and fp not in captured_files]
         if other_files:
@@ -343,7 +345,7 @@ class SolarSite(PISite):
         files_exist = lambda key, fp_list: any(key.replace(" ", "") in fp.name for fp in fp_list)
 
         # part 1: pi query requirements (raw data files)
-        query_groups = ["Inverters", "Met Stations", "Meter", "PPC"]
+        query_groups = ["Inverters", "Modules", "Met Stations", "Meter", "PPC"]
         query_status_dict = {
             group: files_exist(group, site_files["query"]) for group in relevant(query_groups)
         }
@@ -393,6 +395,15 @@ class SolarSite(PISite):
         if not fpath:
             # raise ValueError("No file found.")
             return
+        return pd.read_csv(fpath, index_col=0, parse_dates=True)
+
+    def load_data_file(self, year: int, month: int, file_type: str):
+        if file_type not in self.asset_groups + ["pvlib"]:
+            raise KeyError("Invalid file type specified.")
+        if file_type.lower() != "pvlib":
+            return self.load_query_file(year, month, asset_group=file_type)
+        fpath_list = self.get_flashreport_files(year, month, types=["pvlib"])
+        fpath = oepaths.latest_file(fpath_list)
         return pd.read_csv(fpath, index_col=0, parse_dates=True)
 
     # functions to get kpis and summary metrics

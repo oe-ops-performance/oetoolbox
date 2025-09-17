@@ -1,8 +1,12 @@
+import itertools
 import pandas as pd
+from pathlib import Path
 
 from .assets import SolarSite
 from .dataset import Dataset
-from .oepaths import latest_file
+from .datetime import remove_tzinfo_and_standardize_index
+from .helpers import quiet_print_function
+from .oepaths import frpath, latest_file
 from .pi import PIDataset
 
 
@@ -101,6 +105,8 @@ class SolarDataset(Dataset):
                 df_ = df_.rename(columns={"POA_DTN": "POA"})
                 if "pvlib" in latest_fp.name.lower():
                     df_.columns = df_.columns.map(str.lower)
+                elif "meter" in latest_fp.name.lower():
+                    df_.columns = df_.columns.str.replace("_", ".")  # should be OE.MeterMW
                 df_list.append(df_)
                 self.source_files.append(str(latest_fp))
             except:
@@ -135,8 +141,11 @@ class SolarDataset(Dataset):
         site = SolarSite(site_name)
         attribute_paths = site.query_attributes.get(asset_group)
         if not attribute_paths:
-            err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
-            raise KeyError(f"{err_msg}\nSupported asset groups: {[*site.query_attributes]}")
+            if asset_group == "Modules":
+                attribute_paths = []
+            else:
+                err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
+                raise KeyError(f"{err_msg}\nSupported asset groups: {[*site.query_attributes]}")
         dataset = cls(site, start_date, end_date)
         dataset._query_data_from_pi(attribute_paths, freq, keep_tzinfo, data_format, q)
         return dataset
@@ -144,9 +153,8 @@ class SolarDataset(Dataset):
     def _query_data_from_pi(
         self, attribute_paths: list, freq: str, keep_tzinfo: bool, data_format: str, q: bool
     ):
-        pi_dataset = PIDataset.from_attribute_paths(
+        kwargs = dict(
             site_name=self.site.name,
-            attribute_paths=attribute_paths,
             start_date=self.start_date,
             end_date=self.end_date,
             freq=freq,
@@ -154,8 +162,30 @@ class SolarDataset(Dataset):
             data_format=data_format,
             q=q,
         )
-        self.data = pi_dataset.data
-        self.invalid_items = pi_dataset.invalid_items
+        df, invalid_items = pd.DataFrame(), []
+        if len(attribute_paths) > 0:
+            dataset = PIDataset.from_attribute_paths(**kwargs, attribute_paths=attribute_paths)
+            df = dataset.data.copy()
+            invalid_items = dataset.invalid_items
+
+        # check if asset group is "Modules"
+        is_mod_att = lambda attpath: ("Inverters" in attpath and "ActivePower" not in attpath)
+        if not attribute_paths or all(is_mod_att(attpath) for attpath in attribute_paths):
+            # try to query the OE.OfflineModules pipoint
+            pipoint = f"Solar Assets.{self.site.name}.Inverters.OE.OfflineModules"
+            try:
+                dataset2 = PIDataset.from_pipoints(
+                    **kwargs, pipoint_names=[pipoint], raise_not_found=True
+                )
+                df = pd.concat([dataset2.data, df], axis=1)
+                df = df.rename(columns={pipoint: "OE.OfflineModules"})
+            except ValueError as err:
+                if "could not find item" not in str(err):
+                    raise err
+                invalid_items.append(pipoint)
+
+        self.data = df
+        self.invalid_items = invalid_items
 
     @classmethod
     def from_pi_for_monthly_report(
@@ -175,3 +205,70 @@ class SolarDataset(Dataset):
             freq = "1m" if asset_group in ["Inverters", "Met Stations", "Meter", "PPC"] else "1h"
         kwargs = dict(start_date=start_date, end_date=end_date, freq=freq, q=q)
         return cls.from_defined_query_attributes(site_name=site, **kwargs, asset_group=asset_group)
+
+    def _load_single_dtn_file(self, filepath):
+        df = pd.read_csv(filepath, index_col=0, parse_dates=True)
+        if type(df.index) != pd.DatetimeIndex:
+            df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S%z", utc=True).tz_convert(
+                self.site.timezone
+            )
+        self.source_files.append(str(filepath))
+        return df
+
+    def _load_dtn_data_from_files(self, keep_tz: bool = False, q: bool = True):
+        """loads data from existing files in the flashreport DTN folders"""
+        qprint = quiet_print_function(q=q)
+
+        idx_kwargs = dict(freq="1h", inclusive="left")
+        if keep_tz:
+            idx_kwargs.update({"tz": self.site.timezone})
+        expected_index = pd.date_range(self.start_date, self.end_date, **idx_kwargs)
+
+        required_periods = list(sorted(set((x.year, x.month) for x in expected_index)))
+        df_list = []
+        for year, month in required_periods:
+            dtn_folder = Path(frpath(year, month), "DTN")
+            if not dtn_folder.exists():
+                qprint(f"No DTN folder found for {year}-{month}.")
+                continue
+            dtn_fpath = latest_file(list(dtn_folder.glob(f"*{self.site.name}*")))
+            if dtn_fpath is None:
+                qprint(f"No {year}-{month} DTN file found for {self.site.name}.")
+                continue
+            dfd = self._load_single_dtn_file(dtn_fpath)
+            df_list.append(dfd)
+        if not df_list:
+            qprint(f"End collection: no data found.")
+            return
+
+        # get common columns before concatenation
+        is_common = lambda col: all(col in df_.columns for df_ in df_list)
+        all_columns = list(
+            sorted(set(itertools.chain.from_iterable(df_.columns for df_ in df_list)))
+        )
+        common_cols = list(filter(is_common, all_columns))
+        df = pd.concat([df_[common_cols] for df_ in df_list], axis=0)
+
+        df = df.loc[~df.index.duplicated(keep="first")].copy()
+
+        if not keep_tz:
+            df = remove_tzinfo_and_standardize_index(df)
+
+        if len(expected_index) != len(df):
+            df = df.drop_duplicates().reindex(expected_index)
+
+        self.data = df.copy()
+        return
+
+    @classmethod
+    def from_dtn_files(
+        cls, site_name: str, start_date: str, end_date: str, keep_tz: bool = False, q: bool = True
+    ):
+        """loads data from existing files in the flashreport DTN folders"""
+        site = SolarSite(site_name)
+        target_start = pd.Timestamp(start_date).floor("D")
+        target_end = pd.Timestamp(end_date).ceil("D")
+
+        dataset = cls(site, target_start, target_end)
+        dataset._load_dtn_data_from_files(keep_tz=keep_tz, q=q)
+        return dataset

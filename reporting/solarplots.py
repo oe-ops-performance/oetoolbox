@@ -7,10 +7,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ..utils import oepaths
-from ..datatools import utilitymeterdata as umd
+from ..datatools.meterhistorian import load_meter_data, load_meter_historian
 from .tools import (
     load_monthly_query_files,
-    load_meter_historian,
     get_flashreport_summary_table,
     solar_fr_fpath_dict,
     get_flashreport_kpis,
@@ -975,7 +974,7 @@ def meter_comparison_subplots(
             dfum = df_util.copy()
         dfu = dfum.dropna(axis=1, how="all").copy()
     else:
-        dfu = umd.load_meter_data(year, month, sitelist=valid_sites, q=q)
+        dfu = load_meter_data(year, month, sitelist=valid_sites, q=q)
 
     queryfile_dict = {}
     for site in valid_sites:
