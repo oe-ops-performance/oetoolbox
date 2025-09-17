@@ -1582,26 +1582,26 @@ def create_monthly_report(
 
     ##testing
     print_event("saving initial workbook to tempdir...")
-    # with tempfile.TemporaryDirectory() as temp_folder:
-    #     # temp_fpath = Path(temp_folder, "temp.xlsx")
-    #     temp_fpath = Path(temp_folder, f"{str(uuid.uuid4())}.xlsx")
-    #     wb.save(filename=temp_fpath)
-    #     wb.close()
+    with tempfile.TemporaryDirectory() as temp_folder:
+        # temp_fpath = Path(temp_folder, "temp.xlsx")
+        temp_fpath = Path(temp_folder, f"{str(uuid.uuid4())}.xlsx")
+        wb.save(filename=temp_fpath)
+        wb.close()
 
-    #     print_event("calculating formulas...")
-    #     # pythoncom.CoInitialize()
-    #     # xw_app = xw.App(visible=False)
-    #     # wb2 = xw_app.books.open(temp_fpath)
-    #     # xw_app.calculate()
-    #     wb2 = xw.Book(temp_fpath)
-    #     wb2.app.calculate()
+        print_event("calculating formulas...")
+        # pythoncom.CoInitialize()
+        # xw_app = xw.App(visible=False)
+        # wb2 = xw_app.books.open(temp_fpath)
+        # xw_app.calculate()
+        wb2 = xw.Book(temp_fpath)
+        wb2.app.calculate()
 
-    #     print_event("saving workbook...")
-    #     wb2.save()
-    #     wb2.close()
-    #     # xw_app.quit()
-    #     # pythoncom.CoUninitialize()
-    #     shutil.copy2(temp_fpath, savepath)
+        print_event("saving workbook...")
+        wb2.save()
+        wb2.close()
+        # xw_app.quit()
+        # pythoncom.CoUninitialize()
+        shutil.copy2(temp_fpath, savepath)
 
     # print_event('saving workbook...')
     # wb.save(filename=savepath)
@@ -1620,7 +1620,7 @@ def create_monthly_report(
 
     """SAVE FILE"""
     # print_event('saving workbook...')
-    wb.save(filename=savepath)
+    # wb.save(filename=savepath)
     pbar.update(110)  # update last portion of progress bar
     pbar.close()  # close progress bar
     tmpdir.cleanup()  # remove temporary directory w/ msno figure
