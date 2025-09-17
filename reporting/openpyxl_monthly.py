@@ -871,7 +871,7 @@ def create_monthly_report(
     # seqn_RSIH = f'=COUNTIF({sRef}{cCrLoss.ltr}{rStart}:{cCrLoss.ltr}{rEnd},">0")*{numInvCell}'
     seqn_RSIH = f'=COUNTIFS({sRef}{cCrLoss.ltr}{rStart}:{cCrLoss.ltr}{rEnd},">0", {sRef}{cMtr.ltr}{rStart}:{cMtr.ltr}{rEnd}, "<1")*{numInvCell}'
     # seqn_FOIHD = f"=SUMPRODUCT(({sRef}{cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd}>0)*({sRef}{cInv}{rStart}:{cInv_end}{rEnd}<=0))"
-    seqn_FOIHD = "B14-B18-B19-B28"  # AIH - SIHD - RSIH - RUIHN
+    seqn_FOIHD = "=B14-B18-B19-B28"  # AIH - SIHD - RSIH - RUIHN
     seqn_PRatio = f"=ROUND(SUM({sRef}{cMtr.ltr}{rStart}:{cMtr.ltr}{rEnd})/SUM({sRef}{cENDCi.ltr}{rStart}:{cENDCi.ltr}{rEnd}), 2)"
 
     fcell = lambda addr: sRef + addr
@@ -904,7 +904,7 @@ def create_monthly_report(
     seqn_AIH = "=B35-B15-B16-B17"  #  month_hours - IRIH - MBIH - RIH
     # seqn_RUIHN = '=B35-B15-B16-B17-B13'    # month_hours - IRIH - MBIH - RIH - ASIH
     # seqn_RUIHN = "=B14-B13"  # AIH - ASIH
-    seqn_RUIHN = f'=COUNTIF({sRef}{cPOA}{rStart}:{cPOA}{rEnd},"<=20")'
+    seqn_RUIHN = f'=COUNTIF({sRef}{cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd},"<=20")'
 
     gads_id_dict = {
         "Comanche": {
@@ -1582,26 +1582,26 @@ def create_monthly_report(
 
     ##testing
     print_event("saving initial workbook to tempdir...")
-    with tempfile.TemporaryDirectory() as temp_folder:
-        # temp_fpath = Path(temp_folder, "temp.xlsx")
-        temp_fpath = Path(temp_folder, f"{str(uuid.uuid4())}.xlsx")
-        wb.save(filename=temp_fpath)
-        wb.close()
+    # with tempfile.TemporaryDirectory() as temp_folder:
+    #     # temp_fpath = Path(temp_folder, "temp.xlsx")
+    #     temp_fpath = Path(temp_folder, f"{str(uuid.uuid4())}.xlsx")
+    #     wb.save(filename=temp_fpath)
+    #     wb.close()
 
-        print_event("calculating formulas...")
-        # pythoncom.CoInitialize()
-        # xw_app = xw.App(visible=False)
-        # wb2 = xw_app.books.open(temp_fpath)
-        # xw_app.calculate()
-        wb2 = xw.Book(temp_fpath)
-        wb2.app.calculate()
+    #     print_event("calculating formulas...")
+    #     # pythoncom.CoInitialize()
+    #     # xw_app = xw.App(visible=False)
+    #     # wb2 = xw_app.books.open(temp_fpath)
+    #     # xw_app.calculate()
+    #     wb2 = xw.Book(temp_fpath)
+    #     wb2.app.calculate()
 
-        print_event("saving workbook...")
-        wb2.save()
-        wb2.close()
-        # xw_app.quit()
-        # pythoncom.CoUninitialize()
-        shutil.copy2(temp_fpath, savepath)
+    #     print_event("saving workbook...")
+    #     wb2.save()
+    #     wb2.close()
+    #     # xw_app.quit()
+    #     # pythoncom.CoUninitialize()
+    #     shutil.copy2(temp_fpath, savepath)
 
     # print_event('saving workbook...')
     # wb.save(filename=savepath)
@@ -1620,7 +1620,7 @@ def create_monthly_report(
 
     """SAVE FILE"""
     # print_event('saving workbook...')
-    # wb.save(filename=savepath)
+    wb.save(filename=savepath)
     pbar.update(110)  # update last portion of progress bar
     pbar.close()  # close progress bar
     tmpdir.cleanup()  # remove temporary directory w/ msno figure
