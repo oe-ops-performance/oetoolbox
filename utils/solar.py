@@ -140,12 +140,18 @@ class SolarDataset(Dataset):
         """Queries data from PI for pre-defined attributes used in monthly reporting."""
         site = SolarSite(site_name)
         attribute_paths = site.query_attributes.get(asset_group)
-        if not attribute_paths:
-            if asset_group == "Modules":
-                attribute_paths = []
+
+        if asset_group == "Modules":
+            common_attpaths = site.get_attribute_paths(attributes=["OE.ModulesOffline"])
+            if not attribute_paths:
+                attribute_paths = common_attpaths
             else:
-                err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
-                raise KeyError(f"{err_msg}\nSupported asset groups: {[*site.query_attributes]}")
+                attribute_paths.insert(0, common_attpaths[0])
+
+        if not attribute_paths:
+            err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
+            raise KeyError(f"{err_msg}\nSupported asset groups: {[*site.query_attributes]}")
+
         dataset = cls(site, start_date, end_date)
         dataset._query_data_from_pi(attribute_paths, freq, keep_tzinfo, data_format, q)
         return dataset
@@ -153,8 +159,9 @@ class SolarDataset(Dataset):
     def _query_data_from_pi(
         self, attribute_paths: list, freq: str, keep_tzinfo: bool, data_format: str, q: bool
     ):
-        kwargs = dict(
+        dataset = PIDataset.from_attribute_paths(
             site_name=self.site.name,
+            attribute_paths=attribute_paths,
             start_date=self.start_date,
             end_date=self.end_date,
             freq=freq,
@@ -162,30 +169,8 @@ class SolarDataset(Dataset):
             data_format=data_format,
             q=q,
         )
-        df, invalid_items = pd.DataFrame(), []
-        if len(attribute_paths) > 0:
-            dataset = PIDataset.from_attribute_paths(**kwargs, attribute_paths=attribute_paths)
-            df = dataset.data.copy()
-            invalid_items = dataset.invalid_items
-
-        # check if asset group is "Modules"
-        is_mod_att = lambda attpath: ("Inverters" in attpath and "ActivePower" not in attpath)
-        if not attribute_paths or all(is_mod_att(attpath) for attpath in attribute_paths):
-            # try to query the OE.OfflineModules pipoint
-            pipoint = f"Solar Assets.{self.site.name}.Inverters.OE.OfflineModules"
-            try:
-                dataset2 = PIDataset.from_pipoints(
-                    **kwargs, pipoint_names=[pipoint], raise_not_found=True
-                )
-                df = pd.concat([dataset2.data, df], axis=1)
-                df = df.rename(columns={pipoint: "OE.OfflineModules"})
-            except ValueError as err:
-                if "could not find item" not in str(err):
-                    raise err
-                invalid_items.append(pipoint)
-
-        self.data = df
-        self.invalid_items = invalid_items
+        self.data = dataset.data.copy()
+        self.invalid_items = dataset.invalid_items
 
     @classmethod
     def from_pi_for_monthly_report(

@@ -149,8 +149,8 @@ INV_MODULE_ATTRIBUTE_DICT = {
     "FL4": ["Mod_Num_Run"],  # should be number from 0 to 6 (g.t. 0)
     "GA3": ["Module_1_AC_Power_Active", "Module_2_AC_Power_Active"],  #  (g.t. 0)
     "GA4": [f"Module 00{n}.Sts.P_kW" for n in range(1, 7)],  #  (g.t. 0)
-    "Grand View East": ["OE.OnlineModules"],  # inverter-level attribute
-    "Grand View West": ["OE.OnlineModules"],  # inverter-level attribute
+    # "Grand View East": ["OE.OnlineModules"],  # inverter-level attribute
+    # "Grand View West": ["OE.OnlineModules"],  # inverter-level attribute
     "Imperial Valley": [f"MOD{n}_P_3PHASE" for n in range(1, 5)],  # (g.t. 0)
     "Kansas": [f"M{n}.Sts.Running" for n in range(1, 5)],
     "Kent South": [f"M{n}.Sts.Running" for n in range(1, 5)],
