@@ -131,9 +131,7 @@ def get_site_location(site: str):
 def get_pvlib_solar_position(site, datetime_index):
     """returns dataframe with azimuth, zenith, etc."""
     lat, lon = oemeta.data["LatLong"].get(site)
-    idx = datetime_index + pd.Timedelta(minutes=30)
-    solar_position = get_solarposition(idx, lat, lon)
-    solar_position.index = datetime_index
+    solar_position = get_solarposition(datetime_index, lat, lon)
     return solar_position
 
 
@@ -476,7 +474,7 @@ def run_pvlib_model(
     poa_data : pd.Series, optional
         The POA data to use for the effective_irradiance in the model. If not provided,
         will query DTN data for site location and use POA transposed from GHI. Defaults to None.
-        Series must be named either "POA" or "POA_DTN", depending on the source of the data.
+        Additional reporting-related checks may occur when series name is "POA" or "POA_DTN".
     inverter_names : list, optional
         The names of the inverters for which to run the pvlib model. If not provided,
         the model will run for all site inverters. Defaults to None.
@@ -487,7 +485,8 @@ def run_pvlib_model(
     -------
     pd.DataFrame
         A dataframe with a datetime index, the POA data used in the model, and the modeled
-        generation data for the requested inverters. The POA column will be "POA" or "POA_DTN".
+        generation data for the requested inverters. When POA data is provided, the associated
+        column in the output dataframe will be the name of the series.
     """
     qprint = quiet_print_function(q=q)
     if datetime_index.inferred_freq is None:
