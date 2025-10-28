@@ -16,7 +16,7 @@ get_file = lambda fp_list: max((fp.stat().st_ctime, fp) for fp in fp_list)[1] if
 def load_curtailment_report_data(year, month, q=True, pvlib_scaling_factor=1):
     qprint = lambda msg: None if q else print(msg)
     frpath_ = Path(oepaths.frpath(year, month, ext="Solar"), "Comanche")
-    globstr_list = [f"PVLib_InvAC_Comanche_*.csv", "PIQuery_Meter_*.csv", "PIQuery_PPC_*.csv"]
+    globstr_list = [f"PVLib_InvAC*Comanche*.csv", "PIQuery_Meter_*.csv", "PIQuery_PPC_*.csv"]
     glob_fplists = list(map(lambda str_: list(frpath_.glob(str_)), globstr_list))
     reqd_fpaths = list(map(get_file, glob_fplists))
     if any((fp is None) for fp in reqd_fpaths):
