@@ -100,6 +100,11 @@ class SolarDataset(Dataset):
             latest_fp = latest_file(matching_query_fpaths)
             try:
                 df_ = pd.read_csv(latest_fp, index_col=0, parse_dates=True)
+                if not isinstance(df_.index, pd.DatetimeIndex):
+                    df_.index = pd.to_datetime(
+                        df_.index, format="%Y-%m-%d %H:%M:%S%z", utc=True
+                    ).tz_convert(self.site.timezone)
+
                 if df_.index.duplicated().any():
                     df_ = df_.loc[~df_.index.duplicated(keep="first")]
                 df_ = df_.rename(columns={"POA_DTN": "POA"})
@@ -120,7 +125,12 @@ class SolarDataset(Dataset):
             df = pd.concat(formatted_df_list, axis=0)
             if df.index.duplicated().any():
                 df = df.loc[~df.index.duplicated(keep="first")]
-            df = df.reindex(expected_index)
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(
+                    df.index, format="%Y-%m-%d %H:%M:%S%z", utc=True
+                ).tz_convert(self.site.timezone)
+            # if not df.index.tzinfo:
+            #     df = df.reindex(expected_index)
             self.data = df
         else:
             self.data = pd.DataFrame()
