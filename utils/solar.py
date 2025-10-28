@@ -8,6 +8,7 @@ from .datetime import remove_tzinfo_and_standardize_index
 from .helpers import quiet_print_function
 from .oepaths import frpath, latest_file
 from .pi import PIDataset
+from ..datatools.pvlib import query_dtn_meteo_data
 
 
 class SolarDataset(Dataset):
@@ -31,6 +32,7 @@ class SolarDataset(Dataset):
         self.start_date = start_date
         self.end_date = end_date
         self.tz = site.timezone
+        self.data = None  # init
         self.source_files = []  # init
         self.invalid_items = []  # from pi query
 
@@ -252,18 +254,82 @@ class SolarDataset(Dataset):
         if len(expected_index) != len(df):
             df = df.drop_duplicates().reindex(expected_index)
 
+        # df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
+        # df_dates["tz_offset"] = df_dates.index.strftime("%z")
+        # unique_offsets = df_dates["tz_offset"].unique()
+        # if 3 in df.index.month.unique() and len(unique_offsets) > 1:
+        #     shift_date = df_dates.loc[df_dates["tz_offset"].eq(unique_offsets[0])].index[-1]
+        #     shifted = df.index >= shift_date
+        #     for col in df.columns:
+        #         df.loc[shifted, col] = df.loc[shifted, col].shift(1)
+
         self.data = df.copy()
         return
 
     @classmethod
     def from_dtn_files(
-        cls, site_name: str, start_date: str, end_date: str, keep_tz: bool = False, q: bool = True
+        cls,
+        site_name: str,
+        start_date: str = None,
+        end_date: str = None,
+        year: int = None,
+        month: int = None,
+        keep_tz: bool = True,
+        q: bool = True,
     ):
         """loads data from existing files in the flashreport DTN folders"""
-        site = SolarSite(site_name)
-        target_start = pd.Timestamp(start_date).floor("D")
-        target_end = pd.Timestamp(end_date).ceil("D")
+        if start_date is not None and end_date is not None:
+            target_start = pd.Timestamp(start_date).floor("D")
+            target_end = pd.Timestamp(end_date).ceil("D")
+        elif year is not None and month is not None:
+            target_start = pd.Timestamp(year, month, 1)
+            target_end = target_start + pd.DateOffset(months=1)
+        else:
+            raise Exception("Invalid arguments.")
 
-        dataset = cls(site, target_start, target_end)
+        dataset = cls(SolarSite(site_name), target_start, target_end)
         dataset._load_dtn_data_from_files(keep_tz=keep_tz, q=q)
+        return dataset
+
+    @classmethod
+    def get_supporting_data(
+        cls,
+        site_name: str,
+        year: int,
+        month: int,
+        freq: str = "1h",
+        keep_tz: bool = True,
+        q: bool = True,
+    ):
+        """Loads DTN data from files in flashreport DTN folder if exists, otherwise queries/saves"""
+        qprint = quiet_print_function(q=q)
+        dataset = cls.from_dtn_files(site_name, year=year, month=month, keep_tz=keep_tz, q=q)
+        if dataset.data is not None:
+            qprint("Loaded from file.")
+            return dataset
+
+        # query data and save file to flashreport DTN folder
+        qprint("No file found; querying data.")
+        start = pd.Timestamp(year, month, 1)
+        end = start + pd.DateOffset(months=1)
+        df_dtn = query_dtn_meteo_data(site_name, start, end, q=q)
+        expected_local_idx = pd.date_range(
+            start, end, freq="h", inclusive="left", tz=dataset.site.timezone
+        )
+        df_dtn = df_dtn.reindex(expected_local_idx)
+
+        dtn_folder = Path(dataset.site.flashreport_folder(year, month).parent, "DTN")
+        if not dtn_folder.exists():
+            dtn_folder.mkdir(parents=True)
+        dtn_fpath = Path(dtn_folder, f"dtn_data_{site_name}_{year}-{month:02d}.csv")
+        df_dtn.to_csv(dtn_fpath)
+        qprint(f"\nSaved: {str(dtn_fpath)}")
+
+        if not keep_tz:
+            df_dtn = remove_tzinfo_and_standardize_index(df_dtn)
+
+        if pd.Timedelta(freq) < pd.Timedelta(hours=1):
+            df_dtn = df_dtn.resample(freq).ffill()
+
+        dataset.data = df_dtn.copy()
         return dataset
