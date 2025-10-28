@@ -209,7 +209,6 @@ class GADSSite(PISite):
             asset_group=self.asset_group,
             asset_names=self.asset_names,
             attributes=self.asset_level_attributes,
-            only_valid=False,  # omits non-existent attributes
         )
 
     @property
