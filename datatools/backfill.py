@@ -1,8 +1,6 @@
 from astral import LocationInfo
-from astral.location import Location
 from astral.sun import sun
 import datetime as dt
-from json import JSONDecodeError
 import itertools
 import numpy as np
 import pandas as pd
@@ -12,10 +10,11 @@ from plotly.subplots import make_subplots
 import pvlib
 from sklearn.metrics import r2_score
 
-from ..dataquery.external import query_DTN
+# from ..dataquery.external import query_DTN, query_fracsun
 from ..utils import oemeta, oepaths
-from ..utils.datetime import localize_naive_datetimeindex, remove_tzinfo_and_standardize_index
+from ..utils.datetime import localize_naive_datetimeindex
 from ..utils.helpers import quiet_print_function
+from ..utils.solar import SolarDataset
 
 
 SENSOR_IDENTIFIERS = {
@@ -117,13 +116,6 @@ def sun_location_info(tz, lat, lon, name="", region=""):
     return LocationInfo(name=name, region=region, **kwargs)
 
 
-def site_location(site):
-    """creates astral location object for given site"""
-    _, lat, lon, tz = site_location_metadata(site)
-    location_info = sun_location_info(tz, lat, lon, name=site)
-    return Location(location_info)
-
-
 getsun = lambda tz, lat, lon, date: sun(sun_location_info(tz, lat, lon).observer, date=date)
 
 
@@ -175,62 +167,6 @@ def segmented_daylight_timestamps(site, start, end, freq="1min"):
     daylight_tstamps = get_daylight_timestamps(site, start, end, freq=freq)
 
 
-def get_pvlib_solar_position(site, datetime_index):
-    """returns dataframe with azimuth, zenith, etc."""
-    alt, lat, lon, tz = site_location_metadata(site)
-    location = pvlib.location.Location(lat, lon, tz, alt, site)
-    idx = datetime_index + pd.Timedelta(minutes=30)
-    solar_position = location.get_solarposition(idx)
-    solar_position.index = datetime_index
-    return solar_position
-
-
-def get_dtn_data(site, start_date, end_date):
-    """queries dtn weather data and adds solar position data
-
-    Parameters
-    ----------
-    site : str
-        Name of solar site
-    start_date : str
-        Start timestamp formatted '%Y-%m-%d', tz-naive
-    end_date : str
-        End timestamp formatted '%Y-%m-%d', tz-naive
-    """
-    _, lat, lon, tz = site_location_metadata(site)
-    dtn_columns = {
-        "airTemp": "dtn_temp_air",
-        "shortWaveRadiation": "dtn_ghi",
-        "windSpeed": "dtn_wind_speed",
-    }
-    fields = list(dtn_columns.keys())
-    interval = "hour"
-    dtn_start = pd.Timestamp(start_date).floor("D")
-    dtn_end = pd.Timestamp(end_date).ceil("D") + pd.Timedelta(
-        hours=1
-    )  # add hour for upsample to min
-
-    df = query_DTN(lat, lon, dtn_start, dtn_end, interval, fields, tz=tz)
-
-    # rename columns
-    df = df.rename(columns=dtn_columns)
-
-    # add solar position info
-    solar_position = get_pvlib_solar_position(site, df.index)
-    df = df.join(solar_position)
-
-    df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
-    df_dates["tz_offset"] = df_dates.index.strftime("%z")
-    unique_offsets = df_dates["tz_offset"].unique()
-    if 3 in df.index.month.unique() and len(unique_offsets) > 1:
-        shift_date = df_dates.loc[df_dates["tz_offset"].eq(unique_offsets[0])].index[-1]
-        shifted = df.index >= shift_date
-        for col in df.columns:
-            df.loc[shifted, col] = df.loc[shifted, col].shift(1)
-
-    return df
-
-
 def get_surface_parameters(site, df_met):
     """Returns the tilt/azimuth parameters (used for POA transposition from GHI data)"""
     design_db = oemeta.data["Project_Design_Database"].get(site)
@@ -250,112 +186,11 @@ def get_surface_parameters(site, df_met):
     return tracking_profile["surface_tilt"], tracking_profile["surface_azimuth"]
 
 
-def transpose_poa_from_dtn_data(df, site):
-    """uses DTN and pvlib clearsky data to transpose POA values and add to input df"""
-    dirint = pvlib.irradiance.dirint(
-        df["dtn_ghi"],
-        df["apparent_zenith"].values,
-        df.index,
-        max_zenith=85,
-    )
-    dirint = dirint.rename("dni_dirint")
-    disc_dni = dirint.copy()
-
-    df_disc = pvlib.irradiance.complete_irradiance(
-        solar_zenith=df["apparent_zenith"],
-        ghi=df["dtn_ghi"],
-        dhi=None,
-        dni=disc_dni,
-    )
-    df_disc = df_disc.rename(columns={"dni": "dtn_dni", "dhi": "dtn_dhi"})
-    df_disc = df_disc.drop(columns=["ghi"])
-    df_disc["dni_extra"] = pvlib.irradiance.get_extra_radiation(
-        datetime_or_doy=df.index,
-        method="nrel",
-        epoch_year=df.index.year[0],
-    )
-
-    # add columns to df: dtn_dhi, dtn_dni, dni_extra
-    df = df.join(df_disc).copy()
-
-    # get surface parameters for transposition
-    surface_tilt, surface_azimuth = get_surface_parameters(site, df)
-
-    df_irr = pvlib.irradiance.get_total_irradiance(
-        surface_tilt=surface_tilt,
-        surface_azimuth=surface_azimuth,
-        solar_zenith=df["apparent_zenith"],
-        solar_azimuth=df["azimuth"],
-        dni=df["dtn_dni"],
-        ghi=df["dtn_ghi"],
-        dhi=df["dtn_dhi"],
-        dni_extra=df["dni_extra"],
-        model="perez",
-    )
-    df_irr = df_irr.fillna(0)
-
-    # add columns: poa_global, poa_direct, poa_diffuse, poa_sky_diffuse, poa_ground_diffuse
-    df = df.join(df_irr).copy()
-    return df
-
-
 def get_pvlib_clearsky(site, datetime_index):
     """returns df with columns: ghi_clearsky, dni_clearsky, dhi_clearsky"""
     alt, lat, lon, tz = site_location_metadata(site)
     location = pvlib.location.Location(lat, lon, tz, alt, site)
     return location.get_clearsky(datetime_index).add_suffix("_clearsky")
-
-
-def load_supporting_data(site, start_date, end_date):
-    """queries dtn data for comparing with sensors & determining calibration issues"""
-    df_dtn = get_dtn_data(site, start_date, end_date)
-    df = transpose_poa_from_dtn_data(df_dtn, site)
-    return df
-
-
-def get_supporting_data(site, year, month, freq="1h", q=True):
-    """loads dtn data from files in flashreport dtn folder if exists, otherwise queries/saves"""
-    qprint = quiet_print_function(q=q)
-    if not oepaths.frpath(year, month).exists():
-        raise ValueError("No FlashReport folder exists for selected year/month")
-
-    start_ = pd.Timestamp(year, month, 1)
-    end_ = start_ + pd.DateOffset(months=1)
-    start_date, end_date = map(lambda d: d.strftime("%Y-%m-%d"), [start_, end_])
-    expected_index = pd.date_range(start_date, end_date, freq=freq, inclusive="left")
-
-    dtn_dir = Path(oepaths.frpath(year, month), "DTN")
-    if not dtn_dir.exists():
-        dtn_dir.mkdir()
-
-    # check for site dtn fpath in flashreports dir
-    dtn_fpath = Path(dtn_dir, f"dtn_data_{site}_{year}-{month:02d}.csv")
-    if not dtn_fpath.exists():
-        qprint("querying dtn data")
-
-        df = load_supporting_data(site, start_date, end_date)
-        df.to_csv(dtn_fpath)
-        dtn_fpath_str = "\\".join(dtn_fpath.parts[-3:])
-        qprint(f"saved file: {dtn_fpath_str}")
-    else:
-        df = pd.read_csv(dtn_fpath, index_col=0, parse_dates=True)
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(
-                df.index,
-                format="%Y-%m-%d %H:%M:%S%z",
-                utc=True,
-            ).tz_convert(tz=oemeta.data["TZ"].get(site))
-        qprint(f"loaded from file: {dtn_fpath.name}")
-
-    if pd.Timedelta(freq) < pd.Timedelta(hours=1):
-        df = df.resample(freq).ffill()
-
-    start = df.index.min()
-    end = start + pd.DateOffset(months=1)
-    expected_index = pd.date_range(start, end, freq=freq, inclusive="left")
-    df = df.reindex(expected_index)
-
-    return df
 
 
 def identify_clearsky_days_using_dtn_ghi(site, df, return_all=False):
@@ -378,6 +213,10 @@ def identify_clearsky_days_using_dtn_ghi(site, df, return_all=False):
     return list(sorted(clearsky_r2_vals, key=lambda item: item[1], reverse=True))
 
 
+# def get_fracsun_soiling_data(site, start_date, end_date, with_tz=True):
+#     """returns fracsun soiling data in dataframe formatted for use in evaluate_sensor_data"""
+
+
 # TODO: modify to use dataframe for input instead of year/month (i.e. for dynamic start/end dates)
 def evaluate_sensor_data(site, year, month, n_clearsky_days=7, q=True):
     """loads clean met file, queries external data, then compares with poa/ghi columns"""
@@ -386,7 +225,8 @@ def evaluate_sensor_data(site, year, month, n_clearsky_days=7, q=True):
     df_met = load_clean_meteo_file(site, met_fpath)  # note: tz-aware
     grouped_sensor_cols = grouped_meteo_columns(df_met.columns)
 
-    df_ext = get_supporting_data(site, year, month)
+    # df_ext = get_supporting_data(site, year, month)
+    df_ext = SolarDataset.get_supporting_data(site, year, month, q=q)
     clearsky_day_list = identify_clearsky_days_using_dtn_ghi(site, df_ext)
     if not clearsky_day_list:
         qprint("No clearsky days identified in dataset; using all days in range.")
@@ -410,7 +250,11 @@ def evaluate_sensor_data(site, year, month, n_clearsky_days=7, q=True):
 
         r2_scores = {}
         for col in cols:
-            df_ = df.loc[df.index.date.isin(top_clearsky_dates), [col, "REF"]].dropna().copy()
+            df_ = (
+                df.loc[pd.Series(df.index.date).isin(top_clearsky_dates).values, [col, "REF"]]
+                .dropna()
+                .copy()
+            )
             r2_scores[col] = r2_score(df_["REF"].values, df_[col].values)
         dfr2 = pd.DataFrame({"r2_score": r2_scores.values()}, index=r2_scores.keys())
         avg_r2 = dfr2["r2_score"].mean()
@@ -420,7 +264,7 @@ def evaluate_sensor_data(site, year, month, n_clearsky_days=7, q=True):
     return sensor_summaries
 
 
-def get_sensor_summaries(df_met, df_ext, top_clearsky_dates):
+def get_sensor_summaries(df_met, df_ext, top_clearsky_dates, df_soiling=None):
     grouped_sensor_cols = grouped_meteo_columns(df_met.columns)
     REFERENCE_COLS = {"poa": "poa_global", "ghi": "dtn_ghi"}
     sensor_summaries = {}
@@ -532,7 +376,7 @@ def process_and_backfill_meteo_data(filepath, site, n_clearsky=5, r2_diff=0.1, q
         backfilled data and other related columns (e.g. solar position, DTN data, etc.)
     """
     qprint = quiet_print_function(q=q)
-    alt, lat, lon, tz = site_location_metadata(site)
+    # alt, lat, lon, tz = site_location_metadata(site)
 
     fpath = Path(filepath)
     validate_meteo_filepath(fpath, site)  # raises ValueError if invalid
@@ -550,17 +394,22 @@ def process_and_backfill_meteo_data(filepath, site, n_clearsky=5, r2_diff=0.1, q
     start_date, end_date = map(lambda d: d.strftime("%Y-%m-%d"), [start_, end_])
 
     # load external data
-    df_ext_backfill = None
+    freq = "1min" if native_freq == pd.Timedelta(minutes=1) else "1h"
+    # df_ext_backfill = None
     if "FlashReports" in fpath.parts:
         year, month = start_.year, start_.month
         if f"{year}-{month:02d}" not in fpath.name:
             raise ValueError("Problem validating Flashreport-related filepath.")
         # get external data either from existing file, or by querying (handled in function)
-        df_ext = get_supporting_data(site, year, month)
-        if native_freq == pd.Timedelta(minutes=1):
-            df_ext_backfill = get_supporting_data(site, year, month, freq="1min", q=q)
+        df_ext = SolarDataset.get_supporting_data(site, year, month, freq=freq, q=q)
+        # df_ext = get_supporting_data(site, year, month)
+        # if native_freq == pd.Timedelta(minutes=1):
+        #     df_ext_backfill = get_supporting_data(site, year, month, freq="1min", q=q)
     else:
-        df_ext = load_supporting_data(site, start_date, end_date)
+        # df_ext = load_supporting_data(site, start_date, end_date)
+        df_ext = SolarDataset.from_dtn_files(site, start_date=start_date, end_date=end_date)
+        if freq == "1min":
+            df_ext = df_ext.resample(freq).ffill()
 
     # identify top N clearsky days
     clearsky_date_list = identify_clearsky_days_using_dtn_ghi(site, df_ext)
@@ -671,12 +520,13 @@ def process_and_backfill_meteo_data(filepath, site, n_clearsky=5, r2_diff=0.1, q
         df[f"{grp_id}_all_bad"] = df[bad_sensor_cols].prod(axis=1)
 
     # backfill data (NOTE: includes all groups in BACKFILL_COLUMNS)
-    if df_ext_backfill is None:
-        df_backfill = df_ext.copy()
-        if native_freq < pd.Timedelta(hours=1):
-            df_backfill = df_backfill.resample(native_freq).ffill()
-    else:
-        df_backfill = df_ext_backfill.copy()
+    df_backfill = df_ext.copy()
+    # if df_ext_backfill is None:
+    #     df_backfill = df_ext.copy()
+    #     if native_freq < pd.Timedelta(hours=1):
+    #         df_backfill = df_backfill.resample(native_freq).ffill()
+    # else:
+    #     df_backfill = df_ext_backfill.copy()
 
     if len(df.index.difference(df_backfill.index)) == 0:
         if df_backfill.index.tz != df.index.tz:
