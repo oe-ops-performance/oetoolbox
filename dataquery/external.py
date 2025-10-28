@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 
 from ..utils import oemeta
-from ..utils.config import DTN_CREDENTIALS
+from ..utils.config import DTN_CREDENTIALS, FRACSUN_API_CREDENTIALS
 from ..utils.helpers import with_retries
 
 
@@ -29,6 +29,8 @@ def segmented_date_ranges(start, end, n_days):
 
 
 def request_access_token():
+    if DTN_CREDENTIALS is None:
+        raise Exception("No DTN credentials found in secrets/secrets.json file.")
     api_token_url = DTN_CREDENTIALS["api_token_url"]
     post_headers = {
         "Content-Type": "application/json",
@@ -50,6 +52,7 @@ def request_access_token():
 def query_DTN_weather_data(latitude, longitude, start, end, interval, fields, q=True):
     """
     all parameters/fields available for hourly historical data
+    https://devportal.dtn.com/catalog/Weather/dtn-weather-conditions-api/documentation#tag--Parameters
         airTemp - C, F
             Air temperature at two meters above ground level. Units depend on unitcode setting.
         cloudCover - %
@@ -114,21 +117,20 @@ def query_DTN_weather_data(latitude, longitude, start, end, interval, fields, q=
         "lon": longitude,
         "startTime": start,
         "endTime": end,
-        "interval": interval,
+        # "interval": interval,
         "parameters": ",".join(fields),
     }
-    api_request_url = "https://weather.api.dtn.com/v1/conditions"
+    api_request_url = "https://weather.api.dtn.com/v2/conditions"
     response = requests.request("GET", api_request_url, headers=headers, params=query_specs)
     response_dict = json.loads(response.text)
-    if "content" not in response_dict:
+    if "features" not in response_dict:
         raise KeyError(
-            f"Error retrieving data from DTN; 'content' not in response; {response_dict}"
+            f"Error retrieving data from DTN; 'features' not in response; {response_dict}"
         )
-    else:
-        if not q:
-            print("Received valid response from DTN API request.")
-        data_dict = response_dict["content"]["items"][0].get("parameters").copy()
-        df = pd.DataFrame(data_dict)
+    if not q:
+        print("Received valid response from DTN API request.")
+    data_dict = response_dict["features"][0].get("properties").copy()
+    df = pd.DataFrame(data_dict).T
     return df
 
 
@@ -154,6 +156,13 @@ def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
 
     df = pd.concat(df_list)
     df.index = pd.to_datetime(df.index, utc=True).tz_convert(tz=tz)
+    df = df[~df.index.duplicated(keep="first")]
+
+    expected_index = pd.date_range(t_start, t_end, freq="h", tz=tz, inclusive="left")
+    if len(df.index) != len(expected_index) or len(df.index.difference(expected_index)) > 0:
+        # dtn output usually includes last timestamp
+        df = df.reindex(expected_index)
+
     return df
 
 
@@ -183,4 +192,34 @@ def load_noaa_weather_data(site, start, end, freq="h", q=True):
     # convert wind speed units, then filter/rename columns
     df["wspd"] = df["wspd"].mul(5 / 18)  # Convert km/h to m/s
     df = df[["temp", "wspd"]].rename(columns={"temp": "NOAA_AmbTemp", "wspd": "NOAA_WindSpeed"})
+    return df
+
+
+def query_fracsun_daily_soiling(api_key: str, device_id: str, start_date: str, end_date: str):
+    """
+    Query daily soiling and insolation values via Fracsun API.
+    Dates must be in YYYY-MM-DD format.
+    """
+    url = f"https://admin.fracsun.com/api/device/soiling/{device_id}/"
+    params = {"apiKey": api_key, "startDate": start_date, "endDate": end_date}
+    headers = {"Content-Type": "application/json"}
+
+    response = requests.get(url, params=params, headers=headers)
+    response.raise_for_status()  # Raise error if request failed
+    return pd.DataFrame(response.json())
+
+
+def query_fracsun(site: str, start_date: str, end_date: str):
+    """Runs query for fracsun daily soiling using credentials for specified site."""
+    if FRACSUN_API_CREDENTIALS is None:
+        raise Exception("No Fracsun credentials found in secrets/secrets.json file.")
+
+    site_credentials = FRACSUN_API_CREDENTIALS.get(site, None)
+    if site_credentials is None:
+        raise Exception(f"No Fracsun credentials configured for {site = }.")
+
+    api_key = site_credentials["api_key"]
+    device_id = site_credentials["device_id"]
+    df = query_fracsun_daily_soiling(api_key, device_id, start_date, end_date)
+    df["day"] = pd.to_datetime(df["day"])
     return df
