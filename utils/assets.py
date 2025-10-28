@@ -4,10 +4,7 @@ from pathlib import Path
 
 from . import oemeta, oepaths
 from .config import PI_DATABASE_PATH
-from ..datatools.meteoqc import run_meteo_backfill
-from ..datatools.oepvlib import run_pvlib_model
-from ..datatools.qcutils import run_auto_qc
-from ..reporting.flashreports import generate_monthlyFlashReport
+from .datetime import localize_naive_datetimeindex, remove_tzinfo_and_standardize_index
 from ..reporting.functions import (
     get_kpis_from_flashreport,
     get_kpis_from_tracker,
@@ -123,33 +120,46 @@ class PISite:
         asset_names: list = [],
         attributes: list = [],
         only_valid: bool = True,
+        raise_validation_errors: bool = False,
     ):
-        """Returns a list of attribute paths for the selected parameters.
+        """Returns a list of VALID attribute paths for the selected parameters.
         -> note 1: does not currently support sub-assets
         -> note 2: does not support validation of site-level attributes
         """
+        if not attributes:
+            raise ValueError("No attributes specified.")
+
         if not asset_group:
-            return [attribute_path(self.name, asset_heirarchy=[], attribute=a) for a in attributes]
+            return [attribute_path(self.name, asset_hierarchy=[], attribute=a) for a in attributes]
 
         if asset_group not in self.asset_groups:
             raise KeyError("Invalid asset group.")
 
+        if not only_valid:
+            hierarchy = [asset_group]
+            if not asset_names:
+                return [attribute_path(self.name, hierarchy, att) for att in attributes]
+            return [
+                attribute_path(self.name, asset_hierarchy=[asset_group, asset], attribute=att)
+                for asset in asset_names
+                for att in attributes
+            ]
+
         if not asset_names:
             invalid_atts = [a for a in attributes if a not in self.pi_attributes(asset_group)]
-            if invalid_atts and only_valid:
+            if invalid_atts and raise_validation_errors:
                 raise ValueError("One or more group-level attributes does not exist.")
             for bad_att in invalid_atts:
                 attributes.remove(bad_att)
             if not attributes:
                 raise ValueError("None of the specified attributes exist.")
-
             return [
-                attribute_path(self.name, asset_heirarchy=[asset_group], attribute=att)
+                attribute_path(self.name, asset_hierarchy=[asset_group], attribute=att)
                 for att in attributes
             ]
 
         invalid_assets = [a for a in asset_names if a not in self.asset_names_by_group[asset_group]]
-        if invalid_assets and only_valid:
+        if invalid_assets and raise_validation_errors:
             raise ValueError("One or more asset names are invalid.")
         for bad_asset in invalid_assets:
             asset_names.remove(bad_asset)
@@ -160,10 +170,10 @@ class PISite:
         for asset in asset_names:
             notvalid = lambda att: att not in self.pi_attributes(asset_group, asset_name=asset)
             invalid_atts = list(filter(notvalid, attributes))
-            if invalid_atts and only_valid:
+            if invalid_atts and raise_validation_errors:
                 raise ValueError(f"One or more specified attributes for {asset=} is invalid.")
             valid_att_paths = [
-                attribute_path(self.name, asset_heirarchy=[asset_group, asset], attribute=att)
+                attribute_path(self.name, asset_hierarchy=[asset_group, asset], attribute=att)
                 for att in attributes
                 if att not in invalid_atts
             ]
@@ -232,6 +242,8 @@ class SolarSite(PISite):
         super().__init__(name)
         if len(self.af_dict) == 0:
             raise ValueError(f"site = {name} has not been integrated into PI")
+        elif self.fleet != "solar":
+            raise Exception  # TODO
 
     @property
     def design_database(self) -> dict:
@@ -246,6 +258,46 @@ class SolarSite(PISite):
         except:
             attribute_dict = {}
         return attribute_dict
+
+    def get_reporting_query_attributes(
+        self, asset_group=None, validated=False, raise_errors=False
+    ) -> dict:
+        """Returns dict of reporting attribute paths for relevant groups using standard OE. attributes."""
+        RETURN_ALL = asset_group is None
+        STANDARD_ATTRIBUTES = {
+            "Inverters": ["OE.ActivePower"],
+            "Met Stations": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],
+            "Met Station": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],  # TEMP
+            "Meter": ["OE_MeterMW"],
+            "Modules": ["OE.ModulesOffline"],  # NOTE: site-level attribute
+            # "PPC": [],  # TODO
+        }
+        valid_groups = [x for x in self.asset_groups if x in STANDARD_ATTRIBUTES]
+        if "Inverters" in valid_groups:
+            valid_groups.append("Modules")
+        if not valid_groups:
+            return {}
+        if asset_group is not None:
+            if asset_group not in valid_groups:
+                raise ValueError("Invalid asset group specified.")
+            valid_groups = [asset_group]
+
+        output = {}
+        for group in valid_groups:
+            asset_names = self.asset_names_by_group.get(group, [])
+            attributes = STANDARD_ATTRIBUTES[group]
+            asset_group = group if group != "Modules" else ""
+            output[group] = self.get_attribute_paths(
+                asset_group=asset_group,
+                asset_names=asset_names,
+                attributes=attributes,
+                only_valid=validated,
+                raise_validation_errors=raise_errors,
+            )
+
+        if not RETURN_ALL:
+            return output.get(asset_group, [])
+        return output
 
     @property
     def existing_report_periods(self):
@@ -389,6 +441,41 @@ class SolarSite(PISite):
             return []
         return [fp for fp in query_fp_list if asset_group.replace(" ", "") in fp.name]
 
+    def get_met_stations_filepaths(self, year: int, month: int, version="all"):
+        """Retrieves Met Station PI query files from flashreport folder.
+
+        Parameters
+        ----------
+        year : int
+            Year of the reporting period.
+        month : int
+            Month of the reporting period.
+        version : str, optional
+            Specific file type to return, by default "all"
+            options = [all, raw, cleaned, processed]
+
+        Returns
+        -------
+        dict if version == "all" else list
+            Returns dictionary with versions as keys (raw, cleaned, processed)
+            and lists of corresponding filepaths.
+            If a single version is specified, returns related list of filepaths.
+        """
+        if version not in ("all", "raw", "cleaned", "processed"):
+            raise ValueError("Invalid version specified.")
+        fpaths = self.get_data_filepaths(year, month, asset_group="Met Stations")
+        processed_fpaths = list(filter(lambda fp: "PROCESSED" in fp.name, fpaths))
+        cleaned_fpaths = [f for f in fpaths if "CLEANED" in f.name and f not in processed_fpaths]
+        raw_fpaths = [fp for fp in fpaths if fp not in cleaned_fpaths + processed_fpaths]
+        fpath_dict = {
+            "raw": raw_fpaths,
+            "cleaned": cleaned_fpaths,
+            "processed": processed_fpaths,
+        }
+        if version != "all":
+            return fpath_dict[version]
+        return fpath_dict
+
     def load_query_file(self, year: int, month: int, asset_group: str):
         """Loads most recent PIQuery file (if exists) for specified asset group."""
         fpath = oepaths.latest_file(self.get_data_filepaths(year, month, asset_group))
@@ -397,14 +484,38 @@ class SolarSite(PISite):
             return
         return pd.read_csv(fpath, index_col=0, parse_dates=True)
 
-    def load_data_file(self, year: int, month: int, file_type: str):
-        if file_type not in self.asset_groups + ["pvlib"]:
-            raise KeyError("Invalid file type specified.")
-        if file_type.lower() != "pvlib":
-            return self.load_query_file(year, month, asset_group=file_type)
-        fpath_list = self.get_flashreport_files(year, month, types=["pvlib"])
-        fpath = oepaths.latest_file(fpath_list)
-        return pd.read_csv(fpath, index_col=0, parse_dates=True)
+    def _load_file(self, filepath, with_tz=False):
+        """loads most recent clean met file & localizes to site tz"""
+        df = pd.read_csv(filepath, index_col=0, parse_dates=True)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            # this can happen if .csv already has tz info & an error prevents parsing (e.g. dst)
+            format_ = "%Y-%m-%d %H:%M:%S%z"
+            df.index = pd.to_datetime(df.index, format=format_, utc=True).tz_convert(self.timezone)
+
+        already_has_tz = df.index.tzinfo is not None
+        if with_tz and not already_has_tz:
+            df = localize_naive_datetimeindex(df, tz=self.timezone)
+        elif already_has_tz and not with_tz:
+            df = remove_tzinfo_and_standardize_index(df)
+
+        return df
+
+    def load_data_file(self, year, month, file_type, with_tz=False):
+        valid_file_types = [g.lower() for g in self.asset_groups] + ["pvlib"]
+        if isinstance(file_type, str):
+            file_type = [file_type]
+        if any(x.lower() not in valid_file_types for x in file_type):
+            raise KeyError("One or more specified file_types is invalid.")
+        df_list = []
+        for ftype in file_type:
+            if ftype.lower() != "pvlib":  # i.e. piquery files
+                fpath_list = self.get_data_filepaths(year, month, asset_group=ftype.title())
+            else:
+                fpath_list = self.get_flashreport_files(year, month, types=["pvlib"])
+            fpath = oepaths.latest_file(fpath_list)
+            df = self._load_file(fpath, with_tz=with_tz)
+            df_list.append(df)
+        return pd.concat(df_list, axis=1)
 
     # functions to get kpis and summary metrics
     def get_monthly_kpis(self, year: int, month: int, source: str):
@@ -431,79 +542,6 @@ class SolarSite(PISite):
         else:
             df = get_kpis_from_flashreport(site=self.name, year=year, month=month)
         return df
-
-    def run_flashreport_qc(
-        self, year: int, month: int, asset_group: str, save: bool = False, **kwargs
-    ):
-        """Runs auto qc script on raw PI query files (w/ optional save to flashreport folder)"""
-        # check for query files
-        query_status = self.get_flashreport_status(year, month)["query"]
-        if not query_status.get(asset_group):
-            raise ValueError(f"no query data files found for {asset_group = }")
-
-        query_filepaths = self.get_data_filepaths(year, month, asset_group)
-        is_raw_fp = lambda fp: not any(x in fp.name.casefold() for x in ["cleaned", "processed"])
-        raw_filepath = oepaths.latest_file(list(filter(is_raw_fp, query_filepaths)))
-        df_raw = pd.read_csv(raw_filepath, index_col=0, parse_dates=True)
-        df_clean = run_auto_qc(df_raw=df_raw, site=self.name, **kwargs)
-
-        if save:
-            new_filestem = raw_filepath.stem + "_CLEANED"
-            savepath = raw_filepath.with_stem(new_filestem)
-            df_clean.to_csv(oepaths.validated_savepath(savepath))
-
-        return df_clean
-
-    def run_flashreport_backfill(
-        self, year: int, month: int, asset_group: str, save: bool = False, **kwargs
-    ):
-        """Runs backfill script on 'cleaned' PI query files (w/ optional save to report folder)"""
-        # check qc status
-        qc_status = self.get_flashreport_status(year, month)["qc"]
-        if not qc_status.get(asset_group):
-            raise ValueError(f"no cleaned/qc'd data files found for {asset_group = }")
-        if asset_group not in ["Met Stations"]:
-            raise ValueError(f"{asset_group = } not currently supported for backfill")
-
-        output = run_meteo_backfill(self.name, year, month, savefile=save, **kwargs)
-        df = output[0] if kwargs.get("return_df_and_fpath") else output
-        return df
-
-    def run_flashreport_pvlib(self, year: int, month: int, save: bool = False, **kwargs):
-        """Runs pvlib script using 'processed' met station PI query file"""
-        backfill_status = self.get_flashreport_status(year, month)["backfill"]
-        if not backfill_status.get("Met Stations"):
-            raise ValueError("Processed meteo file not found")
-
-        output = run_pvlib_model(
-            sitename=self.name,
-            from_FRfiles=True,
-            FR_yearmonth=f"{year}{month:02d}",
-            save_files=save,
-            **kwargs,
-        )
-        df = output[0] if kwargs.get("return_df_and_fpath") else output
-        return df
-
-    def generate_flashreport(self, year: int, month: int, **kwargs):
-        """Runs flashreport generation script for selected year/month
-        >> TODO: implement caching of meter historian (for dev, and for dash apps)
-        """
-        status_dict = self.get_flashreport_status(year, month)
-        if any(status is False for status in status_dict["qc"].values()):
-            raise ValueError("Must complete data QC before generating report")
-        if not status_dict.get("pvlib"):
-            raise ValueError("Must create PVLib file before generating report")
-
-        output = generate_monthlyFlashReport(
-            sitename=self.name,
-            year=year,
-            month=month,
-            **kwargs,
-        )
-        if kwargs.get("return_df_and_fpath") or kwargs.get("return_df_and_log_info"):
-            return output[0]
-        return
 
     def get_budget_values(self, year: int, month: int):
         """Returns dictionary with budgeted POA, Production, and Curtailment from KPI tracker"""
