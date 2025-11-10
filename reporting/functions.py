@@ -236,6 +236,7 @@ KPI_DATA_COLUMNS = [
     "Inverter Generation (MWh)",
     "Meter Generation (MWh)",
     "Meter Generation - ADJUSTED (MWh)",
+    "AC Module Loss (MWh)",
     "DC/System Health Loss (MWh)",
     "Snow Derate Loss (MWh)",
     "Downtime Loss (MWh)",
@@ -276,3 +277,68 @@ def get_kpis_from_flashreport(site, year, month):
     df["GHI Insolation (kWh/m2)"] = get_monthly_ghi_total(site, year, month)
 
     return df
+
+
+def load_kpis_from_flashreport(filepath):
+    # load flashreport
+    df = load_solar_flashreport(filepath)
+
+    # ensure column names include header of site totals table
+    check_str = "Site Totals"
+    if check_str not in df.columns:
+        hdr_row = None
+        for i, tup in enumerate(df.iloc[:5, :5].itertuples()):
+            row_dict = tup._asdict()
+            if check_str in row_dict.values():
+                hdr_row = i
+                break
+        if hdr_row is None:
+            raise Exception("Unexpected formatting in report file.")
+        df.columns = df.iloc[hdr_row].values
+        df = df.iloc[(hdr_row + 1) :, :].reset_index(drop=True).copy()
+
+    # locate site-level summary table (normally top left)
+    col_start = df.columns.get_loc(check_str) - 1
+    col_end = col_start + 3
+
+    # find end row
+    row_check_list = df.iloc[:25, col_start].to_list()
+    if "Timestamp" not in row_check_list:
+        print("error")
+    row_end = row_check_list.index("Timestamp")
+
+    # extract kpi table
+    dft = df.iloc[:row_end, col_start:col_end].copy()
+
+    # move first row to columns
+    dft.columns = dft.loc[0].values
+    dft = dft.iloc[1:].reset_index(drop=True)
+
+    # convert to numeric (drops text)
+    dft["MWh"] = pd.to_numeric(dft["MWh"], errors="coerce")
+
+    # fill in missing 'MWh' values with those from '%' column
+    dft.loc[dft["MWh"].isna(), "MWh"] = dft["%"]
+    dft = dft.drop(columns=["%"])
+    dft.columns = ["Metric", "Value"]
+
+    # check for ac module loss column
+    modloss_col = "AC Module Loss [MWh]"
+    total_mod_loss = 0
+    data_table_cols = df.loc[row_end].to_list()[:25]
+    if modloss_col in data_table_cols:
+        acmod_col = data_table_cols.index(modloss_col)
+        # find row with total mod loss
+        checkvals = df.iloc[:row_end, acmod_col - 1].to_list()
+        matching_ = [
+            v for v in checkvals if all(i in str(v) for i in ["Total", "Mod", "Loss", "MWh"])
+        ]
+        if len(matching_) == 1:
+            mod_total_row = checkvals.index(matching_[0])
+            total_mod_loss = df.iat[mod_total_row, acmod_col]
+
+    dft.loc[len(dft)] = [modloss_col, total_mod_loss]
+
+    dft = dft.dropna(axis=0, how="all").reset_index(drop=True)
+
+    return dft
