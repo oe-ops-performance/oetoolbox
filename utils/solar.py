@@ -8,6 +8,7 @@ from .datetime import remove_tzinfo_and_standardize_index
 from .helpers import quiet_print_function
 from .oepaths import frpath, latest_file
 from .pi import PIDataset
+from ..datatools.pvlib import query_dtn_meteo_data
 
 
 class SolarDataset(Dataset):
@@ -31,6 +32,7 @@ class SolarDataset(Dataset):
         self.start_date = start_date
         self.end_date = end_date
         self.tz = site.timezone
+        self.data = None  # init
         self.source_files = []  # init
         self.invalid_items = []  # from pi query
 
@@ -100,6 +102,11 @@ class SolarDataset(Dataset):
             latest_fp = latest_file(matching_query_fpaths)
             try:
                 df_ = pd.read_csv(latest_fp, index_col=0, parse_dates=True)
+                if not isinstance(df_.index, pd.DatetimeIndex):
+                    df_.index = pd.to_datetime(
+                        df_.index, format="%Y-%m-%d %H:%M:%S%z", utc=True
+                    ).tz_convert(self.site.timezone)
+
                 if df_.index.duplicated().any():
                     df_ = df_.loc[~df_.index.duplicated(keep="first")]
                 df_ = df_.rename(columns={"POA_DTN": "POA"})
@@ -120,7 +127,12 @@ class SolarDataset(Dataset):
             df = pd.concat(formatted_df_list, axis=0)
             if df.index.duplicated().any():
                 df = df.loc[~df.index.duplicated(keep="first")]
-            df = df.reindex(expected_index)
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(
+                    df.index, format="%Y-%m-%d %H:%M:%S%z", utc=True
+                ).tz_convert(self.site.timezone)
+            # if not df.index.tzinfo:
+            #     df = df.reindex(expected_index)
             self.data = df
         else:
             self.data = pd.DataFrame()
@@ -139,13 +151,13 @@ class SolarDataset(Dataset):
     ):
         """Queries data from PI for pre-defined attributes used in monthly reporting."""
         site = SolarSite(site_name)
-        attribute_paths = site.query_attributes.get(asset_group)
+        query_att_dict = site.get_reporting_query_attributes()
+        attribute_paths = query_att_dict.get(asset_group, [])
+
         if not attribute_paths:
-            if asset_group == "Modules":
-                attribute_paths = []
-            else:
-                err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
-                raise KeyError(f"{err_msg}\nSupported asset groups: {[*site.query_attributes]}")
+            err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
+            raise KeyError(f"{err_msg}\nSupported asset groups: {[*query_att_dict]}")
+
         dataset = cls(site, start_date, end_date)
         dataset._query_data_from_pi(attribute_paths, freq, keep_tzinfo, data_format, q)
         return dataset
@@ -153,8 +165,9 @@ class SolarDataset(Dataset):
     def _query_data_from_pi(
         self, attribute_paths: list, freq: str, keep_tzinfo: bool, data_format: str, q: bool
     ):
-        kwargs = dict(
+        dataset = PIDataset.from_attribute_paths(
             site_name=self.site.name,
+            attribute_paths=attribute_paths,
             start_date=self.start_date,
             end_date=self.end_date,
             freq=freq,
@@ -162,30 +175,8 @@ class SolarDataset(Dataset):
             data_format=data_format,
             q=q,
         )
-        df, invalid_items = pd.DataFrame(), []
-        if len(attribute_paths) > 0:
-            dataset = PIDataset.from_attribute_paths(**kwargs, attribute_paths=attribute_paths)
-            df = dataset.data.copy()
-            invalid_items = dataset.invalid_items
-
-        # check if asset group is "Modules"
-        is_mod_att = lambda attpath: ("Inverters" in attpath and "ActivePower" not in attpath)
-        if not attribute_paths or all(is_mod_att(attpath) for attpath in attribute_paths):
-            # try to query the OE.OfflineModules pipoint
-            pipoint = f"Solar Assets.{self.site.name}.Inverters.OE.OfflineModules"
-            try:
-                dataset2 = PIDataset.from_pipoints(
-                    **kwargs, pipoint_names=[pipoint], raise_not_found=True
-                )
-                df = pd.concat([dataset2.data, df], axis=1)
-                df = df.rename(columns={pipoint: "OE.OfflineModules"})
-            except ValueError as err:
-                if "could not find item" not in str(err):
-                    raise err
-                invalid_items.append(pipoint)
-
-        self.data = df
-        self.invalid_items = invalid_items
+        self.data = dataset.data.copy()
+        self.invalid_items = dataset.invalid_items
 
     @classmethod
     def from_pi_for_monthly_report(
@@ -257,18 +248,86 @@ class SolarDataset(Dataset):
         if len(expected_index) != len(df):
             df = df.drop_duplicates().reindex(expected_index)
 
+        # df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
+        # df_dates["tz_offset"] = df_dates.index.strftime("%z")
+        # unique_offsets = df_dates["tz_offset"].unique()
+        # if 3 in df.index.month.unique() and len(unique_offsets) > 1:
+        #     shift_date = df_dates.loc[df_dates["tz_offset"].eq(unique_offsets[0])].index[-1]
+        #     shifted = df.index >= shift_date
+        #     for col in df.columns:
+        #         df.loc[shifted, col] = df.loc[shifted, col].shift(1)
+
         self.data = df.copy()
         return
 
     @classmethod
     def from_dtn_files(
-        cls, site_name: str, start_date: str, end_date: str, keep_tz: bool = False, q: bool = True
+        cls,
+        site_name: str,
+        start_date: str = None,
+        end_date: str = None,
+        year: int = None,
+        month: int = None,
+        keep_tz: bool = True,
+        q: bool = True,
     ):
         """loads data from existing files in the flashreport DTN folders"""
-        site = SolarSite(site_name)
-        target_start = pd.Timestamp(start_date).floor("D")
-        target_end = pd.Timestamp(end_date).ceil("D")
+        if start_date is not None and end_date is not None:
+            target_start = pd.Timestamp(start_date).floor("D")
+            target_end = pd.Timestamp(end_date).ceil("D")
+        elif year is not None and month is not None:
+            target_start = pd.Timestamp(year, month, 1)
+            target_end = target_start + pd.DateOffset(months=1)
+        else:
+            raise Exception("Invalid arguments.")
 
-        dataset = cls(site, target_start, target_end)
+        dataset = cls(SolarSite(site_name), target_start, target_end)
         dataset._load_dtn_data_from_files(keep_tz=keep_tz, q=q)
+        return dataset
+
+    @classmethod
+    def get_supporting_data(
+        cls,
+        site_name: str,
+        year: int,
+        month: int,
+        freq: str = "1h",
+        keep_tz: bool = True,
+        return_dataframe: bool = True,
+        q: bool = True,
+    ):
+        """Loads DTN data from files in flashreport DTN folder if exists, otherwise queries/saves"""
+        qprint = quiet_print_function(q=q)
+        dataset = cls.from_dtn_files(site_name, year=year, month=month, keep_tz=keep_tz, q=q)
+        if dataset.data is not None:
+            df_dtn = dataset.data
+            qprint("Loaded from file.")
+        else:
+            # query data and save file to flashreport DTN folder
+            qprint("No file found; querying data.")
+            start = pd.Timestamp(year, month, 1)
+            end = start + pd.DateOffset(months=1)
+            df_dtn = query_dtn_meteo_data(site_name, start, end, q=q)
+            expected_local_idx = pd.date_range(
+                start, end, freq="h", inclusive="left", tz=dataset.site.timezone
+            )
+            df_dtn = df_dtn.reindex(expected_local_idx)
+
+            dtn_folder = Path(dataset.site.flashreport_folder(year, month).parents[1], "DTN")
+            if not dtn_folder.exists():
+                dtn_folder.mkdir(parents=True)
+            dtn_fpath = Path(dtn_folder, f"dtn_data_{site_name}_{year}-{month:02d}.csv")
+            df_dtn.to_csv(dtn_fpath)
+            qprint(f"\nSaved: {str(dtn_fpath)}")
+
+        if not keep_tz:
+            df_dtn = remove_tzinfo_and_standardize_index(df_dtn)
+
+        if pd.Timedelta(freq) < pd.Timedelta(hours=1):
+            df_dtn = df_dtn.resample(freq).ffill()
+
+        dataset.data = df_dtn.copy()
+
+        if return_dataframe:
+            return dataset.data
         return dataset

@@ -149,8 +149,8 @@ INV_MODULE_ATTRIBUTE_DICT = {
     "FL4": ["Mod_Num_Run"],  # should be number from 0 to 6 (g.t. 0)
     "GA3": ["Module_1_AC_Power_Active", "Module_2_AC_Power_Active"],  #  (g.t. 0)
     "GA4": [f"Module 00{n}.Sts.P_kW" for n in range(1, 7)],  #  (g.t. 0)
-    "Grand View East": ["OE.OnlineModules"],  # inverter-level attribute
-    "Grand View West": ["OE.OnlineModules"],  # inverter-level attribute
+    # "Grand View East": ["OE.OnlineModules"],  # inverter-level attribute
+    # "Grand View West": ["OE.OnlineModules"],  # inverter-level attribute
     "Imperial Valley": [f"MOD{n}_P_3PHASE" for n in range(1, 5)],  # (g.t. 0)
     "Kansas": [f"M{n}.Sts.Running" for n in range(1, 5)],
     "Kent South": [f"M{n}.Sts.Running" for n in range(1, 5)],
@@ -201,9 +201,9 @@ def get_af_path(site: str):
     return "\\".join([RENEWABLE_FLEET_AF_PATH, f"{fleet} Assets", site])
 
 
-def attribute_path(site: str, asset_heirarchy: list, attribute: str):
-    """asset_heirarchy: [group, asset, subasset, ... ] or [] if site-level attribute"""
-    return "\\".join([get_af_path(site), *asset_heirarchy]) + "|" + attribute
+def attribute_path(site: str, asset_hierarchy: list, attribute: str):
+    """asset_hierarchy: [group, asset, subasset, ... ] or [] if site-level attribute"""
+    return "\\".join([get_af_path(site), *asset_hierarchy]) + "|" + attribute
 
 
 def get_af_dict(site: str, asset_group: str = None, asset: str = None) -> dict:
@@ -228,18 +228,18 @@ def get_reporting_attribute_paths(site, asset_group) -> list:
     # group- or site-level attributes (i.e. no assets)
     if asset_group == "PPC" and site in PPC_ATTRIBUTE_DICT:
         return [
-            attribute_path(site, asset_heirarchy=[asset_group], attribute=att)
+            attribute_path(site, asset_hierarchy=[asset_group], attribute=att)
             for att in PPC_ATTRIBUTE_DICT[site]
         ]
 
     elif asset_group == "Meter":
-        return [attribute_path(site, asset_heirarchy=[], attribute="OE.MeterMW")]  # site-level
+        return [attribute_path(site, asset_hierarchy=[], attribute="OE.MeterMW")]  # site-level
 
     elif asset_group == "Modules" and site in INV_MODULE_ATTRIBUTE_DICT:
         group_af_dict = get_af_dict(site, asset_group="Inverters")
         asset_names = list(group_af_dict.keys())
         return [
-            attribute_path(site, asset_heirarchy=["Inverters", inv], attribute=att)
+            attribute_path(site, asset_hierarchy=["Inverters", inv], attribute=att)
             for inv, att in itertools.product(asset_names, INV_MODULE_ATTRIBUTE_DICT[site])
         ]
 
@@ -251,7 +251,7 @@ def get_reporting_attribute_paths(site, asset_group) -> list:
 
     if asset_group == "Inverters":
         return [
-            attribute_path(site, asset_heirarchy=[asset_group, asset], attribute="OE.ActivePower")
+            attribute_path(site, asset_hierarchy=[asset_group, asset], attribute="OE.ActivePower")
             for asset in asset_names
         ]
 

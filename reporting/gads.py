@@ -209,12 +209,11 @@ class GADSSite(PISite):
             asset_group=self.asset_group,
             asset_names=self.asset_names,
             attributes=self.asset_level_attributes,
-            only_valid=False,  # omits non-existent attributes
         )
 
     @property
     def query_attributes(self) -> list:
-        return self.site_level_atts + self.asset_level_atts
+        return self.site_level_attributes + self.asset_level_attributes
 
     def gads_folder(self, year: int) -> Path:
         folder = Path(GADS_DIR, self.fleet.capitalize(), str(year))
@@ -260,9 +259,21 @@ class GADSSite(PISite):
             site_name=self.name, start_date=start_date, end_date=end_date, keep_tzinfo=False, q=q
         )
         for attpaths in [self.site_level_attribute_paths, self.asset_level_attribute_paths]:
+            q_kwargs = {**kwargs, "freq": "1h"}
+            if len(attpaths) > 400:
+                idx1 = int(round((len(attpaths) / 3), 0))
+                idx2 = idx1 * 2
+                paths_1 = attpaths[:idx1]
+                paths_2 = attpaths[idx1:idx2]
+                paths_3 = attpaths[idx2:]
+                attpaths_list = [paths_1, paths_2, paths_3]
+                q_kwargs.update({"n_segment": 5})
+            else:
+                attpaths_list = [attpaths]
             # note: query non-inverter attributes at minute-level (grab inv data from files) and then resample to hourly with average aggregation & use .floor to round down
-            dataset = PIDataset.from_attribute_paths(**kwargs, attribute_paths=attpaths, freq="1h")
-            df_list.append(dataset.data)
+            for atts in attpaths_list:
+                dataset = PIDataset.from_attribute_paths(**q_kwargs, attribute_paths=atts)
+                df_list.append(dataset.data)
 
         df = pd.concat(df_list, axis=1)
         fmt_col = lambda c: c if "_" not in c else "_".join(c.split("_")[:-1])

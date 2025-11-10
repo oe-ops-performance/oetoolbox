@@ -53,6 +53,9 @@ def frpath(year, month, ext=None, site=None):
 # function to generate (or validate) unique filepath
 def validated_savepath(fpath):
     n_, stem_ = 1, fpath.stem
+    if stem_[-1] == ")":
+        split_index = stem_.rfind("(")
+        stem_ = stem_[:split_index]
     while fpath.exists():
         fpath = Path(fpath.parent, f"{stem_}({n_}){fpath.suffix}")
         n_ += 1

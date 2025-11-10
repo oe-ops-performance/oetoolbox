@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import pandas as pd
 import missingno as msno
 from pathlib import Path
@@ -419,8 +420,25 @@ def generate_monthlyFlashReport(
     poacols = (["POA"] if "POA" in pvlcols else ["POA_DTN"]) + ["POA_all_bad", "module_temperature"]
 
     dfPOA = dfpvlib_[poacols].copy()
+
+    # get mods offline data
+    mods_fpaths = list(Path(siteFRpath).glob("PIQuery*Modules*.csv"))
+    if not mods_fpaths:
+        df_acmods = pd.DataFrame(index=dfPOA.index, data={"OE.ModulesOffline_Percent": np.nan})
+    else:
+        mods_fp = oepaths.latest_file(mods_fpaths)
+        df_acmods = pd.read_csv(mods_fp, index_col=0, parse_dates=True)
+        if "OE.ModulesOffline_Percent" not in df_acmods.columns:
+            df_acmods = pd.DataFrame(index=dfPOA.index, data={"OE.ModulesOffline_Percent": np.nan})
+        else:
+            df_acmods = df_acmods.resample("h").mean()
+            df_acmods = df_acmods[["OE.ModulesOffline_Percent"]]
+            qprint(f'Loaded Modules file ---- "{mods_fp.name}"')
+
     df4xl = (
-        dfPOA.join(df_inv.join(dfpvlib_inv.join(df_avail), how="left", rsuffix="_avail"))
+        dfPOA.join(
+            df_acmods.join(df_inv.join(dfpvlib_inv.join(df_avail), how="left", rsuffix="_avail"))
+        )
         .rename_axis("Timestamp")
         .reset_index(drop=False)
     )
@@ -429,7 +447,7 @@ def generate_monthlyFlashReport(
     numInv = df_inv.shape[1]
 
     # check merged dataframe before continuing
-    if df4xl.shape[1] != 4 + 3 * numInv:  # add 4 for tstamp, poa, poaBad, and modTemp
+    if df4xl.shape[1] != 5 + 3 * numInv:  # add 4 for tstamp, poa, poaBad, modTemp, modsOffline
         qprint("\n\n!! problem merging dataframes !!\n")
         qprint(f"No report created for {sitename}.\nExiting function.")
         return

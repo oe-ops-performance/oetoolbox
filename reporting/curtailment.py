@@ -16,7 +16,7 @@ get_file = lambda fp_list: max((fp.stat().st_ctime, fp) for fp in fp_list)[1] if
 def load_curtailment_report_data(year, month, q=True, pvlib_scaling_factor=1):
     qprint = lambda msg: None if q else print(msg)
     frpath_ = Path(oepaths.frpath(year, month, ext="Solar"), "Comanche")
-    globstr_list = [f"PVLib_InvAC_Comanche_*.csv", "PIQuery_Meter_*.csv", "PIQuery_PPC_*.csv"]
+    globstr_list = [f"PVLib_InvAC*Comanche*.csv", "PIQuery_Meter_*.csv", "PIQuery_PPC_*.csv"]
     glob_fplists = list(map(lambda str_: list(frpath_.glob(str_)), globstr_list))
     reqd_fpaths = list(map(get_file, glob_fplists))
     if any((fp is None) for fp in reqd_fpaths):
@@ -215,20 +215,24 @@ def sql_curtailment_summary(year, month, q=True):
 
 ## main function to generate Comanche monthly curtailment report
 # TODO: create two separate sheets for PI data & SQL data, then can remove whichever sheet & re-save as "_XCEL" copy
-def generate_curtailment_report(year, month, local=False, q=True):
+def generate_curtailment_report(
+    year, month, local=False, scaling_factor=1, include_sql=True, q=True
+):
     qprint = lambda msg, end="\n": None if q else print(msg, end=end)
 
-    df = load_curtailment_report_data(year, month, q=q)
+    df = load_curtailment_report_data(year, month, q=q, pvlib_scaling_factor=scaling_factor)
     dfs = curtailment_summary_table(df)
     if dfs.empty:
         print("Error generating report.\nExiting..")
         return
 
-    qprint("Querying SQL data... ", end="")
-    dfsql = sql_curtailment_summary(year, month)
-    qprint("done!\n")
+    if include_sql:
+        qprint("Querying SQL data... ", end="")
+        dfsql = sql_curtailment_summary(year, month)
+        qprint("done!\n")
 
     ## reset index of df and dfs (for dataframe_to_rows function)
+    df = df.resample("5min").mean().copy()
     df = df.reset_index(drop=False)
     dfs = dfs.reset_index(drop=False)
 
@@ -282,36 +286,34 @@ def generate_curtailment_report(year, month, local=False, q=True):
 
     ## SQL SUMMARY TABLE (from dfsql)
     ## cols. R-W:  [Year, Month, Day, Sum_Meter, Sum_Curt, Sum_Expected]
-    rng3_formats = [fmt_int] * 3 + [fmt_2z] * 3
-    rng3_offset = 18  # starts at col idx 18
-    for r, row in enumerate(dataframe_to_rows(dfsql, index=False, header=False)):
-        for c, val in enumerate(row):
-            cell = ws.cell(r + 2, c + rng3_offset)
-            cell.value = val
-            cell.number_format = rng3_formats[c]
+    if include_sql:
+        rng3_formats = [fmt_int] * 3 + [fmt_2z] * 3
+        rng3_offset = 18  # starts at col idx 18
+        for r, row in enumerate(dataframe_to_rows(dfsql, index=False, header=False)):
+            for c, val in enumerate(row):
+                cell = ws.cell(r + 2, c + rng3_offset)
+                cell.value = val
+                cell.number_format = rng3_formats[c]
 
-    sql_curt_col = rng3_offset + 4
-    sql_curt_kwh = dfsql["Sum_CurtKWh"].sum()
-    ws.cell(totals_row, sql_curt_col).value = sql_curt_kwh
-    ws.cell(totals_row, sql_curt_col).number_format = fmt_rev
-    ws.cell(totals_row + 1, sql_curt_col).value = sql_curt_kwh / 1000
-    ws.cell(totals_row + 1, sql_curt_col).number_format = fmt_rev
+        sql_curt_col = rng3_offset + 4
+        sql_curt_kwh = dfsql["Sum_CurtKWh"].sum()
+        ws.cell(totals_row, sql_curt_col).value = sql_curt_kwh
+        ws.cell(totals_row, sql_curt_col).number_format = fmt_rev
+        ws.cell(totals_row + 1, sql_curt_col).value = sql_curt_kwh / 1000
+        ws.cell(totals_row + 1, sql_curt_col).number_format = fmt_rev
 
-    ref_kwh_lost = dfs["lost_nrg"].sum()  # from first summary table (for comparison)
-    ws.cell(totals_row + 2, sql_curt_col).value = (sql_curt_kwh - ref_kwh_lost) / ref_kwh_lost
-    ws.cell(totals_row + 2, sql_curt_col).number_format = "0.00%"
+        ref_kwh_lost = dfs["lost_nrg"].sum()  # from first summary table (for comparison)
+        ws.cell(totals_row + 2, sql_curt_col).value = (sql_curt_kwh - ref_kwh_lost) / ref_kwh_lost
+        ws.cell(totals_row + 2, sql_curt_col).number_format = "0.00%"
 
     ## SAVE FILE TO FLASHREPORT FOLDER
     spath_ = Path(oepaths.frpath(year, month, ext="Solar"), "Comanche")
     if local:
         spath_ = Path.home().joinpath("Downloads")
-    stem_ = f"Comanche_Curtailment_Report_{calendar.month_abbr[month]}-{year}"
-    n_, fname_ = 1, f"{stem_}.xlsx"
-    while Path(spath_, fname_).exists():
-        fname_ = f"{stem_} ({n_}).xlsx"
-        n_ += 1
+    fname_ = f"Comanche_Curtailment_Report_{calendar.month_abbr[month]}-{year}.xlsx"
+    savepath = oepaths.validated_savepath(Path(spath_, fname_))
 
-    wb.save(Path(spath_, fname_))
+    wb.save(savepath)
     wb.close()
     qprint(f'done!\n    >> saved file: "{fname_}"')
     return

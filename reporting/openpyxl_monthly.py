@@ -73,7 +73,7 @@ def create_monthly_report(
     # define function to print events if q=False (adds padding of spaces for carriage return)
     print_event = lambda msg: print(msg.ljust(44), end="\r") if not q else None
 
-    IS_MAPLEWOOD = "Maplewood" in sitename
+    # IS_MAPLEWOOD = "Maplewood" in sitename
 
     # create new blank workbook object & assign sheet to variable
     if not q:
@@ -156,7 +156,8 @@ def create_monthly_report(
         Timestamp | POA | POA_all_bad | module_temp | InverterColumns | pvlibColumns | AvailabilityColumns
     """
     # add columns/rows to separate data
-    col_invData = 5  # in df4xl inv data is after tstamp, POA, badPOA, and modTemp
+    col_acmodData = 5
+    col_invData = 6  # in df4xl inv data is after tstamp, POA, badPOA, modTemp, and ACModLoss%
     col_pvlData = col_invData + numInv  # pvlib inv data start column
     col_hrAvail = col_pvlData + numInv  # hourly availability data start column
     ws.insert_cols(col_hrAvail, 1)  # +1 col before hourly avail data
@@ -168,21 +169,23 @@ def create_monthly_report(
         "Tcell",
         "ENDCi",
         "Perf_Ratio",
+        "AC Modules Offline (%)",  # from modules query file (if available)
+        "AC Module Loss (MWh)",  # formula
         "Curt_Loss",
         "Curt_SP",
         "Flag",
         "Meter",
     ]
 
-    if IS_MAPLEWOOD:
-        newcols.insert(2, "Possible_Adj")
+    # if IS_MAPLEWOOD:
+    #     newcols.insert(2, "Possible_Adj")
 
-    n_newcols = len(newcols)  # add column for "Possible_Adj" (due to transformer derate)
-    ws.insert_cols(
-        col_invData, n_newcols
-    )  # +9 cols before inv data (for actual, poss, (possadj), tcell, endci, pratio, cLoss, cSP, Flag, meter)
+    # adding (+11) cols before inv data (for actual, poss, tcell, endci, pratio, acmodoff, acmodloss, cLoss, cSP, Flag, meter)
+    n_newcols = len(newcols)
+    ws.insert_cols(col_invData, n_newcols)
 
-    header_row = 16  # set header row number
+    # MANUALLY SET HEADER ROW (inserts rows at top of sheet for summary tables)
+    header_row = 17  # set header row number
     ws.insert_rows(1, header_row - 1)  # insert rows at top of sheet for KPI/summary table
 
     """
@@ -198,14 +201,20 @@ def create_monthly_report(
             self.width = width
             self.num = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(ltr) + 1
 
-    sheetcols_ = ["Timestamp", "POA", "badPOA", "modTemp"] + newcols
+    sheetcols_ = [
+        "Timestamp",
+        "POA",
+        "badPOA",
+        "modTemp",
+        "acModsOffline%",
+    ] + newcols  # total: 5+11
 
     # create column objects/variables
     makecol = lambda ltr, wd: Col(ltr, wd)
     ltrs = "ABCDEFGHIJKLMNOPQ"[: len(sheetcols_)]
-    wdths = [25, 12, 12, 12, 16, 16, 16, 16, 16, 12, 12, 6, 21]
-    if IS_MAPLEWOOD:
-        wdths.insert(2, 16)  # for possible_adj
+    wdths = [25, 12, 12, 12, 12, 16, 16, 14, 14, 14, 16, 16, 12, 12, 6, 21]  # len = 16
+    # if IS_MAPLEWOOD:
+    #     wdths.insert(2, 16)  # for possible_adj
 
     # create list of Col instances for cols A through I
     Col_list = list(map(makecol, ltrs, wdths))
@@ -214,15 +223,18 @@ def create_monthly_report(
     # 'A',  'B',   'C',    'D',  'E',   'F',    'G',    'H',     'I',     'J',     'K',   'L',  'M'
     # cTime, cPOA, cPOAb, cMTemp, cAct, cPoss, cTcell, cENDCi, cPRatio, cCrLoss, cCurtSP, cFlag, cMtr = Col_list
 
-    # 'A',  'B',   'C',    'D',  'E',   'F'
-    cTime, cPOA, cPOAb, cMTemp, cAct, cPoss = Col_list[:6]
+    # 'A',  'B',   'C',    'D',           'E',  'F',   'G'
+    cTime, cPOA, cPOAb, cMTemp, cACModsOffRaw, cAct, cPoss = Col_list[:7]
 
-    if IS_MAPLEWOOD:
-        cPossAdj = Col_list[6]
+    # if IS_MAPLEWOOD:
+    #     cPossAdj = Col_list[6]
 
     #  'G',    'H',     'I',     'J',     'K',   'L',  'M'
-    cTcell, cENDCi, cPRatio, cCrLoss, cCurtSP, cFlag, cMtr = Col_list[-7:]
+    # cTcell, cENDCi, cPRatio, cCrLoss, cCurtSP, cFlag, cMtr = Col_list[-7:]
     #  'H',    'I',     'J',     'K',     'L',   'M',  'N'  <<for Maplewoods
+
+    #  'H',    'I',     'J',       'K',        'L',     'M',     'N',   'O',  'P'
+    cTcell, cENDCi, cPRatio, cACModOff, cACModLoss, cCrLoss, cCurtSP, cFlag, cMtr = Col_list[7:]
 
     # get max row/column, then create variables to dynamically set table range
     rEnd = ws.max_row
@@ -261,6 +273,7 @@ def create_monthly_report(
     rStart = str(rSet + 1)
     r1b4hdr = str(rSet - 1)
     r2b4hdr = str(rSet - 2)
+    r3b4hdr = str(rSet - 3)
 
     poasource = "↙ from DTN data" if "POA_DTN" in df4xl.columns else "↙ from POA sensors"
 
@@ -311,12 +324,17 @@ def create_monthly_report(
         f"{cPOAb.ltr}{r1b4hdr}": poasource,
         f"{cPOAb.ltr}{rHeader}": "badPOA",
         f"{cMTemp.ltr}{rHeader}": "modTemp",
+        f"{cACModsOffRaw.ltr}{rHeader}": "ACModulesOffline%",
         f"{cAct.ltr}{rHeader}": "Actual [MWh]",
         f"{cPoss.ltr}{rHeader}": "Possible [MWh]",
         f"{cTcell.ltr}{rHeader}": "Tcell [C]",
         f"{cTcell.ltr}{r2b4hdr}": "Tcell_typ_avg:",
         f"{cENDCi.ltr}{rHeader}": "ENDCi [MWh]",
         f"{cPRatio.ltr}{rHeader}": "Perf. Ratio",
+        f"{cACModOff.ltr}{rHeader}": "AC Modules Offline [%]",
+        f"{cACModLoss.ltr}{rHeader}": "AC Module Loss [MWh]",
+        f"{cACModOff.ltr}{r3b4hdr}": "Total AC Mod Loss (MWh)",  # note: need formula in cACModLoss
+        f"{cACModOff.ltr}{r2b4hdr}": "Total AC Mod Loss (%)",  # note: need formula in cACModLoss
         f"{cCrLoss.ltr}{rHeader}": "Curt. Loss",
         f"{cCurtSP.ltr}{rHeader}": "Curt. SP",
         f"{cFlag.ltr}{rHeader}": "Flag",
@@ -334,8 +352,8 @@ def create_monthly_report(
     }
 
     ## add for Maplewoods
-    if IS_MAPLEWOOD:
-        dict_cellVals.update({f"{cPossAdj.ltr}{rHeader}": "Possible_Adj [MWh]"})
+    # if IS_MAPLEWOOD:
+    #     dict_cellVals.update({f"{cPossAdj.ltr}{rHeader}": "Possible_Adj [MWh]"})
 
     # write cell values from dictionary
     print_event("writing table header cell values")
@@ -417,6 +435,8 @@ def create_monthly_report(
         f"(1-({siteTcoeff_cell}*({tcellTypeAvg_cell}-{cTcell.ltr}{rStart})))"
     )
     eqn_PRatio = f"={cMtr.ltr}{rStart}/{cENDCi.ltr}{rStart}"
+    eqn_ACModsOffline = f"={cACModsOffRaw.ltr}{rStart}"
+    eqn_ACModLoss = f"={cACModOff.ltr}{rStart}*{cPoss.ltr}{rStart}"
 
     eqn_curtLoss = (
         f"=IF(AND({cCurtSP.ltr}{rStart}<{sitecapacity_cell},{cCurtSP.ltr}{rStart}<{cPoss.ltr}{rStart},"
@@ -448,6 +468,11 @@ def create_monthly_report(
     eqn_insolation = f'=SUMIFS({cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd},{cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd},">=0")/1000'
     eqn_totalmeter = f"=SUM({cMtr.ltr}{rStart}:{cMtr.ltr}{rEnd})"
 
+    # formulas for total ac module loss above mod loss col
+    total_mod_loss_cell = f"{cACModLoss.ltr}{r3b4hdr}"
+    ws[total_mod_loss_cell] = f"=SUM(${cACModLoss.ltr}${rStart}:${cACModLoss.ltr}${rEnd})"
+    ws[f"{cACModLoss.ltr}{r2b4hdr}"] = f"={total_mod_loss_cell}/$C$9"  # div by possible
+
     # create dictionary of cell formulas to be written
     dict_4mulas = {
         "B3": eqn_totalenergyloss,
@@ -471,6 +496,8 @@ def create_monthly_report(
         f"{cTcell.ltr}{rStart}": eqn_Tcell,  #####NEW
         f"{cENDCi.ltr}{rStart}": eqn_ENDCi,  #####NEW
         f"{cPRatio.ltr}{rStart}": eqn_PRatio,  #####NEW
+        f"{cACModOff.ltr}{rStart}": eqn_ACModsOffline,  # NEW
+        f"{cACModLoss.ltr}{rStart}": eqn_ACModLoss,  #####NEW
         f"{cCrLoss.ltr}{rStart}": eqn_curtLoss,
         f"{cCurtSP.ltr}{rStart}": dfc["Curt_SP"][0],  # overwrite for CAISO data (below)
         f"{cFlag.ltr}{rStart}": eqn_flag,
@@ -558,6 +585,14 @@ def create_monthly_report(
         ws[f"{cPRatio.ltr}{r}"] = Translator(
             eqn_PRatio, origin=f"{cPRatio.ltr}{rStart}"
         ).translate_formula(f"{cPRatio.ltr}{r}")
+
+        ws[f"{cACModOff.ltr}{r}"] = Translator(
+            eqn_ACModsOffline, origin=f"{cACModOff.ltr}{rStart}"
+        ).translate_formula(f"{cACModOff.ltr}{r}")
+
+        ws[f"{cACModLoss.ltr}{r}"] = Translator(
+            eqn_ACModLoss, origin=f"{cACModLoss.ltr}{rStart}"
+        ).translate_formula(f"{cACModLoss.ltr}{r}")
 
         ws[f"{cCurtSP.ltr}{r}"] = dfc["Curt_SP"][r - int(rStart)]
         ws[f"{cCrLoss.ltr}{r}"] = Translator(

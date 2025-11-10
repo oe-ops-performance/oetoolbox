@@ -30,9 +30,12 @@ def process_claim_dates(dataframe: pd.DataFrame, site: str, start_date: str, end
         start, end, inclusive="left"
     )  # dates for which to determine insurance adjustment
     c1 = dataframe["Site Name"] == site
-    c2 = dataframe["Date Restored (Est)"] >= start
+    c2 = (dataframe["Date Restored (Est)"] >= start) | dataframe["Date Restored (Est)"].isna()
     c3 = dataframe["Date Offline"] < start
     df = dataframe.loc[(c1 & c2 & c3)].reset_index(drop=True).copy()
+
+    df["Date Offline"] = df["Date Offline"].dt.floor("D")
+    df["Date Restored (Est)"] = df["Date Restored (Est)"].dt.ceil("D")
 
     n_claim_days_list = []
     n_inv_list = []
@@ -40,6 +43,8 @@ def process_claim_dates(dataframe: pd.DataFrame, site: str, start_date: str, end
         # can claim 1 month after outage start
         claim_begin = df.at[i, "Date Offline"] + pd.DateOffset(months=1)
         claim_end = df.at[i, "Date Restored (Est)"]
+        if pd.isna(claim_end):
+            claim_end = target_dates[-1]
         claim_range = pd.date_range(claim_begin, claim_end)
         relevant_days = [d for d in target_dates if d in claim_range]  # overlapping days
         n_claim_days_list.append(len(relevant_days))
