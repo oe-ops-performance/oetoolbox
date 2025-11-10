@@ -9,6 +9,7 @@ from ..reporting.functions import (
     get_kpis_from_flashreport,
     get_kpis_from_tracker,
     get_solar_budget_values,
+    load_kpis_from_flashreport,
 )
 from ..reporting.tools import get_solar_budget_values
 from ..reporting.query_attributes import attribute_path, monthly_query_attribute_paths
@@ -48,7 +49,19 @@ class PISite:
     @property
     def af_dict(self) -> dict:
         """Returns dictionary of PI AF structure/metadata"""
-        return oemeta.data[self.fleet_key].get(self.name)
+        af_dict = oemeta.data[self.fleet_key].get(self.name)
+        if "Met Station" in af_dict.keys():
+            af_dict["Met Stations"] = af_dict["Met Station"].copy()
+            af_dict["Met Stations"]["Met Stations_Assets"] = af_dict["Met Station"][
+                "Met Station_Assets"
+            ].copy()
+            af_dict["Met Stations"]["Met Stations_Attributes"] = af_dict["Met Station"][
+                "Met Station_Attributes"
+            ].copy()
+            del af_dict["Met Stations"]["Met Station_Assets"]
+            del af_dict["Met Stations"]["Met Station_Attributes"]
+            del af_dict["Met Station"]
+        return af_dict
 
     @property
     def asset_heirarchy(self) -> dict:
@@ -263,18 +276,23 @@ class SolarSite(PISite):
         self, asset_group=None, validated=False, raise_errors=False
     ) -> dict:
         """Returns dict of reporting attribute paths for relevant groups using standard OE. attributes."""
+        original_asset_group = asset_group
         RETURN_ALL = asset_group is None
         STANDARD_ATTRIBUTES = {
             "Inverters": ["OE.ActivePower"],
             "Met Stations": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],
             "Met Station": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],  # TEMP
             "Meter": ["OE_MeterMW"],
-            "Modules": ["OE.ModulesOffline"],  # NOTE: site-level attribute
-            # "PPC": [],  # TODO
+            "Modules": ["OE.ModulesOffline", "OE.ModulesOffline_Percent"],  # site-level attributes
+            "PPC": ["xcel_MW_cmd_request", "xcel_MW_setpoint"],  # TEMP: only for Comanche
         }
         valid_groups = [x for x in self.asset_groups if x in STANDARD_ATTRIBUTES]
         if "Inverters" in valid_groups:
             valid_groups.append("Modules")
+
+        if self.name == "Comanche":
+            valid_groups.append("PPC")  # temp
+
         if not valid_groups:
             return {}
         if asset_group is not None:
@@ -296,7 +314,7 @@ class SolarSite(PISite):
             )
 
         if not RETURN_ALL:
-            return output.get(asset_group, [])
+            return output.get(original_asset_group, [])
         return output
 
     @property
@@ -518,7 +536,7 @@ class SolarSite(PISite):
         return pd.concat(df_list, axis=1)
 
     # functions to get kpis and summary metrics
-    def get_monthly_kpis(self, year: int, month: int, source: str):
+    def get_monthly_kpis(self, year: int, month: int, source: str, return_fpaths: bool = False):
         """Returns dataframe of kpis loaded from specified source file.
 
         Parameters
@@ -539,8 +557,40 @@ class SolarSite(PISite):
 
         if source == "tracker":
             df = get_kpis_from_tracker(sitelist=[self.name], yearmonth_list=[(year, month)])
+            source_fpaths = [oepaths.kpi_tracker_rev1]
         else:
-            df = get_kpis_from_flashreport(site=self.name, year=year, month=month)
+            report_fpaths = self.get_flashreport_files(year, month, types=["report"])
+            report_fpaths = [fp for fp in report_fpaths if "fracsun" not in fp.name]  # TEMP
+            rpt_fpath = oepaths.latest_file(report_fpaths)
+            df = load_kpis_from_flashreport(filepath=rpt_fpath)
+            source_fpaths = [rpt_fpath]
+
+            # get GHI insolation from either (1) met sensor data, or (2) dtn file
+            ghi_total = None  # init
+            mfps = self.get_met_stations_filepaths(year, month)
+            clean_fp, proc_fp = map(oepaths.latest_file, [mfps["cleaned"], mfps["processed"]])
+            if clean_fp is not None and proc_fp is not None:
+                # check if ghi sensors exist in data file
+                if any("ghi" in c.lower() for c in self._load_file(clean_fp).columns):
+                    dfm = self._load_file(proc_fp)
+                    if "Processed_GHI" in dfm.columns:
+                        ghi_total = dfm["Processed_GHI"].div(1e3).sum()
+                        if dfm.index.to_series().diff().min() == pd.Timedelta(minutes=1):
+                            ghi_total = ghi_total / 60  # minute-level data
+                        source_fpaths.append(proc_fp)
+            if ghi_total is None:
+                dtn_folder = self.flashreport_folder(year, month).parents[1].joinpath("DTN")
+                dtn_fp = oepaths.latest_file(list(dtn_folder.glob(f"*{self.name}*")))
+                if dtn_fp is not None:
+                    df_dtn = self._load_file(dtn_fp)
+                    if "dtn_ghi" in df_dtn.columns:
+                        ghi_total = df_dtn["dtn_ghi"].div(1e3).sum()  # always hourly data
+                        source_fpaths.append(dtn_fp)
+
+            df.loc[len(df)] = ["GHI Insolation [kWh/m^2]", ghi_total]
+
+        if return_fpaths:
+            return df, source_fpaths
         return df
 
     def get_budget_values(self, year: int, month: int):
