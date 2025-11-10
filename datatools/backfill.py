@@ -265,6 +265,7 @@ def evaluate_sensor_data(site, year, month, n_clearsky_days=7, q=True):
 
 
 def get_sensor_summaries(df_met, df_ext, top_clearsky_dates, df_soiling=None):
+    """NOTE: df_ext should be hourly data"""
     grouped_sensor_cols = grouped_meteo_columns(df_met.columns)
     REFERENCE_COLS = {"poa": "poa_global", "ghi": "dtn_ghi"}
     sensor_summaries = {}
@@ -394,22 +395,21 @@ def process_and_backfill_meteo_data(filepath, site, n_clearsky=5, r2_diff=0.1, q
     start_date, end_date = map(lambda d: d.strftime("%Y-%m-%d"), [start_, end_])
 
     # load external data
-    freq = "1min" if native_freq == pd.Timedelta(minutes=1) else "1h"
-    # df_ext_backfill = None
     if "FlashReports" in fpath.parts:
         year, month = start_.year, start_.month
         if f"{year}-{month:02d}" not in fpath.name:
             raise ValueError("Problem validating Flashreport-related filepath.")
         # get external data either from existing file, or by querying (handled in function)
-        df_ext = SolarDataset.get_supporting_data(site, year, month, freq=freq, q=q)
-        # df_ext = get_supporting_data(site, year, month)
-        # if native_freq == pd.Timedelta(minutes=1):
-        #     df_ext_backfill = get_supporting_data(site, year, month, freq="1min", q=q)
+        df_ext = SolarDataset.get_supporting_data(site, year, month, q=q)
     else:
         # df_ext = load_supporting_data(site, start_date, end_date)
         df_ext = SolarDataset.from_dtn_files(site, start_date=start_date, end_date=end_date)
-        if freq == "1min":
-            df_ext = df_ext.resample(freq).ffill()
+
+    if native_freq == pd.Timedelta(minutes=1):
+        df_backfill = df_ext.resample("1min").ffill().copy()
+        df_backfill = df_backfill.reindex(df_met.index)
+    else:
+        df_backfill = df_ext.copy()
 
     # identify top N clearsky days
     clearsky_date_list = identify_clearsky_days_using_dtn_ghi(site, df_ext)
@@ -520,7 +520,7 @@ def process_and_backfill_meteo_data(filepath, site, n_clearsky=5, r2_diff=0.1, q
         df[f"{grp_id}_all_bad"] = df[bad_sensor_cols].prod(axis=1)
 
     # backfill data (NOTE: includes all groups in BACKFILL_COLUMNS)
-    df_backfill = df_ext.copy()
+    # df_backfill = df_ext.copy()
     # if df_ext_backfill is None:
     #     df_backfill = df_ext.copy()
     #     if native_freq < pd.Timedelta(hours=1):
