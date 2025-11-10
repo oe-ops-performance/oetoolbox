@@ -151,18 +151,12 @@ class SolarDataset(Dataset):
     ):
         """Queries data from PI for pre-defined attributes used in monthly reporting."""
         site = SolarSite(site_name)
-        attribute_paths = site.query_attributes.get(asset_group)
-
-        if asset_group == "Modules":
-            common_attpaths = site.get_attribute_paths(attributes=["OE.ModulesOffline"])
-            if not attribute_paths:
-                attribute_paths = common_attpaths
-            else:
-                attribute_paths.insert(0, common_attpaths[0])
+        query_att_dict = site.get_reporting_query_attributes()
+        attribute_paths = query_att_dict.get(asset_group, [])
 
         if not attribute_paths:
             err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
-            raise KeyError(f"{err_msg}\nSupported asset groups: {[*site.query_attributes]}")
+            raise KeyError(f"{err_msg}\nSupported asset groups: {[*query_att_dict]}")
 
         dataset = cls(site, start_date, end_date)
         dataset._query_data_from_pi(attribute_paths, freq, keep_tzinfo, data_format, q)
@@ -299,31 +293,32 @@ class SolarDataset(Dataset):
         month: int,
         freq: str = "1h",
         keep_tz: bool = True,
+        return_dataframe: bool = True,
         q: bool = True,
     ):
         """Loads DTN data from files in flashreport DTN folder if exists, otherwise queries/saves"""
         qprint = quiet_print_function(q=q)
         dataset = cls.from_dtn_files(site_name, year=year, month=month, keep_tz=keep_tz, q=q)
         if dataset.data is not None:
+            df_dtn = dataset.data
             qprint("Loaded from file.")
-            return dataset
+        else:
+            # query data and save file to flashreport DTN folder
+            qprint("No file found; querying data.")
+            start = pd.Timestamp(year, month, 1)
+            end = start + pd.DateOffset(months=1)
+            df_dtn = query_dtn_meteo_data(site_name, start, end, q=q)
+            expected_local_idx = pd.date_range(
+                start, end, freq="h", inclusive="left", tz=dataset.site.timezone
+            )
+            df_dtn = df_dtn.reindex(expected_local_idx)
 
-        # query data and save file to flashreport DTN folder
-        qprint("No file found; querying data.")
-        start = pd.Timestamp(year, month, 1)
-        end = start + pd.DateOffset(months=1)
-        df_dtn = query_dtn_meteo_data(site_name, start, end, q=q)
-        expected_local_idx = pd.date_range(
-            start, end, freq="h", inclusive="left", tz=dataset.site.timezone
-        )
-        df_dtn = df_dtn.reindex(expected_local_idx)
-
-        dtn_folder = Path(dataset.site.flashreport_folder(year, month).parent, "DTN")
-        if not dtn_folder.exists():
-            dtn_folder.mkdir(parents=True)
-        dtn_fpath = Path(dtn_folder, f"dtn_data_{site_name}_{year}-{month:02d}.csv")
-        df_dtn.to_csv(dtn_fpath)
-        qprint(f"\nSaved: {str(dtn_fpath)}")
+            dtn_folder = Path(dataset.site.flashreport_folder(year, month).parents[1], "DTN")
+            if not dtn_folder.exists():
+                dtn_folder.mkdir(parents=True)
+            dtn_fpath = Path(dtn_folder, f"dtn_data_{site_name}_{year}-{month:02d}.csv")
+            df_dtn.to_csv(dtn_fpath)
+            qprint(f"\nSaved: {str(dtn_fpath)}")
 
         if not keep_tz:
             df_dtn = remove_tzinfo_and_standardize_index(df_dtn)
@@ -332,4 +327,7 @@ class SolarDataset(Dataset):
             df_dtn = df_dtn.resample(freq).ffill()
 
         dataset.data = df_dtn.copy()
+
+        if return_dataframe:
+            return dataset.data
         return dataset
