@@ -8,8 +8,8 @@ import pandas as pd
 import requests
 
 from ..utils import oemeta
-from ..utils.config import DTN_CREDENTIALS, FRACSUN_API_CREDENTIALS
-from ..utils.helpers import with_retries
+from ..utils.config import DTN_CREDENTIALS
+from ..utils.helpers import quiet_print_function, with_retries
 
 
 def segmented_date_ranges(start, end, n_days):
@@ -136,7 +136,7 @@ def query_DTN_weather_data(latitude, longitude, start, end, interval, fields, q=
 
 def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
     """Returns a timezone-aware dataframe with data queried from DTN"""
-    qprint = lambda msg, end="\n": None if q else print(msg, end=end)
+    qprint = quiet_print_function(q=q)
     fmt_tstamp = (
         lambda t: pd.Timestamp(t, tz=tz).tz_convert(tz="UTC").tz_localize(None).isoformat() + "Z"
     )
@@ -168,7 +168,7 @@ def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
 
 def load_noaa_weather_data(site, start, end, freq="h", q=True):
     """Loads NOAA ambient temperature and wind speed data"""
-    qprint = lambda msg, end="\n": None if q else print(msg, end=end)
+    qprint = quiet_print_function(q=q)
     start_date = pd.Timestamp(start).floor("D")
     end_date = pd.Timestamp(end).ceil("D")
 
@@ -203,23 +203,79 @@ def query_fracsun_daily_soiling(api_key: str, device_id: str, start_date: str, e
     url = f"https://admin.fracsun.com/api/device/soiling/{device_id}/"
     params = {"apiKey": api_key, "startDate": start_date, "endDate": end_date}
     headers = {"Content-Type": "application/json"}
-
     response = requests.get(url, params=params, headers=headers)
     response.raise_for_status()  # Raise error if request failed
     return pd.DataFrame(response.json())
 
 
-def query_fracsun(site: str, start_date: str, end_date: str):
-    """Runs query for fracsun daily soiling using credentials for specified site."""
-    if FRACSUN_API_CREDENTIALS is None:
-        raise Exception("No Fracsun credentials found in secrets/secrets.json file.")
+def _get_fracsun_credentials(site: str) -> list[dict]:
+    """Returns a list of dictionaries with keys 'api_key' and 'device_id' for specified site."""
+    return [
+        credentials
+        for key, credentials in oemeta.data["fracsun_api_credentials"].items()
+        if key.split("_")[0] == site
+    ]
 
-    site_credentials = FRACSUN_API_CREDENTIALS.get(site, None)
-    if site_credentials is None:
-        raise Exception(f"No Fracsun credentials configured for {site = }.")
 
-    api_key = site_credentials["api_key"]
-    device_id = site_credentials["device_id"]
-    df = query_fracsun_daily_soiling(api_key, device_id, start_date, end_date)
+def get_fracsun_sites():
+    return list(
+        sorted(
+            set(x.split("_")[0] for x in oemeta.data["fracsun_api_credentials"]),
+            key=lambda site: site.lower(),
+        )
+    )
+
+
+def _format_fracsun_data(df_response: pd.DataFrame) -> pd.DataFrame:
+    df = df_response.drop(columns=["calculation_time", "utc_calcTime", "device"]).copy()
     df["day"] = pd.to_datetime(df["day"])
     return df
+
+
+def query_fracsun(site: str, start_date: str, end_date: str, average: bool = True, q: bool = True):
+    """Runs query for fracsun daily soiling using credentials for specified site."""
+    qprint = quiet_print_function(q=q)
+    credentials_list = _get_fracsun_credentials(site)
+    if not credentials_list:
+        raise Exception(f"No Fracsun credentials found for {site = }.")
+    n_devices = len(credentials_list)
+    qprint(f"[{site}] - Querying data for {n_devices} device(s).")
+    df_list = []
+    for credentials in credentials_list:
+        api_key = credentials["api_key"]
+        device_id = credentials["device_id"]
+        dff = query_fracsun_daily_soiling(api_key, device_id, start_date, end_date)
+        dff = _format_fracsun_data(df_response=dff)
+        df_list.append(dff)
+    qprint("Done.")
+
+    df = df_list[0].copy()
+    datacols = list(sorted([c for c in df.columns if c != "day"]))
+    ordered_cols = ["day", *datacols]
+    df = df[ordered_cols]
+    if len(df_list) > 1:
+        for i, df_ in enumerate(df_list[1:], start=2):
+            suffixes = (None, "_2") if i == 2 else (None, f"_{i}")
+            df = pd.merge(df, df_, on="day", suffixes=suffixes)
+        df = df.rename(columns={c: f"{c}_1" for c in datacols})
+    df = df.set_index("day").apply(pd.to_numeric, errors="coerce")
+
+    if n_devices > 1 and average is True:
+        df = average_across_fracsun_devices(df, q=q)
+
+    return df
+
+
+def average_across_fracsun_devices(df: pd.DataFrame, q: bool = True):
+    qprint = quiet_print_function(q=q)
+    if max(len(c.split("_")) for c in df.columns) == 1:
+        qprint("The provided Fracsun data does not have multiple devices.")
+        return df
+    n_devices = max(int(c.split("_")[-1]) for c in df.columns)
+    column_names = list(sorted(set(c.split("_")[0] for c in df.columns)))
+    df_avg = pd.DataFrame(index=df.index.copy())
+    for col in column_names:
+        related_cols = [c for c in df.columns if c.startswith(col)]
+        df_avg[col] = df[related_cols].mean(axis=1).copy()
+    qprint(f"Averaged data across {n_devices} devices.")
+    return df_avg
