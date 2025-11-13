@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from ..utils import oepaths, oemeta
 from ..reporting.tools import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
+from ..dataquery.external import query_fracsun, get_fracsun_sites
 from ..datatools.meteoqc import transposed_POA_from_DTN_GHI
 from ..datatools.meterhistorian import load_meter_historian, METER_HISTORIAN_FILEPATH
 
@@ -435,9 +436,29 @@ def generate_monthlyFlashReport(
             df_acmods = df_acmods[["OE.ModulesOffline_Percent"]]
             qprint(f'Loaded Modules file ---- "{mods_fp.name}"')
 
+    # get fracsun soiling data
+    if sitename in get_fracsun_sites():
+        start_date, end_date = map(lambda x: x.strftime("%Y-%m-%d"), [t_start, t_end])
+        df_soil = query_fracsun(sitename, start_date, end_date, q=q)
+        df_soil = df_soil[["soiling"]].resample("1h").ffill()
+        df_soil["soilingPercent"] = df_soil["soiling"].div(100)
+        df_soil = df_soil[["soilingPercent"]]
+        df_soil = df_soil.reindex(dfPOA.index)
+        qprint("Loaded Fracsun soiling data.")
+    else:
+        df_soil = pd.DataFrame(index=dfPOA.index, data={"soilingPercent": np.nan})
+
     df4xl = (
         dfPOA.join(
-            df_acmods.join(df_inv.join(dfpvlib_inv.join(df_avail), how="left", rsuffix="_avail"))
+            df_acmods.join(
+                df_soil.join(
+                    df_inv.join(
+                        dfpvlib_inv.join(df_avail),
+                        how="left",
+                        rsuffix="_avail",
+                    ),
+                ),
+            ),
         )
         .rename_axis("Timestamp")
         .reset_index(drop=False)
@@ -447,7 +468,7 @@ def generate_monthlyFlashReport(
     numInv = df_inv.shape[1]
 
     # check merged dataframe before continuing
-    if df4xl.shape[1] != 5 + 3 * numInv:  # add 4 for tstamp, poa, poaBad, modTemp, modsOffline
+    if df4xl.shape[1] != 6 + 3 * numInv:  # add 6 for tstamp, poa, poaBad, modTemp, mods, soiling
         qprint("\n\n!! problem merging dataframes !!\n")
         qprint(f"No report created for {sitename}.\nExiting function.")
         return

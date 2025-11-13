@@ -329,15 +329,32 @@ def load_kpis_from_flashreport(filepath):
     if modloss_col in data_table_cols:
         acmod_col = data_table_cols.index(modloss_col)
         # find row with total mod loss
-        checkvals = df.iloc[:row_end, acmod_col - 1].to_list()
+        checkvals = df.iloc[:row_end, acmod_col].to_list()
         matching_ = [
             v for v in checkvals if all(i in str(v) for i in ["Total", "Mod", "Loss", "MWh"])
         ]
         if len(matching_) == 1:
-            mod_total_row = checkvals.index(matching_[0])
+            mod_total_row = checkvals.index(matching_[0]) + 1
             total_mod_loss = df.iat[mod_total_row, acmod_col]
 
+    # add ac mod loss to table
     dft.loc[len(dft)] = [modloss_col, total_mod_loss]
+
+    # check for soiling loss column
+    soilloss_col = "Soiling Loss [MWh]"
+    total_soiling_loss = 0
+    if soilloss_col in data_table_cols:
+        soil_col = data_table_cols.index(soilloss_col)
+        # find row with total soiling loss
+        checkvals = df.iloc[:row_end, soil_col].to_list()
+        matching_ = [
+            v for v in checkvals if all(i in str(v) for i in ["Total", "Soiling", "Loss", "MWh"])
+        ]
+        if len(matching_) == 1:
+            soil_total_row = checkvals.index(matching_[0]) + 1
+            total_soiling_loss = df.iat[soil_total_row, soil_col]
+
+    dft.loc[len(dft)] = [soilloss_col, total_soiling_loss]
 
     dft = dft.dropna(axis=0, how="all").reset_index(drop=True)
 

@@ -73,8 +73,6 @@ def create_monthly_report(
     # define function to print events if q=False (adds padding of spaces for carriage return)
     print_event = lambda msg: print(msg.ljust(44), end="\r") if not q else None
 
-    # IS_MAPLEWOOD = "Maplewood" in sitename
-
     # create new blank workbook object & assign sheet to variable
     if not q:
         print("Generating report...")
@@ -156,8 +154,7 @@ def create_monthly_report(
         Timestamp | POA | POA_all_bad | module_temp | InverterColumns | pvlibColumns | AvailabilityColumns
     """
     # add columns/rows to separate data
-    col_acmodData = 5
-    col_invData = 6  # in df4xl inv data is after tstamp, POA, badPOA, modTemp, and ACModLoss%
+    col_invData = 7  # in df4xl inv data is after tstamp, POA, badPOA, modTemp, ACModLoss, soiling
     col_pvlData = col_invData + numInv  # pvlib inv data start column
     col_hrAvail = col_pvlData + numInv  # hourly availability data start column
     ws.insert_cols(col_hrAvail, 1)  # +1 col before hourly avail data
@@ -169,18 +166,15 @@ def create_monthly_report(
         "Tcell",
         "ENDCi",
         "Perf_Ratio",
-        "AC Modules Offline (%)",  # from modules query file (if available)
         "AC Module Loss (MWh)",  # formula
+        "Soiling Loss (MWh)",  # formula
         "Curt_Loss",
         "Curt_SP",
         "Flag",
         "Meter",
     ]
 
-    # if IS_MAPLEWOOD:
-    #     newcols.insert(2, "Possible_Adj")
-
-    # adding (+11) cols before inv data (for actual, poss, tcell, endci, pratio, acmodoff, acmodloss, cLoss, cSP, Flag, meter)
+    # adding (+11) cols before inv data (for actual, poss, tcell, endci, pratio, acmodloss, soilingLoss, cLoss, cSP, Flag, meter)
     n_newcols = len(newcols)
     ws.insert_cols(col_invData, n_newcols)
 
@@ -190,7 +184,8 @@ def create_monthly_report(
 
     """
     order of columns for report:
-        Timestamp | POA | badPOA | modTemp | ActualGen | PossGen | Tcell | ENDCi | Perf. Ratio | CurtLoss | CurtSP | Flag | ...
+        Timestamp | POA | badPOA | modTemp | modsOffline | soilingPct | ...
+        ... ActualGen | PossGen | Tcell | ENDCi | Perf. Ratio | ModsLoss | soilingLoss | CurtLoss | CurtSP | Flag | ...
         ... MeterGen | InverterColumns | calcCol | pvlibColumns | (emptycol) | AvailabilityColumns | ...
         ... (emptycol) | adjPVLibColumns | (emptycol) | LostMWhColumns
     """
@@ -207,34 +202,24 @@ def create_monthly_report(
         "badPOA",
         "modTemp",
         "acModsOffline%",
-    ] + newcols  # total: 5+11
+        "soiling%",
+    ] + newcols  # total: 6+11
 
     # create column objects/variables
     makecol = lambda ltr, wd: Col(ltr, wd)
     ltrs = "ABCDEFGHIJKLMNOPQ"[: len(sheetcols_)]
-    wdths = [25, 12, 12, 12, 12, 16, 16, 14, 14, 14, 16, 16, 12, 12, 6, 21]  # len = 16
-    # if IS_MAPLEWOOD:
-    #     wdths.insert(2, 16)  # for possible_adj
+    wdths = [25, 12, 12, 12, 12, 12, 16, 16, 12, 12, 12, 18, 18, 12, 12, 6, 21]  # len = 17
 
     # create list of Col instances for cols A through I
     Col_list = list(map(makecol, ltrs, wdths))
 
     # assign variables to Cols using list of Col instances
-    # 'A',  'B',   'C',    'D',  'E',   'F',    'G',    'H',     'I',     'J',     'K',   'L',  'M'
-    # cTime, cPOA, cPOAb, cMTemp, cAct, cPoss, cTcell, cENDCi, cPRatio, cCrLoss, cCurtSP, cFlag, cMtr = Col_list
 
-    # 'A',  'B',   'C',    'D',           'E',  'F',   'G'
-    cTime, cPOA, cPOAb, cMTemp, cACModsOffRaw, cAct, cPoss = Col_list[:7]
+    # 'A',  'B',   'C',    'D',           'E',      'F',  'G',   'H'
+    cTime, cPOA, cPOAb, cMTemp, cACModsOffPct, cSoilPct, cAct, cPoss = Col_list[:8]
 
-    # if IS_MAPLEWOOD:
-    #     cPossAdj = Col_list[6]
-
-    #  'G',    'H',     'I',     'J',     'K',   'L',  'M'
-    # cTcell, cENDCi, cPRatio, cCrLoss, cCurtSP, cFlag, cMtr = Col_list[-7:]
-    #  'H',    'I',     'J',     'K',     'L',   'M',  'N'  <<for Maplewoods
-
-    #  'H',    'I',     'J',       'K',        'L',     'M',     'N',   'O',  'P'
-    cTcell, cENDCi, cPRatio, cACModOff, cACModLoss, cCrLoss, cCurtSP, cFlag, cMtr = Col_list[7:]
+    #  'I',    'J',     'K',        'L',       'M',     'N',     'O',   'P',  'Q'
+    cTcell, cENDCi, cPRatio, cACModLoss, cSoilLoss, cCrLoss, cCurtSP, cFlag, cMtr = Col_list[8:]
 
     # get max row/column, then create variables to dynamically set table range
     rEnd = ws.max_row
@@ -274,6 +259,7 @@ def create_monthly_report(
     r1b4hdr = str(rSet - 1)
     r2b4hdr = str(rSet - 2)
     r3b4hdr = str(rSet - 3)
+    r4b4hdr = str(rSet - 4)
 
     poasource = "↙ from DTN data" if "POA_DTN" in df4xl.columns else "↙ from POA sensors"
 
@@ -324,17 +310,18 @@ def create_monthly_report(
         f"{cPOAb.ltr}{r1b4hdr}": poasource,
         f"{cPOAb.ltr}{rHeader}": "badPOA",
         f"{cMTemp.ltr}{rHeader}": "modTemp",
-        f"{cACModsOffRaw.ltr}{rHeader}": "ACModulesOffline%",
+        f"{cACModsOffPct.ltr}{rHeader}": "ACModulesOffline%",
+        f"{cSoilPct.ltr}{rHeader}": "Soiling%",
         f"{cAct.ltr}{rHeader}": "Actual [MWh]",
         f"{cPoss.ltr}{rHeader}": "Possible [MWh]",
         f"{cTcell.ltr}{rHeader}": "Tcell [C]",
         f"{cTcell.ltr}{r2b4hdr}": "Tcell_typ_avg:",
         f"{cENDCi.ltr}{rHeader}": "ENDCi [MWh]",
         f"{cPRatio.ltr}{rHeader}": "Perf. Ratio",
-        f"{cACModOff.ltr}{rHeader}": "AC Modules Offline [%]",
         f"{cACModLoss.ltr}{rHeader}": "AC Module Loss [MWh]",
-        f"{cACModOff.ltr}{r3b4hdr}": "Total AC Mod Loss (MWh)",  # note: need formula in cACModLoss
-        f"{cACModOff.ltr}{r2b4hdr}": "Total AC Mod Loss (%)",  # note: need formula in cACModLoss
+        f"{cACModLoss.ltr}{r4b4hdr}": "Total AC Mod Loss (MWh)",  # note: need formula in r3b4hdr
+        f"{cSoilLoss.ltr}{rHeader}": "Soiling Loss [MWh]",
+        f"{cSoilLoss.ltr}{r4b4hdr}": "Total Soiling Loss (MWh)",  # note: need formula in r3b4hdr
         f"{cCrLoss.ltr}{rHeader}": "Curt. Loss",
         f"{cCurtSP.ltr}{rHeader}": "Curt. SP",
         f"{cFlag.ltr}{rHeader}": "Flag",
@@ -435,8 +422,9 @@ def create_monthly_report(
         f"(1-({siteTcoeff_cell}*({tcellTypeAvg_cell}-{cTcell.ltr}{rStart})))"
     )
     eqn_PRatio = f"={cMtr.ltr}{rStart}/{cENDCi.ltr}{rStart}"
-    eqn_ACModsOffline = f"={cACModsOffRaw.ltr}{rStart}"
-    eqn_ACModLoss = f"={cACModOff.ltr}{rStart}*{cPoss.ltr}{rStart}"
+    # eqn_ACModsOffline = f"={cACModsOffPct.ltr}{rStart}"
+    eqn_ACModLoss = f"={cACModsOffPct.ltr}{rStart}*{cPoss.ltr}{rStart}"
+    eqn_soilingLoss = f"={cSoilPct.ltr}{rStart}*{cPoss.ltr}{rStart}"
 
     eqn_curtLoss = (
         f"=IF(AND({cCurtSP.ltr}{rStart}<{sitecapacity_cell},{cCurtSP.ltr}{rStart}<{cPoss.ltr}{rStart},"
@@ -468,10 +456,15 @@ def create_monthly_report(
     eqn_insolation = f'=SUMIFS({cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd},{cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd},">=0")/1000'
     eqn_totalmeter = f"=SUM({cMtr.ltr}{rStart}:{cMtr.ltr}{rEnd})"
 
-    # formulas for total ac module loss above mod loss col
+    # formulas for total ac module loss (above mod loss col)
     total_mod_loss_cell = f"{cACModLoss.ltr}{r3b4hdr}"
     ws[total_mod_loss_cell] = f"=SUM(${cACModLoss.ltr}${rStart}:${cACModLoss.ltr}${rEnd})"
     ws[f"{cACModLoss.ltr}{r2b4hdr}"] = f"={total_mod_loss_cell}/$C$9"  # div by possible
+
+    # formulas for total soiling loss (above soil loss col)
+    total_soiling_loss_cell = f"{cSoilLoss.ltr}{r3b4hdr}"
+    ws[total_soiling_loss_cell] = f"=SUM(${cSoilLoss.ltr}${rStart}:${cSoilLoss.ltr}${rEnd})"
+    ws[f"{cSoilLoss.ltr}{r2b4hdr}"] = f"={total_soiling_loss_cell}/$C$9"  # div by possible
 
     # create dictionary of cell formulas to be written
     dict_4mulas = {
@@ -493,11 +486,11 @@ def create_monthly_report(
         f"{cInv}{r2b4hdr}": eqn_pctNN,
         f"{cAct.ltr}{rStart}": eqn_siteActual,
         f"{cPoss.ltr}{rStart}": eqn_sitePoss,
-        f"{cTcell.ltr}{rStart}": eqn_Tcell,  #####NEW
-        f"{cENDCi.ltr}{rStart}": eqn_ENDCi,  #####NEW
-        f"{cPRatio.ltr}{rStart}": eqn_PRatio,  #####NEW
-        f"{cACModOff.ltr}{rStart}": eqn_ACModsOffline,  # NEW
-        f"{cACModLoss.ltr}{rStart}": eqn_ACModLoss,  #####NEW
+        f"{cTcell.ltr}{rStart}": eqn_Tcell,
+        f"{cENDCi.ltr}{rStart}": eqn_ENDCi,
+        f"{cPRatio.ltr}{rStart}": eqn_PRatio,
+        f"{cACModLoss.ltr}{rStart}": eqn_ACModLoss,
+        f"{cSoilLoss.ltr}{rStart}": eqn_soilingLoss,
         f"{cCrLoss.ltr}{rStart}": eqn_curtLoss,
         f"{cCurtSP.ltr}{rStart}": dfc["Curt_SP"][0],  # overwrite for CAISO data (below)
         f"{cFlag.ltr}{rStart}": eqn_flag,
@@ -586,13 +579,13 @@ def create_monthly_report(
             eqn_PRatio, origin=f"{cPRatio.ltr}{rStart}"
         ).translate_formula(f"{cPRatio.ltr}{r}")
 
-        ws[f"{cACModOff.ltr}{r}"] = Translator(
-            eqn_ACModsOffline, origin=f"{cACModOff.ltr}{rStart}"
-        ).translate_formula(f"{cACModOff.ltr}{r}")
-
         ws[f"{cACModLoss.ltr}{r}"] = Translator(
             eqn_ACModLoss, origin=f"{cACModLoss.ltr}{rStart}"
         ).translate_formula(f"{cACModLoss.ltr}{r}")
+
+        ws[f"{cSoilLoss.ltr}{r}"] = Translator(
+            eqn_soilingLoss, origin=f"{cSoilLoss.ltr}{rStart}"
+        ).translate_formula(f"{cSoilLoss.ltr}{r}")
 
         ws[f"{cCurtSP.ltr}{r}"] = dfc["Curt_SP"][r - int(rStart)]
         ws[f"{cCrLoss.ltr}{r}"] = Translator(
@@ -903,9 +896,7 @@ def create_monthly_report(
     numInvCell = f"{sRef}{cInv}1"
 
     seqn_SIHD = f'=COUNTIF({sRef}{cAvail}{rStart}:{cAvail_end}{rEnd},">0")'
-    # seqn_RSIH = f'=COUNTIF({sRef}{cCrLoss.ltr}{rStart}:{cCrLoss.ltr}{rEnd},">0")*{numInvCell}'
     seqn_RSIH = f'=COUNTIFS({sRef}{cCrLoss.ltr}{rStart}:{cCrLoss.ltr}{rEnd},">0", {sRef}{cMtr.ltr}{rStart}:{cMtr.ltr}{rEnd}, "<1")*{numInvCell}'
-    # seqn_FOIHD = f"=SUMPRODUCT(({sRef}{cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd}>0)*({sRef}{cInv}{rStart}:{cInv_end}{rEnd}<=0))"
     seqn_FOIHD = "=B14-B18-B19-B28"  # AIH - SIHD - RSIH - RUIHN
     seqn_PRatio = f"=ROUND(SUM({sRef}{cMtr.ltr}{rStart}:{cMtr.ltr}{rEnd})/SUM({sRef}{cENDCi.ltr}{rStart}:{cENDCi.ltr}{rEnd}), 2)"
 
@@ -937,8 +928,6 @@ def create_monthly_report(
 
     seqn_ASIH = "=B18+B19+B20+B21+B22"  # SIHD + RSIH + FOIHD + MIHD + PIHD
     seqn_AIH = "=B35-B15-B16-B17"  #  month_hours - IRIH - MBIH - RIH
-    # seqn_RUIHN = '=B35-B15-B16-B17-B13'    # month_hours - IRIH - MBIH - RIH - ASIH
-    # seqn_RUIHN = "=B14-B13"  # AIH - ASIH
     seqn_RUIHN = f'=COUNTIF({sRef}{cPOA.ltr}{rStart}:{cPOA.ltr}{rEnd},"<=20")'
 
     gads_id_dict = {
@@ -1145,6 +1134,14 @@ def create_monthly_report(
 
     fmt_cell(ws, f"{cTcell.ltr}{r2b4hdr}", align=a.right, font=fnt.sz10)
     fmt_cell(ws, f"{cENDCi.ltr}{r2b4hdr}", font=fnt.sz10, numFmt="0.000")
+
+    fmt_cell(ws, f"{cACModLoss.ltr}{r4b4hdr}", align=a.right)
+    fmt_cell(ws, f"{cACModLoss.ltr}{r3b4hdr}", numFmt="0.000")
+    fmt_cell(ws, f"{cACModLoss.ltr}{r2b4hdr}", numFmt="0.0%")
+
+    fmt_cell(ws, f"{cSoilLoss.ltr}{r4b4hdr}", align=a.right)
+    fmt_cell(ws, f"{cSoilLoss.ltr}{r3b4hdr}", numFmt="0.000")
+    fmt_cell(ws, f"{cSoilLoss.ltr}{r2b4hdr}", numFmt="0.0%")
 
     """FORMAT INVERTER TOTALS SECTION"""  # pbar +100
     fmt_range(ws, f"{cInv}3:{cInv_end}9", fill=f.grey2, numFmt="0.00", border=b.bd)
