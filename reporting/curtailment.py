@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 
 from ..utils import oepaths
+from ..utils.helpers import with_retries
 
 ## function to load most recently-created file in fpath list
 get_file = lambda fp_list: max((fp.stat().st_ctime, fp) for fp in fp_list)[1] if fp_list else None
@@ -161,6 +162,7 @@ def comanche_reporting_timeseries(year, month):
 
 
 ## function to query Comanche SQL data for comparison to calculated values in summary table
+@with_retries(n_max=5)
 def sql_curtailment_summary(year, month, q=True):
     start_ = pd.Timestamp(year, month, 1)
     end_ = start_ + pd.DateOffset(months=1)
