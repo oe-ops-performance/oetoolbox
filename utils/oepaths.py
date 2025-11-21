@@ -87,8 +87,10 @@ def latest_file(filepath_list):
 
 
 def get_contents(folder):
+    if not Path(folder).is_dir() or not Path(folder).exists():
+        raise ValueError("Provided path is not a valid directory.")
     output = dict(files=[], folders=[], other=[])
-    for fp in sorted_filepaths(list(folder.glob("*"))):
+    for fp in sorted_filepaths(list(Path(folder).glob("*"))):
         if fp.is_dir():
             output["folders"].append(fp)
         elif fp.is_file():
