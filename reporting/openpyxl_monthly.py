@@ -46,6 +46,7 @@ def create_monthly_report(
     missingfiles=None,
     df_caiso=None,
     df_caiso2=None,
+    utility_meter_total=None,
 ):
     """
     this function generates a monthly report Excel file using openpyxl
@@ -424,7 +425,11 @@ def create_monthly_report(
     eqn_PRatio = f"={cMtr.ltr}{rStart}/{cENDCi.ltr}{rStart}"
     # eqn_ACModsOffline = f"={cACModsOffPct.ltr}{rStart}"
     eqn_ACModLoss = f"={cACModsOffPct.ltr}{rStart}*{cPoss.ltr}{rStart}"
-    eqn_soilingLoss = f"={cSoilPct.ltr}{rStart}*{cPoss.ltr}{rStart}"
+    eqn_soilingLoss = (
+        f"=IF({cSoilPct.ltr}{rStart}*{cPoss.ltr}{rStart}>0,"
+        f"{cSoilPct.ltr}{rStart}*{cPoss.ltr}{rStart},"
+        "0)"
+    )
 
     eqn_curtLoss = (
         f"=IF(AND({cCurtSP.ltr}{rStart}<{sitecapacity_cell},{cCurtSP.ltr}{rStart}<{cPoss.ltr}{rStart},"
@@ -521,6 +526,13 @@ def create_monthly_report(
             if comanchePPCval
             else "note: reported curt. value not found"
         )
+
+    # FOR SITES WITH UTILITY GENERATION TOTALS THAT DON'T HAVE HOURLY INTERVAL DATA
+    if utility_meter_total is not None:  # currently only for FL1, FL4
+        # overwrite Meter Generation total in cell C10 (note: HARDCODED for now)
+        ws["C10"] = utility_meter_total
+        if sitename in ("FL1", "FL4"):
+            ws["D10"] = '<< from "Monthly_Gen_Only_Plants" sheet in meter historian file'
 
     # copy inverter names for summary table & write # of missing inv entries above data table
     for i in range(cInv_num, cInv_end_num + 1):
