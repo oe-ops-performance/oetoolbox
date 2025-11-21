@@ -6,11 +6,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from ..utils import oepaths, oemeta
+from ..utils.solar import SolarDataset
 from ..reporting.tools import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
 from ..dataquery.external import query_fracsun, get_fracsun_sites
-from ..datatools.meteoqc import transposed_POA_from_DTN_GHI
-from ..datatools.meterhistorian import load_meter_historian, METER_HISTORIAN_FILEPATH
+from ..datatools.meterhistorian import (
+    get_meter_totals_from_historian,
+    load_meter_historian,
+    METER_HISTORIAN_FILEPATH,
+)
 
 
 def load_PIdatafile(filepath, t1, t2):
@@ -227,21 +231,12 @@ def generate_monthlyFlashReport(
     frpath = oepaths.frpath(year, month, ext="solar", site=sitename)
     met_fpaths = list(frpath.glob("PIQuery_MetStations*PROCESSED*.csv"))
     met_fp = oepaths.latest_file(met_fpaths)
-    if not met_fp:
-        dtn_start = pd.Timestamp(year, month, 1)
-        dtn_end = dtn_start + pd.DateOffset(months=1)
-        df_ext = transposed_POA_from_DTN_GHI(
-            site=sitename,
-            start=dtn_start,
-            end=dtn_end,
-            freq="1h",
-            q=q,
-            keep_tzinfo=False,
-        )
-        dtn_insolation = df_ext["poa_global"].sum() / 1e3
-    else:
+    if met_fp is not None:
         df_ext = pd.read_csv(met_fp, index_col=0, parse_dates=True)
         dtn_insolation = df_ext["poa_global"].sum() / 1e3 / 60  # minute-level
+    else:
+        df_ext = SolarDataset.get_supporting_data(sitename, year, month, keep_tz=False, q=q)
+        dtn_insolation = df_ext["poa_global"].sum() / 1e3
 
     """LOAD PVLIB DATA"""
     pvlibpath = f"{siteFRpath}\\{pvlibfile}"
@@ -509,6 +504,16 @@ def generate_monthlyFlashReport(
 
             df_caiso2 = create_curtailment_table_from_caiso_data(sitename, df_caiso, dfm, dfpvlib)
 
+    # for sites with utility meter totals but no interval data
+    utility_meter_total = None  # default
+    if sitename in ["FL1", "FL4"]:
+        hist_totals = get_meter_totals_from_historian(year, month)
+        if hist_totals is not None:
+            utility_meter_total = hist_totals.get(sitename, None)
+            if utility_meter_total is not None:
+                meterfile = True
+                qprint("Loaded meter total from historian.")
+
     # get filename and generate savepath for report
     has_meterdata = meterfile
     sfolder_ = siteFRpath if not local else str(Path.home().joinpath("Downloads"))
@@ -554,6 +559,7 @@ def generate_monthlyFlashReport(
         missingfiles=dict_missingfiles,
         df_caiso=df_caiso,
         df_caiso2=df_caiso2,
+        utility_meter_total=utility_meter_total,
     )
 
     if not q:
