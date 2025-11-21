@@ -153,13 +153,13 @@ def create_excursion_plot(df_query, site):
     return fig
 
 
-def run_voltage_analysis(site, year, month, include_plot=False) -> dict:
+def run_voltage_analysis(site, year, month, include_plot=False, q=True) -> dict:
     """Queries voltage data for a given site and month, then processes and visualizes the data."""
-    df_query = query_monthly_voltage_data(site, year, month)
+    df_query = query_monthly_voltage_data_recordedvalues(site, year, month, q=q)
     df = format_query_dataframe(df_query)
     df_list = process_excursion_events(df)
-    df_table = create_excursion_event_table(df_list)
-    output = {"data": df_query, "events": df_table}
+    df_events = create_excursion_event_table(df_list)
+    output = {"data": df, "events": df_events}
     if include_plot:
         plot_fig = create_excursion_plot(df_query, site)
         output.update({"plot": plot_fig})
