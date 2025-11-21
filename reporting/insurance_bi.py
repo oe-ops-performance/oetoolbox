@@ -18,10 +18,21 @@ SOLAR_PERFORMANCE_REPORT_FILEPATH = Path(REFERENCE_DIR, "Weekly-Solar-Performanc
 
 
 def load_performance_report_data():
-    return {
-        key: pd.read_excel(SOLAR_PERFORMANCE_REPORT_FILEPATH, sheet_name=sheet, engine="calamine")
-        for key, sheet in zip(["site", "inverter"], ["Site Outages", "Inverter Outages"])
-    }
+    df_dict = {}
+    for key, sheet in zip(["site", "inverter"], ["Site Outages", "Inverter Outages"]):
+        df = pd.read_excel(SOLAR_PERFORMANCE_REPORT_FILEPATH, sheet_name=sheet, engine="calamine")
+        for date_col in ("Date Offline", "Date Restored (Est)"):
+            if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+                cond = df[date_col].astype(str).str.contains("/")
+                try:
+                    df.loc[cond, date_col] = pd.to_datetime(
+                        df.loc[cond, date_col].str[:10], format="%m/%d/%Y"
+                    )
+                    df[date_col] = pd.to_datetime(df[date_col])
+                except pd.errors.DateParseError as e:
+                    raise e
+        df_dict.update({key: df})
+    return df_dict
 
 
 def process_claim_dates(dataframe: pd.DataFrame, site: str, start_date: str, end_date: str):
@@ -114,6 +125,8 @@ def calculate_insurance_bi_adjustment(site_name, year, month, return_claim_and_d
     df_outages = get_inverter_outage_days(site.name, start_date, end_date)
     if df_outages.empty:
         qprint("\nNO OUTAGES FOUND!\n")
+        if return_claim_and_df:
+            return {"total_claim_mwh": 0, "df_outages": df_outages}
         return
     qprint(f"\nFound {len(df_outages)} outage records:\n{df_outages}\n")
 
