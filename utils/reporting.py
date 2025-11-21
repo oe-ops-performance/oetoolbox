@@ -765,6 +765,64 @@ class FlashReportGenerator:
             return df, source_files
         return df
 
+    # TODO: refactor the below function (from SolarSite)
+    # def calculate_monthly_variance_kpis(self, year: int, month: int, meter_total: float = None):
+    #     """Calculates monthly variance KPIs for generation, resource, and availability.
+
+    #     >> data requirements / sources
+    #         - total generation (from historian, or PI meter file) <- use meter_total arg to bypass
+    #         - budget generation (from kpi tracker file)
+    #         - insolation (from PROCESSED met station file, or DTN transposition)
+    #         - curtailment (Comanche only - from curtailment report file)
+
+    #     Parameters
+    #     ----------
+    #     year : int
+    #     month : int
+    #     meter_total : float, optional
+    #         When provided, skips loading of historian file or PI data (for use in loop)
+
+    #     Returns
+    #     -------
+    #     A dictionary with the following format:
+    #         variance_dict = {
+    #             "generation": {"value": variance_val, "%": variance_pct},
+    #             "resource": {"value": variance_val, "%": variance_pct},
+    #             "availability": {"%": variance_pct},
+    #         }
+    #     """
+    #     report_status = self.get_flashreport_status(year, month)
+
+    #     start = pd.Timestamp(year, month, 1)
+    #     end = start + pd.DateOffset(months=1)
+    #     start_date, end_date = map(lambda t: t.strftime("%Y-%m-%d"), [start, end])
+
+    #     # get meter generation
+    #     if meter_total is None:
+    #         df_hist = load_meter_historian(year=year, month=month)
+    #         if self.name in df_hist.columns:
+    #             meter_total = df_hist[self.name].sum()
+    #         elif report_status["qc"].get("Meter"):
+    #             kwargs = dict(asset_group="Meter", start_date=start_date, end_date=end_date)
+    #             dataset = SolarDataset.from_existing_query_files(self.name, **kwargs)
+    #             meter_total = dataset.data.iloc[:, 0].sum() / 60  # minute-level data
+    #         else:
+    #             meter_total = 0.0
+
+    #     # get budget generation
+    #     budget_dict = self.get_budget_values(year, month)
+
+    #     # get insolation
+    #     if report_status["backfill"].get("Met Stations"):
+    #         kwargs2 = dict(asset_group="Met Stations", start_date=start_date, end_date=end_date)
+    #         dataset = SolarDataset.from_existing_query_files(self.name, **kwargs2)
+    #         poacol = "POA" if "POA" in dataset.data.columns else "POA_DTN"
+    #         insolation_total = dataset.data[poacol].sum() / 60  # minute-level data
+    #     else:
+    #         # TODO: add function to get transposed poa from dtn
+    #         pass
+    #     return
+
 
 def _validated_sitelist(sitelist: list[str] = []) -> list[str]:
     """Returns list of valid solar sites. If not provided, returns all solar sites."""
