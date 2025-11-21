@@ -491,6 +491,22 @@ def load_data_to_server(df, q=True):
     return
 
 
+def get_meter_totals_from_historian(year, month):
+    """Get utility meter generation totals from historian; only for FL1 and FL4."""
+    df = pd.read_excel(
+        METER_HISTORIAN_FILEPATH, sheet_name="Monthly_Gen_Only_Plants", engine="calamine"
+    )
+    target_date = pd.Timestamp(year, month, 1)
+    site_names = ["FL1", "FL4"]
+    data_list = df.loc[(df["Date"] == target_date), site_names].to_dict(orient="records")
+    if len(data_list) == 1:
+        return data_list[0]
+    elif not data_list:
+        return None
+    raise ValueError("Unexpect output; check historian file for duplicate dates.")
+
+
+# TODO: remove the below functions, as they should not be necessary moving forward
 # openpyxl functions for updating excel files
 def get_dataframe_from_worksheet(ws):
     """returns dataframe with contents of Hourly Gen by Project sheet"""

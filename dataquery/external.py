@@ -195,6 +195,7 @@ def load_noaa_weather_data(site, start, end, freq="h", q=True):
     return df
 
 
+@with_retries(n_max=5)
 def query_fracsun_daily_soiling(api_key: str, device_id: str, start_date: str, end_date: str):
     """
     Query daily soiling and insolation values via Fracsun API.

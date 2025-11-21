@@ -1,4 +1,5 @@
 from functools import wraps
+import inspect
 
 
 def with_retries(n_max: int = 5, raise_error: bool = True):
@@ -96,4 +97,84 @@ def print_dataframe_info(df):
     if df.shape[1] > 10:
         print("...")
 
+    return
+
+
+def print_raw_module_info(module):
+    for name, obj in inspect.getmembers(module):
+        if not name.startswith("__"):
+            print(f"{name}: {obj}")
+    return
+
+
+def list_module_functions(module):
+    """Lists all functions explicitly defined within a given module."""
+    functions = []
+    for name, obj in inspect.getmembers(module):
+        if inspect.isfunction(obj) and inspect.getmodule(obj) is module:
+            functions.append(name)
+    return functions
+
+
+def members_by_type(cls):
+    prop_dict = {}
+    for name, member in inspect.getmembers(cls):
+        if not name.startswith("__"):  # Exclude special attributes
+            type_str = str(type(member)).replace("<class '", "").replace("'>", "")
+            if type_str not in prop_dict:
+                prop_dict[type_str] = [name]
+            else:
+                prop_dict[type_str].append(name)
+    return prop_dict
+
+
+def print_class_information(cls):
+    print(f"Information for class '{cls.__name__}'")
+    prop_dict = members_by_type(cls)
+    types_ = list(sorted([*prop_dict], reverse=True))
+    for type_str in types_:
+        print("")
+        member_list = prop_dict[type_str]
+        members = list(sorted([x for x in member_list if not x.startswith("_")]))
+        for name in members:
+            print(f"  {type_str} - {name}")
+    return
+
+
+def get_filtered_members(cls, obj_type: str):
+    """function for inspecting properties and functions of a class"""
+    if obj_type not in ["property", "function"]:
+        raise ValueError("Invalid obj_type specified. Must be 'property' or 'function'.")
+    filtered_members = []
+    for name, member in inspect.getmembers(cls):
+        if name.startswith("__"):  # Exclude special attributes
+            continue
+        if obj_type in str(type(member)):
+            filtered_members.append((name, member))
+    return filtered_members
+
+
+def get_member_names(cls, obj_type: str):
+    return [x[0] for x in get_filtered_members(cls, obj_type)]
+
+
+def print_class_info(cls, member_type=None):
+    class_str = ".".join([cls.__module__, cls.__name__])
+    print("{{ " + class_str + " }}")
+    member_type_list = ["property", "function"]
+    if member_type is not None:
+        if member_type not in member_type_list:
+            print("Invalid member type.")
+            return
+        member_type_list = [member_type]
+    for mtype in member_type_list:
+        print(f"[{mtype}]")
+        obj_list = get_filtered_members(cls, mtype)
+        for name, obj in obj_list:
+            if name.startswith("_"):
+                continue
+            func = obj if mtype == "function" else obj.fget
+            arg_str = str(inspect.signature(func))
+            obj_str = func.__name__ + arg_str
+            print(f"    .{obj_str}")
     return

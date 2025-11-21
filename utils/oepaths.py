@@ -1,4 +1,13 @@
+import datetime as dt
 from pathlib import Path
+
+
+# define functions for getting date created & optional string formatting
+def date_created(filepath, as_string=False):
+    created_datetime = dt.datetime.fromtimestamp(Path(filepath).stat().st_ctime)
+    if as_string is True:
+        return created_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    return created_datetime
 
 
 # get Shared folder that is linked to SharePoint/OneDrive
@@ -75,3 +84,17 @@ def latest_file(filepath_list):
     if not filepath_list:
         return None
     return sorted_filepaths(filepath_list)[0]
+
+
+def get_contents(folder):
+    if not Path(folder).is_dir() or not Path(folder).exists():
+        raise ValueError("Provided path is not a valid directory.")
+    output = dict(files=[], folders=[], other=[])
+    for fp in sorted_filepaths(list(Path(folder).glob("*"))):
+        if fp.is_dir():
+            output["folders"].append(fp)
+        elif fp.is_file():
+            output["files"].append(fp)
+        else:
+            output["other"].append(fp)
+    return output
