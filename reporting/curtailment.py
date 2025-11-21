@@ -319,3 +319,20 @@ def generate_curtailment_report(
     wb.close()
     qprint(f'done!\n    >> saved file: "{fname_}"')
     return
+
+
+def get_comanche_curtailment(year, month):
+    """Loads total curtailment from Comanche curtailment report file (if exists)"""
+    site_fpath = oepaths.frpath(year, month, ext="solar", site="Comanche")
+    valid_files = list(site_fpath.glob("*Curtailment*Report*"))
+    if not valid_files:
+        raise ValueError("No curtailment report file found.")
+    fpath = oepaths.latest_file(valid_files)
+    df = pd.read_excel(fpath, engine="calamine")
+    ref_col = "DATE" if "DATE" in df.columns else "Sum"
+    if ref_col not in df.columns:
+        raise KeyError("Could not find curtailment column in file. Check format.")
+    target_col_index = df.columns.get_loc(ref_col) + 1
+    target_col = df.columns[target_col_index]
+    target_row = df[target_col].last_valid_index()
+    return df.at[target_row, target_col]
