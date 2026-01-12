@@ -6,6 +6,7 @@ import pandas as pd
 # from ..utils.assets import SolarSite
 # from ..utils.pi import PIDataset
 # from ..utils.solar import SolarDataset
+from ..utils.helpers import quiet_print_function
 
 
 REPORT_KPI_COLUMN_MAPPING = {
@@ -45,6 +46,22 @@ ORDERED_KPI_COLUMNS = [  # order for tracker & kpis_and_notes files
     "Inverter Uptime Availability (%)",
 ]
 
+KPI_COLUMNS_FOR_PLOT = [
+    "Budgeted POA (kWh/m2)",
+    "POA Insolation (kWh/m2)",
+    "Budgeted Production (MWh)",
+    "Possible Generation (MWh)",
+    "Inverter Generation (MWh)",
+    "Meter Generation (MWh)",
+    "Budgeted Curtailment (MWh)",
+    "Curtailment - Total (MWh)",
+    "DC/System Health Loss (MWh)",
+    "Snow Derate Loss (MWh)",
+    "Downtime Loss (MWh)",
+    "Insurance BI Adjustment (MWh)",
+    "Inverter Uptime Availability (%)",
+]
+
 
 def blank_kpi_dataframe():
     return pd.DataFrame({col: np.nan for col in ORDERED_KPI_COLUMNS}, index=[0])
@@ -57,6 +74,92 @@ KPI_QUERY_ATTRIBUTES = [
     "OE.ModulesOffline",
     "OE.SiteSetpoint",
 ]
+
+# the following functions are designed to work with "kpi_data" output from FlashReportGenerator._get_performance_breakdown
+
+
+# validate totals
+def get_delta(x):
+    possible = x["generation"]["possible"]
+    total_losses = sum(x["losses"].values())
+    total_adjustments = sum(x["adjustments"].values())
+    net = possible - total_losses - total_adjustments
+    actual = x["generation"]["meter"]
+    return net - actual
+
+
+# function to validate kpi totals
+def validate_kpi_totals(kpi_data, return_delta=False):
+    delta = get_delta(kpi_data)
+    valid = round(delta, 5) == 0.0
+    if return_delta is False:
+        return valid
+    return valid, delta
+
+
+# function to check kpi totals and attempt to reconcile losses (if overestimated)
+def reconcile_losses(kpi_data, q=True) -> None:
+    """Uses kpi_data output from FlashReportGenerator._get_performance_breakdown."""
+    qprint = quiet_print_function(q=q)
+    _, delta = validate_kpi_totals(kpi_data, return_delta=True)
+    if delta >= 0:
+        return
+    # if delta is negative, we are over-estimating our losses
+
+    # check for insurance bi adjustment; if any, try removing from downtime
+    insurance_adj = kpi_data["adjustments"]["insurance_bi"]
+    downtime_loss = kpi_data["losses"]["downtime"]
+    if insurance_adj > 0 and downtime_loss > 0:
+        new_downtime = max(downtime_loss - insurance_adj, 0)
+        kpi_data["losses"]["downtime"] = new_downtime
+        if not q:
+            qprint(
+                ">> removed insurance_bi from downtime loss; "
+                f"reduced from {downtime_loss:.2f} to {new_downtime:.2f}"
+            )
+        _, delta = validate_kpi_totals(kpi_data, return_delta=True)
+        if delta >= 0:
+            return
+
+    # order of preference for removing losses from category
+    ordered_losses = ["dc_health", "downtime", "soiling", "snow_derate", "ac_module", "curtailment"]
+    for loss_type in ordered_losses:
+        loss = kpi_data["losses"][loss_type]
+        if loss > 0:
+            loss_reduction = min(loss, delta * -1)  # note: delta is negative
+            new_loss = loss - loss_reduction
+            kpi_data["losses"][loss_type] = new_loss
+            if not q:
+                qprint(
+                    f">> reduced {loss_type} loss by {loss_reduction:.2f} "
+                    f"(new value: {new_loss:.2f})"
+                )
+            delta += loss_reduction
+            if delta >= 0:
+                break
+
+    return
+
+
+def format_kpi_data_for_waterfall(kpi_data: dict):
+    generation = kpi_data["generation"]
+    losses = {key: val * -1 for key, val in kpi_data["losses"].items()}
+    adjustments = {key: val * -1 for key, val in kpi_data["adjustments"].items()}
+    waterfall_data = {
+        "possible": generation["possible"],
+        "snow_derate_loss": losses["snow_derate"],
+        "soiling_loss": losses["soiling"],
+        "dc_health_loss": losses["dc_health"],
+        "module_loss": losses["ac_module"],
+        "downtime_loss": losses["downtime"],
+        "insurance_bi": adjustments["insurance_bi"],
+        "curtailment": losses["curtailment"],
+        "inverter": generation["inverter"],
+        "ac_line_losses": losses["ac_line_losses"],
+        "meter": generation["meter"],
+    }
+    return waterfall_data
+
 
 # goal: create function "get_intra_month_estimates"
 # class SolarKPIs:
