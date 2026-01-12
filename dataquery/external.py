@@ -55,12 +55,12 @@ def query_DTN_weather_data(latitude, longitude, start, end, interval, fields, q=
     https://devportal.dtn.com/catalog/Weather/dtn-weather-conditions-api/documentation#tag--Parameters
         airTemp - C, F
             Air temperature at two meters above ground level. Units depend on unitcode setting.
-        cloudCover - %
-            Cloud cover data. Cloud cover refers to the percentage of the sky covered by clouds.
         dewPoint - C, F
             Dew point temperature at two meters above ground level. Dew point temperature is
             defined as the temperature to which the air must be cooled for saturation and
             condensation to occur.
+        effectiveCloudCover - %
+            Cloud cover data. Cloud cover refers to the percentage of the sky covered by clouds.
         iceAccPeriod - mm, in
             Hourly ice accumulation data.
         liquidAccPeriod - mm, in
@@ -68,31 +68,26 @@ def query_DTN_weather_data(latitude, longitude, start, end, interval, fields, q=
         longWaveRadiation - W/m^2
             Downwelling longwave radiation flux data. Longwave radiation is the energy emitted from
             non-solar radiation sources.
-        precipAccPeriod - mm, in
-            Hourly liquid-equivalent precipitation accumulation data.
-        precipAccAdjusted - mm, in
-            Liquid-equivalent precipitation accumulation, fundamentally derived from the raw
-            precipitation product, but then adjusted to more closely match available ground truth
-            observations. Due to the delays in receiving these ground truth data, accumulation
-            adjustment typically lags real-time by a day or more.
-        precipAccRaw - mm, in
-            Liquid-equivalent precipitation accumulation, estimated from multiple sources of data
-            that may include any or all of the following: weather radar, satellite, computer
-            models, and surface observation data.
+        precipAmount - mm, in
+            Total (liquid equivalent) accumulation of precipitation over the past hour.
         relativeHumidity - %
             Relative humidity at two meters above ground level. Relative humidity is the ratio of
             the actual amount of water vapor in the air to the maximum amount that can physically
             exist at a given air temperature.
         shortWaveRadiation - W/m^2
-            Downwelling shortwave radiation flux data. Shortwave radiation is the high-energy solar
-            radiation that reaches Earth’s surface.
-        snowAccPeriod - mm, in
-            Hourly snow accumulation data.
+            Also called Global Horizontal Irradiance (GHI), this is the instantaneous high-energy
+            solar radiation received at the Earth's surface, including both direct (DNI) and
+            diffuse (DHI) sunlight.
+        snowfallAmount - mm, in
+            Total accumulation of snow (measured depth, not liquid equivalent), over the past hour.
+        sunshineDuration - minutes
+            Duration of sunshine based on cloud cover and downwelling shortwave radiation over the past hour.
         surfacePressure - hPa, mb
             This parameter represents the pressure that the air exerts on the surface of the Earth.
+        totalCloudCover - %
+            The percentage of the sky covered by clouds. It can range from 0% (clear sky) to 100% (completely overcast).
         visibility - km, mi
-            Visibility data. Visibility is a measure of the lateral distance one can see before
-            one’s line of sight is obstructed due to weather conditions.
+            Lateral distance until line-of-sight is obstructed due to weather conditions.
         windDirection - degrees
             Wind direction at ten meters above ground level, measured with respect to true north.
             A wind direction from true north corresponds to a value of zero degrees, which
