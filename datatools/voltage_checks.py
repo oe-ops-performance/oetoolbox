@@ -35,6 +35,10 @@ def query_monthly_voltage_data_recordedvalues(site, year, month, q=True):
     df["Attribute"] = df["Attribute"].astype(str)
     df_poi = df.loc[df.Attribute.str.contains("POI")].copy()
     df_target = df.loc[df.Attribute.str.contains("Target")].copy()
+
+    df_poi = df_poi[~df_poi.index.duplicated(keep="first")].copy()
+    df_target = df_target[~df_target.index.duplicated(keep="first")].copy()
+
     df_target = df_target.resample("1s").ffill()
 
     target_tag, poi_tag = VOLTAGE_PIPOINT_DICT[site]
