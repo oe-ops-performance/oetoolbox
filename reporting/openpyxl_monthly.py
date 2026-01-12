@@ -42,8 +42,7 @@ def create_monthly_report(
     fig,
     savepath,
     q=True,
-    comanchePPCval=None,
-    missingfiles=None,
+    ext_curtailment={},  # dict with keys "total_mwh", "source"
     df_caiso=None,
     df_caiso2=None,
     utility_meter_total=None,
@@ -375,6 +374,12 @@ def create_monthly_report(
         f"SUM(${cPOA.ltr}${rStart}:${cPOA.ltr}${rEnd})"
     )
 
+    # check for external curtailment data
+    has_ext_curt = False
+    if sitename in ("Comanche", "Maplewood 1", "Maplewood 2"):
+        if all(key in ext_curtailment.keys() for key in ["total_mwh", "source"]):
+            has_ext_curt = True
+
     """FORMULAS FOR ROWS IN 'INVERTER TOTALS' SECTION"""
     eqn_nrgLoss = f"={cInv}4+{cInv}6"
     eqn_dcHealth = f"={cInv}9-{cInv}8-{cInv}7-{cInv}6"
@@ -483,7 +488,7 @@ def create_monthly_report(
         f"{cInv}4": eqn_dcHealth,
         f"{cInv}5": eqn_availTotal,
         f"{cInv}6": eqn_downtime,
-        f"{cInv}7": eqn_curtTotal if sitename != "Comanche" else f"=$C$7/${cInv}$1",
+        f"{cInv}7": eqn_curtTotal,  # if has_ext_curt is False else f"=$C$7/${cInv}$1",
         f"{cInv}8": eqn_invActual,
         f"{cInv}9": eqn_invPoss,
         f"{cInv}{RAWratio_row}": eqn_prodRatioRAW,
@@ -512,20 +517,26 @@ def create_monthly_report(
         ws[cell_] = dict_4mulas[cell_]
 
     """OTHER SITE TOTALS EQNS"""
-    # write formulas for Site Totals summary -EnerLoss, SysHealth, Downtime, Curtailment, Actual/PossGen
-    for r in range(3, 10):
-        if r != 5:
-            ws[f"C{r}"] = f"=SUM({cInv}{r}:{cInv_end}{r})"
+    # write formulas for Site Totals summary
+    # rows: EnerLoss (3), SysHealth (4), Downtime (6), ActualGen (8), PossGen (9)
+    for r in [3, 4, 6, 8, 9]:
+        ws[f"C{r}"] = f"=SUM({cInv}{r}:{cInv_end}{r})"
 
-    """overwrite curtailment in main ws condition 1"""
-    # FOR COMANCHE -- overwrite C7 curtailment value with that from separate Comanche report; move original calc to D7
-    if sitename == "Comanche":
-        ws["C7"] = comanchePPCval if comanchePPCval else f"=SUM({cInv}7:{cInv_end}7)"
-        ws["D7"] = (
-            f'<< copied from "Curtailment Report" file (..\Commercial\Comanche Invoices\..)'
-            if comanchePPCval
-            else "note: reported curt. value not found"
-        )
+    # row: Curtailment (7)
+
+    # add sum of CrLoss col to D7
+    curt_total_eqn = f"=SUM({cInv}7:{cInv_end}7)"
+
+    ws["C7"] = curt_total_eqn
+    ws["D7"] = f"=SUM(${cCrLoss.ltr}${rStart}:${cCrLoss.ltr}${rEnd})"
+
+    if has_ext_curt is True:
+        ws["C7"] = ext_curtailment["total_mwh"]
+        ws["E7"] = curt_total_eqn
+        display_filepath = ".." + "\\".join(Path(ext_curtailment["source"]).parts[-4:])
+        ws["F7"] = f'<< first value is copied from file: "{display_filepath}"'
+    elif sitename in ["Comanche", "Maplewood 1", "Maplewood 2"]:
+        ws["E7"] = "<< note: expected curtailment from external file, which was not provided."
 
     # FOR SITES WITH UTILITY GENERATION TOTALS THAT DON'T HAVE HOURLY INTERVAL DATA
     if utility_meter_total is not None:  # currently only for FL1, FL4
@@ -553,12 +564,13 @@ def create_monthly_report(
         ws[f"{col}4"] = Translator(eqn_dcHealth, origin=f"{cInv}4").translate_formula(f"{col}4")
         ws[f"{col}5"] = Translator(eqn_availTotal, origin=f"{cInv}5").translate_formula(f"{col}5")
         ws[f"{col}6"] = Translator(eqn_downtime, origin=f"{cInv}6").translate_formula(f"{col}6")
-        if (sitename == "Comanche") and (comanchePPCval is not None):
-            ws[f"{col}7"] = f"=$C$7/${cInv}$1"
-        else:
-            ws[f"{col}7"] = Translator(eqn_curtTotal, origin=f"{cInv}7").translate_formula(
-                f"{col}7"
-            )
+        # if has_ext_curt:
+        #     ws[f"{col}7"] = f"=$C$7/${cInv}$1"
+        # else:
+        #     ws[f"{col}7"] = Translator(eqn_curtTotal, origin=f"{cInv}7").translate_formula(
+        #         f"{col}7"
+        #     )
+        ws[f"{col}7"] = Translator(eqn_curtTotal, origin=f"{cInv}7").translate_formula(f"{col}7")
         ws[f"{col}8"] = Translator(eqn_invActual, origin=f"{cInv}8").translate_formula(f"{col}8")
         ws[f"{col}9"] = Translator(eqn_invPoss, origin=f"{cInv}9").translate_formula(f"{col}9")
         ws[f"{col}{RAWratio_row}"] = Translator(
