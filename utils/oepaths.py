@@ -10,6 +10,14 @@ def date_created(filepath, as_string=False):
     return created_datetime
 
 
+# define functions for getting date created & optional string formatting
+def date_modified(filepath, as_string=False):
+    mod_datetime = dt.datetime.fromtimestamp(Path(filepath).stat().st_mtime)
+    if as_string is True:
+        return mod_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    return mod_datetime
+
+
 # get Shared folder that is linked to SharePoint/OneDrive
 if "Onward Energy" not in Path.cwd().parts:
     onward_fp = Path(Path.home(), "Onward Energy")
@@ -86,15 +94,17 @@ def latest_file(filepath_list):
     return sorted_filepaths(filepath_list)[0]
 
 
-def get_contents(folder):
+def get_contents(folder, only_names=False):
     if not Path(folder).is_dir() or not Path(folder).exists():
         raise ValueError("Provided path is not a valid directory.")
     output = dict(files=[], folders=[], other=[])
     for fp in sorted_filepaths(list(Path(folder).glob("*"))):
         if fp.is_dir():
-            output["folders"].append(fp)
+            key = "folders"
         elif fp.is_file():
-            output["files"].append(fp)
+            key = "files"
         else:
-            output["other"].append(fp)
+            key = "other"
+        item = fp.name if only_names is True else fp
+        output[key].append(item)
     return output
