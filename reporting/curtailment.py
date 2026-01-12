@@ -307,6 +307,8 @@ def generate_curtailment_report(
         ref_kwh_lost = dfs["lost_nrg"].sum()  # from first summary table (for comparison)
         ws.cell(totals_row + 2, sql_curt_col).value = (sql_curt_kwh - ref_kwh_lost) / ref_kwh_lost
         ws.cell(totals_row + 2, sql_curt_col).number_format = "0.00%"
+    else:
+        ws.delete_cols(idx=17, amount=7)  # cols Q through W
 
     ## SAVE FILE TO FLASHREPORT FOLDER
     spath_ = Path(oepaths.frpath(year, month, ext="Solar"), "Comanche")
@@ -321,7 +323,7 @@ def generate_curtailment_report(
     return
 
 
-def get_comanche_curtailment(year, month):
+def get_comanche_curtailment(year, month, return_fpath: bool = False):
     """Loads total curtailment from Comanche curtailment report file (if exists)"""
     site_fpath = oepaths.frpath(year, month, ext="solar", site="Comanche")
     valid_files = list(site_fpath.glob("*Curtailment*Report*"))
@@ -335,4 +337,107 @@ def get_comanche_curtailment(year, month):
     target_col_index = df.columns.get_loc(ref_col) + 1
     target_col = df.columns[target_col_index]
     target_row = df[target_col].last_valid_index()
-    return df.at[target_row, target_col]
+    curt_total = df.at[target_row, target_col]
+    if return_fpath:
+        return {"total_mwh": curt_total, "source": fpath}
+    return curt_total
+
+
+def commercial_folder():
+    for fpath in oepaths.onward_fp.glob("*Commercial*Documents*"):
+        if Path(fpath, "Commercial").exists():
+            return Path(fpath, "Commercial")
+    return
+
+
+def get_commercial_folder(site: str, fleet: str = "solar"):
+    commercial_dir = commercial_folder()
+    if commercial_dir is None:
+        raise ValueError("Commercial directory not found in expected location.")
+    if fleet.lower() not in ("solar", "thermal", "wind"):
+        raise KeyError("Invalid fleet specified.")
+    folder_name = site  # temp; might need mapping for certain sites
+    site_folder = Path(commercial_dir, fleet.capitalize(), folder_name)
+    if not site_folder.exists():
+        raise KeyError("Unsupported site; temp.")
+    return site_folder
+
+
+def _curtailment_from_settlement_invoice(filepath):
+    sheet_name = "Curtailment Input" if "Maplewood 1" in str(filepath) else "Curtailment INPUT"
+    df = pd.read_excel(filepath, engine="calamine", sheet_name=sheet_name)
+
+    checkvals_hdr = df.iloc[:10, 0].to_list()
+    if "Element" not in checkvals_hdr:
+        raise KeyError("Unexpected format in file.")
+    header_row = checkvals_hdr.index("Element")
+    table_end_col_name = df.iloc[header_row].last_valid_index()
+    table_end_col = df.columns.get_loc(table_end_col_name)
+
+    if "Daily View" in df.columns:
+        table_start_col = df.columns.get_loc("Daily View")
+    else:
+        checkvals_tbl = df.loc[0].to_list()
+        if "Daily View" not in checkvals_tbl:
+            raise KeyError("Unexpected format in file.")
+        table_start_col = checkvals_tbl.index("Daily View")
+    end_row = df.iloc[:, table_start_col].last_valid_index()
+
+    table_end_col_name = df.iloc[header_row].last_valid_index()
+    table_end_col = df.columns.get_loc(table_end_col_name)
+
+    df_tbl = df.iloc[header_row : end_row + 1, table_start_col : table_end_col + 1].copy()
+    df_tbl.columns = df_tbl.iloc[0].values
+    df_tbl = df_tbl.iloc[1:, :].reset_index(drop=True)
+
+    date_col, curt_col = df_tbl.columns
+    df_tbl[date_col] = pd.to_datetime(df_tbl[date_col])
+    df_tbl[curt_col] = pd.to_numeric(df_tbl[curt_col])
+    return df_tbl
+
+
+def get_maplewood_curtailment(site: str, year: int, month: int) -> dict:
+    """NOTE: this will only work if the Commercial SharePoint folder is synced to the user's "Onward Energy" folder"""
+    if site not in ("Maplewood 1", "Maplewood 2"):
+        raise ValueError("Invalid site specified.")
+    folder = get_commercial_folder(site=site)
+    settlements_folder = Path(folder, "Settlements")
+    if not settlements_folder.exists():
+        raise ValueError("Could not find Settlements folder.")
+    fpattern = f"*{site}*Energy*Invoice*{year}*{month:02d}*.xlsx"
+    invoice_fpaths = list(Path(folder, "Settlements").glob(fpattern))
+    if not invoice_fpaths:
+        raise ValueError("No settlement files found for specified period.")
+
+    # use final if exist (MW1), otherwise preliminary
+    final_fpaths = [fp for fp in invoice_fpaths if "final" in fp.name.lower()]
+    if final_fpaths:
+        invoice_fpaths = final_fpaths
+    invoice_fp = oepaths.latest_file(invoice_fpaths)
+    df = _curtailment_from_settlement_invoice(invoice_fp)
+    total_mwh = df.iloc[:, -1].sum()
+    return {"data": df, "total_mwh": total_mwh, "source": invoice_fp}
+
+
+def load_external_curtailment_totals(site: str, year: int, month: int) -> dict:
+    # for flashreport function
+    if site == "Comanche":
+        try:
+            output = get_comanche_curtailment(year, month, return_fpath=True)
+        except:
+            output = {}
+    elif site in ("Maplewood 1", "Maplewood 2"):
+        try:
+            output = get_maplewood_curtailment(site, year, month)
+        except:
+            output = {}
+    else:
+        return {}
+
+    if not all(k in output.keys() for k in ["total_mwh", "source"]):
+        raise ValueError("Unexpected output format.")
+
+    if "data" in output.keys():
+        del output["data"]
+
+    return output
