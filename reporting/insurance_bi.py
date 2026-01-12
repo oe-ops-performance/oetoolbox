@@ -24,13 +24,19 @@ def load_performance_report_data():
         for date_col in ("Date Offline", "Date Restored (Est)"):
             if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
                 cond = df[date_col].astype(str).str.contains("/")
-                try:
-                    df.loc[cond, date_col] = pd.to_datetime(
-                        df.loc[cond, date_col].str[:10], format="%m/%d/%Y"
-                    )
-                    df[date_col] = pd.to_datetime(df[date_col])
-                except pd.errors.DateParseError as e:
-                    raise e
+                converted, errors = False, []
+                for idx, fmt in zip([10, 8], ["%m/%d/%Y", "%m/%d/%y"]):
+                    try:
+                        df.loc[cond, date_col] = pd.to_datetime(
+                            df.loc[cond, date_col].str[:idx], format=fmt
+                        )
+                        df[date_col] = pd.to_datetime(df[date_col])
+                        converted = True
+                        break
+                    except ValueError as e:
+                        errors.append(e)
+                if converted is False:
+                    raise ValueError(errors)
         df_dict.update({key: df})
     return df_dict
 
