@@ -479,7 +479,7 @@ def run_parallel_pvlib_models(inverter_configs, location, weather_data, q=True):
 
 def run_pvlib_model(
     site: str,
-    datetime_index: pd.DatetimeIndex,
+    datetime_index: pd.DatetimeIndex = None,
     poa_data: pd.Series = None,
     df_meteo: pd.DataFrame = None,
     inverter_names: list = None,
@@ -514,6 +514,14 @@ def run_pvlib_model(
         column in the output dataframe will be the name of the series.
     """
     qprint = quiet_print_function(q=q)
+    if datetime_index is None:
+        if poa_data is not None:
+            datetime_index = poa_data.index.copy()
+        elif df_meteo is not None:
+            datetime_index = df_meteo.index.copy()
+        else:
+            raise ValueError("Datetime index not provided.")
+
     if datetime_index.inferred_freq is None:
         raise ValueError("Could not infer frequency from provided datetime index.")
 
