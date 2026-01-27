@@ -175,6 +175,11 @@ class SolarDataset(Dataset):
             data_format=data_format,
             q=q,
         )
+        # TEMP
+        if len(attribute_paths) == 1 and attribute_paths[0].endswith("OE.MeterMW"):
+            dataset.data.columns = [
+                c.replace("OE.MeterMW", "OE_MeterMW") for c in dataset.data.columns
+            ]
         self.data = dataset.data.copy()
         self.invalid_items = dataset.invalid_items
 
@@ -186,6 +191,7 @@ class SolarDataset(Dataset):
         month: int,
         asset_group: str,
         freq: str = None,
+        keep_tzinfo: bool = False,
         q: bool = True,
     ):
         """Queries data for pre-defined query attributes, for use with monthly FlashReports."""
@@ -194,7 +200,9 @@ class SolarDataset(Dataset):
         start_date, end_date = map(lambda d: d.strftime("%Y-%m-%d"), [start, end])
         if freq is None:
             freq = "1m" if asset_group in ["Inverters", "Met Stations", "Meter", "PPC"] else "1h"
-        kwargs = dict(start_date=start_date, end_date=end_date, freq=freq, q=q)
+        kwargs = dict(
+            start_date=start_date, end_date=end_date, freq=freq, keep_tzinfo=keep_tzinfo, q=q
+        )
         return cls.from_defined_query_attributes(site_name=site, **kwargs, asset_group=asset_group)
 
     def _load_single_dtn_file(self, filepath):
@@ -284,6 +292,28 @@ class SolarDataset(Dataset):
         dataset = cls(SolarSite(site_name), target_start, target_end)
         dataset._load_dtn_data_from_files(keep_tz=keep_tz, q=q)
         return dataset
+
+    @classmethod
+    def from_dtn(cls, site, start_date, end_date, keep_tz=True, q=True):
+        qprint = quiet_print_function(q=q)
+        earliest_start = pd.Timestamp.now().floor("D") + pd.DateOffset(months=-12, days=1)
+        if pd.Timestamp(start_date) < earliest_start:
+            start_date = earliest_start.strftime("%Y-%m-%d")
+            qprint(f"start_date is out of range; overriding to earliest DTN {start_date = }")
+        start, end = map(pd.Timestamp, [start_date, end_date])
+        if end <= start:
+            raise ValueError("Invalid range; end date cannot be earlier than start date.")
+        df = query_dtn_meteo_data(site, start, end, q=q)
+        expected_index = pd.date_range(
+            start, end, freq="1h", inclusive="left", tz=SolarSite(site).timezone
+        )
+        if len(expected_index) != df.shape[0]:
+            df = df.reindex(expected_index)
+
+        if keep_tz is False:
+            df = remove_tzinfo_and_standardize_index(df)
+
+        return df
 
     @classmethod
     def get_supporting_data(
