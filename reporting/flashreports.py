@@ -6,7 +6,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from ..utils import oepaths, oemeta
+from ..utils.assets import SolarSite
 from ..utils.solar import SolarDataset
+from ..reporting.curtailment import load_external_curtailment_totals
 from ..reporting.tools import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
 from ..dataquery.external import query_fracsun, get_fracsun_sites
@@ -35,35 +37,6 @@ def load_PIdatafile(filepath, t1, t2):
     return df
 
 
-def get_Comanche_curtailment(year, month):
-    frpath = oepaths.frpath(year, month, ext="Solar")
-    sourcepath = Path(frpath, "Comanche")
-    if not sourcepath.exists():
-        return None
-    validfiles = list(sourcepath.glob("*Curtailment*Report*"))
-    if not validfiles:
-        return None
-
-    vfpath = max((fp.stat().st_ctime, fp) for fp in validfiles)[1]
-
-    # read file into pandas dataframe
-    dfc = pd.read_excel(vfpath, engine="openpyxl")
-
-    # find column with curtailment value (look for col where prev. col is 'Sum')
-    target_cols = [c for i, c in enumerate(list(dfc.columns[1:])) if dfc.columns[i] == "Sum"]
-    if not target_cols:
-        target_cols = [c for i, c in enumerate(list(dfc.columns[1:])) if dfc.columns[i] == "DATE"]
-    target_column = target_cols[0]
-
-    # find row of last non-null value in selected column
-    target_row = dfc[target_column].last_valid_index()
-
-    # get value from target cell
-    total_curtailment = dfc.at[target_row, target_column]
-
-    return total_curtailment
-
-
 def get_caiso_filepath(year, month):
     """Returns the filepath to the CAISO file for given year/month"""
     # find caiso file (check frpath & parent)
@@ -80,7 +53,10 @@ def _get_caiso_sheetname(site, caiso_fpath):
     """Returns the sheetname in the CAISO file corresponding to the given site"""
     all_sheets = list(pd.read_excel(caiso_fpath, sheet_name=None, nrows=0).keys())
     site_keyword = sorted(site.replace("-", " ").split(), key=len)[-1]  # longest word
-    return [s for s in all_sheets if site_keyword in s].pop()
+    matching_sheets = [s for s in all_sheets if site_keyword in s]
+    if len(matching_sheets) != 1:
+        return None
+    return matching_sheets[0]
 
 
 def load_caiso_data(site, year, month):
@@ -88,6 +64,8 @@ def load_caiso_data(site, year, month):
     if not caiso_fpath:
         return
     sheet_name = _get_caiso_sheetname(site, caiso_fpath)
+    if sheet_name is None:
+        return
     df_caiso = pd.read_excel(caiso_fpath, sheet_name=sheet_name, engine="calamine")
     index_col = "Interval Start Time"
     if index_col not in df_caiso.columns:
@@ -186,101 +164,58 @@ def generate_monthlyFlashReport(
     t_start = pd.Timestamp(year=year, month=month, day=1, hour=0, minute=0, second=0)
     t_end = t_start + pd.DateOffset(months=1)
     timeRangeH = pd.date_range(t_start, t_end, freq="h")[:-1]
-    timeRangeM = pd.date_range(t_start, t_end, freq="min")[:-1]
 
     # check if data exists for selected site & times
     if not os.path.exists(siteFRpath):
         qprint("No flash report folder found for selected site.\nExiting function.")
         return
 
-    # relevant data files in flash report folder
-    inv_fileids = ["PIQuery", "Inverters", "csv"]
-    ppc_fileids = ["PIQuery", "PPC", "csv"]
-    pvlib_fileids = [f"PVLib_InvAC", sitename, "csv"]  # prev. ['PVLib','InvAC','Hourly','csv']
+    site = SolarSite(sitename)
+    pvlib_fpath = oepaths.latest_file(site.get_flashreport_files(year, month)["pvlib"])
+    if pvlib_fpath is None:
+        qprint("!! No PVLib file found !!\nExiting...")
+        return
 
-    def matchingfiles(path, ids_):
-        files = [f for f in os.listdir(path) if all(i in f for i in ids_)]
-        cleanfiles = [f for f in files if "CLEANED" in f]
-        if cleanfiles:
-            files = cleanfiles.copy()
-        if len(files) > 1:
-            fpaths = [Path(path, f) for f in files]
-            sorted_fptups = list(sorted([(fp.stat().st_ctime, fp) for fp in fpaths], reverse=True))
-            files = [tup[1].name for tup in sorted_fptups]
-        return files
+    inv_fpath = oepaths.latest_file(site.get_data_filepaths(year, month, "Inverters"))
+    met_fpath = oepaths.latest_file(
+        site.get_met_stations_filepaths(year, month, version="processed")
+    )
 
     # create dictionary for log info output (source filepaths)
     source_fpath_dict = {}  # init
 
-    # pvlib file -- REQUIRED
-    pvlib_files = matchingfiles(siteFRpath, pvlib_fileids)
-    if not pvlib_files:
-        qprint("!! No PVLib file found !!\nExiting...")
-        return
-    pvlibfile = pvlib_files[0]
-
-    # inverter file
-    inv_files = matchingfiles(siteFRpath, inv_fileids)
-    invfile = inv_files[0] if inv_files else None
-
-    # ppc curtailment file
-    ppc_files = matchingfiles(siteFRpath, ppc_fileids)
-    ppcfile = ppc_files[0] if ppc_files else None
-
     """ GET DTN POA INSOLATION """
-    frpath = oepaths.frpath(year, month, ext="solar", site=sitename)
-    met_fpaths = list(frpath.glob("PIQuery_MetStations*PROCESSED*.csv"))
-    met_fp = oepaths.latest_file(met_fpaths)
-    if met_fp is not None:
-        df_ext = pd.read_csv(met_fp, index_col=0, parse_dates=True)
+    if met_fpath is not None:
+        df_ext = site.load_query_file(year, month, asset_group="Met Stations")
         dtn_insolation = df_ext["poa_global"].sum() / 1e3 / 60  # minute-level
     else:
         df_ext = SolarDataset.get_supporting_data(sitename, year, month, keep_tz=False, q=q)
         dtn_insolation = df_ext["poa_global"].sum() / 1e3
 
     """LOAD PVLIB DATA"""
-    pvlibpath = f"{siteFRpath}\\{pvlibfile}"
-    dfpvlib = load_PIdatafile(pvlibpath, t_start, t_end)
-
-    # confirm minute-level data
-    delta = dfpvlib.index[1] - dfpvlib.index[0]
-
-    # temp: determine timerange based on freq
-    pvl_timerange = timeRangeM if delta.seconds == 60 else timeRangeH
-    df_timerng = pd.DataFrame({"Timestamp": pvl_timerange})
-
-    # reindex if shape differs (sometimes extra timestamp)
-    if dfpvlib.shape[0] != df_timerng.shape[0]:
-        if any(dfpvlib.index.duplicated()):  # fall dst extra timestamp
-            dfpvlib = dfpvlib[~dfpvlib.index.duplicated(keep="first")]
-        dfpvlib = dfpvlib.reindex(pvl_timerange)
-
-    qprint(f'Loaded PVLib file ------ "{pvlibfile}"')
-    source_fpath_dict["pvlib"] = Path(pvlibpath)
+    dfpvlib = site._load_file(pvlib_fpath)
+    qprint(f'Loaded PVLib file ------ "{pvlib_fpath.name}"')
+    source_fpath_dict["pvlib"] = pvlib_fpath
 
     """GET METER DATA"""
     # utility meter data (if exists)
     if df_util is None:
-        dfum = load_meter_historian(year=year, month=month, dropna=True)
+        dfm_ = load_meter_historian(year=year, month=month, dropna=True)
     else:
-        dfum = df_util.copy()
+        dfm_ = df_util.copy()
 
-    nometerdata = dfum.shape[0] == 0  # check if any data/rows exist for reporting month
+    nometerdata = dfm_.shape[0] == 0  # check if any data/rows exist for reporting month
 
-    dfm_ = dfum.dropna(
-        axis=1, how="all"
-    ).copy()  # drop columns with no data for selected time range
     sitenotexist = sitename not in dfm_.columns  # check for site in filtered columns
 
     if sitenotexist:
-        pimtrfpaths = list(Path(siteFRpath).glob("PIQuery*Meter*.csv"))
-        if len(pimtrfpaths) > 0:
-            ctime, pimeterpath = max((fp.stat().st_ctime, fp) for fp in pimtrfpaths)
-            df_meter = load_PIdatafile(str(pimeterpath), t_start, t_end)
+        pi_meter_fpath = oepaths.latest_file(site.get_data_filepaths(year, month, "Meter"))
+        if pi_meter_fpath is not None:
+            df_meter = site.load_query_file(year, month, asset_group="Meter")
             df_meter = df_meter.resample("h").mean()
             df_meter = df_meter.rename(columns={df_meter.columns[0]: sitename})
-            qprint(f'No utility meter found; Loaded PI Meter file ------ "{pimeterpath.name}"')
-            meterpath = pimeterpath
+            qprint(f'No utility meter found; Loaded PI Meter file ------ "{pi_meter_fpath.name}"')
+            meterpath = pi_meter_fpath
         else:
             df_meter = pd.DataFrame({"Timestamp": timeRangeH, sitename: 0})
             qprint(f"!! No PI meter data found for {sitename} !! - replacing with df of zeros.")
@@ -292,28 +227,17 @@ def generate_monthlyFlashReport(
             dfm_ = dfm_.reindex(expected_rng)  # for DST (historian removes/adds tstamps)
         dfm_ = dfm_.reset_index(drop=True)  # for row numbers when writing to excel
         df_meter = dfm_.copy()
-        qprint('Loaded Meter file ------ "Meter_Generation_Historian.xlsm"')
+        qprint(f'Loaded Meter file ------ "{meterpath.name}"')
 
-    source_fpath_dict["meter"] = None if meterpath is None else Path(meterpath)
+    source_fpath_dict["meter"] = meterpath
 
-    """CREATE DICTIONARY FOR MISSING DATA FILES (EXISTENCE) (arg. for report gen. function)"""
+    """determine whether site has utility meter data - used for filename (e.g. Rev0 if no meter)"""
     meterfile = False if (nometerdata or sitenotexist) else True
-    filelist = [invfile, ppcfile, meterfile]
-
-    def ismissing(file):
-        return True if not file else False
-
-    ismissinglist = list(map(ismissing, filelist))
-    keylist = ["Inverters", "PPC", "Meter"]
-    dict_missingfiles = dict(zip(keylist, ismissinglist))
 
     """LOAD INVERTER DATA (if available)"""
-    if invfile:
-        invpath = f"{siteFRpath}\\{invfile}"
-        dfi = load_PIdatafile(invpath, t_start, t_end)
-        if "cleaned" in invfile.casefold():
-            inv_cols = [c for c in dfi.columns if "power" in c.casefold()]
-            dfi = dfi[inv_cols].copy()
+    if inv_fpath is not None:
+        dfi = site._load_file(inv_fpath)
+        dfi = dfi.filter(like="ActivePower")
 
         expected_idx = pd.date_range(t_start, t_end, freq="min")[:-1]
         if dfi.shape[0] != expected_idx.shape[0]:
@@ -324,9 +248,9 @@ def generate_monthlyFlashReport(
         if inv_maxP < 100 and inv_maxP * 1000 < 1000:
             dfi = dfi * 1000
 
-        qprint(f'Loaded Inverter file --- "{invfile}"')
+        qprint(f'Loaded Inverter file --- "{inv_fpath.name}"')
     else:
-        invpath = None
+        # invpath = None
         qprint("!! No inverter data found. !! - replacing with df of zeros.")
         dfi = pd.DataFrame(index=timeRangeH)  # blank dataframe
         inv_cols = [
@@ -336,18 +260,19 @@ def generate_monthlyFlashReport(
         for inv in invcols:
             dfi[inv] = 0
 
-    source_fpath_dict["inverters"] = None if invpath is None else Path(invpath)
+    source_fpath_dict["inverters"] = inv_fpath
 
-    """LOAD PPC CURTAILMENT DATA (if available)"""
+    """LOAD EXTERNAL CURTAILMENT DATA (if applicable/available)"""
     dfc = pd.DataFrame({"Timestamp": timeRangeH, "Curt_SP": site_capacity})
 
-    # get separate curtailment value for Comanche
-    if sitename == "Comanche":
-        comanchePPCval = get_Comanche_curtailment(year, month)
-        if not comanchePPCval:
-            qprint("!! No Comanche PPC file found. !! - check source path")
-    else:
-        comanchePPCval = None
+    # get curtailment values for Comanche, Maplewood 1, Maplewood 2 (returns empty dict otherwise)
+    ext_curtailment = load_external_curtailment_totals(sitename, year, month)
+    if sitename in ("Comanche", "Maplewood 1", "Maplewood 2"):
+        source_fpath = ext_curtailment.get("source", None)
+        if source_fpath is None:
+            qprint("!! No external curtailment file found. !! - check source path")
+        else:
+            qprint(f'Loaded curtailment data --- "{source_fpath.name}"')
 
     """CREATE MISSING DATA FIGURE"""
     fSize = (1.4 * len(dfi.columns), 10)
@@ -363,7 +288,7 @@ def generate_monthlyFlashReport(
     kw_threshold = 0.1  # inv kw threshold
 
     # TODO - add POA threshold condition - if below threshold (25), default to available --- i.e. always 60 unless inv not performing when it should be
-    if invfile:
+    if inv_fpath is not None:
         df_avail = df_avail.mask(df_avail > kw_threshold, 1).copy()
         df_avail = df_avail.mask(df_avail <= kw_threshold, 0).copy()
         df_avail = df_avail.resample("h").sum()
@@ -418,18 +343,17 @@ def generate_monthlyFlashReport(
     dfPOA = dfpvlib_[poacols].copy()
 
     # get mods offline data
-    mods_fpaths = list(Path(siteFRpath).glob("PIQuery*Modules*.csv"))
-    if not mods_fpaths:
+    mods_fpath = oepaths.latest_file(site.get_data_filepaths(year, month, "Modules"))
+    if mods_fpath is None:
         df_acmods = pd.DataFrame(index=dfPOA.index, data={"OE.ModulesOffline_Percent": np.nan})
     else:
-        mods_fp = oepaths.latest_file(mods_fpaths)
-        df_acmods = pd.read_csv(mods_fp, index_col=0, parse_dates=True)
+        df_acmods = site._load_file(mods_fpath)
         if "OE.ModulesOffline_Percent" not in df_acmods.columns:
             df_acmods = pd.DataFrame(index=dfPOA.index, data={"OE.ModulesOffline_Percent": np.nan})
         else:
             df_acmods = df_acmods.resample("h").mean()
             df_acmods = df_acmods[["OE.ModulesOffline_Percent"]]
-            qprint(f'Loaded Modules file ---- "{mods_fp.name}"')
+            qprint(f'Loaded Modules file ---- "{mods_fpath.name}"')
 
     # get fracsun soiling data
     if sitename in get_fracsun_sites():
@@ -498,9 +422,7 @@ def generate_monthlyFlashReport(
                 df_caiso.insert(loc=0, column="Unnamed: 0", value=0)  # for excel formula
 
             # load pi meter data
-            pimeterfile = [f for f in os.listdir(siteFRpath) if "PIQuery_Meter" in f][0]
-            pimeterpath = os.path.join(siteFRpath, pimeterfile)
-            dfm = load_PIdatafile(pimeterpath, t_start, t_end)
+            dfm = site.load_query_file(year, month, asset_group="Meter")
 
             df_caiso2 = create_curtailment_table_from_caiso_data(sitename, df_caiso, dfm, dfpvlib)
 
@@ -555,8 +477,7 @@ def generate_monthlyFlashReport(
         fig=msno_fig,
         savepath=savepath,
         q=q,
-        comanchePPCval=comanchePPCval,
-        missingfiles=dict_missingfiles,
+        ext_curtailment=ext_curtailment,
         df_caiso=df_caiso,
         df_caiso2=df_caiso2,
         utility_meter_total=utility_meter_total,

@@ -148,10 +148,10 @@ class PISiteElement:
                 path_parts.append(asset)
                 if sub_asset is not None:
                     self._validate_sub_asset(asset_group, asset, sub_asset)
-                    path_parts.append(asset)
+                    path_parts.append(sub_asset)
                     if sub_2_asset is not None:
                         self._validate_sub_2_asset(asset_group, asset, sub_asset)
-                        path_parts.append(asset)
+                        path_parts.append(sub_2_asset)
         element_path = "\\".join(path_parts)
         return element_path
 

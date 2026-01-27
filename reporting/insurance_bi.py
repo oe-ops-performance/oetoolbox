@@ -14,7 +14,7 @@ if "Site Assets" not in SOLAR_OPERATIONS_DIR.name:
     path_parts.insert(0, "Site Assets")
 REFERENCE_DIR = Path(SOLAR_OPERATIONS_DIR, *path_parts)
 
-SOLAR_PERFORMANCE_REPORT_FILEPATH = Path(REFERENCE_DIR, "Weekly-Solar-Performance-Report.xlsx")
+SOLAR_PERFORMANCE_REPORT_FILEPATH = Path(REFERENCE_DIR, "Weekly-Solar-Performance-Report_2026.xlsx")
 
 
 def load_performance_report_data():
@@ -24,13 +24,31 @@ def load_performance_report_data():
         for date_col in ("Date Offline", "Date Restored (Est)"):
             if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
                 cond = df[date_col].astype(str).str.contains("/")
-                try:
-                    df.loc[cond, date_col] = pd.to_datetime(
-                        df.loc[cond, date_col].str[:10], format="%m/%d/%Y"
-                    )
-                    df[date_col] = pd.to_datetime(df[date_col])
-                except pd.errors.DateParseError as e:
-                    raise e
+                n_invalid = len(df.loc[cond])
+
+                converted, errors = False, []
+                for idx, fmt in zip([10, 8], ["%m/%d/%Y", "%m/%d/%y"]):
+                    try:
+                        df.loc[cond, date_col] = pd.to_datetime(
+                            df.loc[cond, date_col].str[:idx], format=fmt
+                        )
+                        df[date_col] = pd.to_datetime(df[date_col])
+                        converted = True
+                        break
+                    except ValueError as e:
+                        errors.append(e)
+
+                if converted is False and n_invalid < 3:
+                    try:
+                        df = df[~cond]
+                        df[date_col] = pd.to_datetime(df[date_col])
+                        converted = True
+                    except Exception as e:
+                        errors.append(e)
+
+                if converted is False:
+                    raise ValueError(errors)
+
         df_dict.update({key: df})
     return df_dict
 

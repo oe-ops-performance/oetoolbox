@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 from astral.sun import sun
 from astral import LocationInfo
 
+from .qc import get_daylight_timestamps, get_sun
 from ..utils import oemeta, oepaths
 from ..reporting.tools import get_solar_FR_status, solar_frpaths
 
@@ -102,6 +103,21 @@ def get_all_daylight_timestamps(tz, lat, lon, start, end):
     for dict_ in get_suntimes(tz, lat, lon, start, end):
         tstamps.extend(list(pd.date_range(dict_["dawn"], dict_["dusk"], freq="1min")))
     return tstamps
+
+
+def get_location_kwargs(site):
+    tz = oemeta.data["TZ"].get(site)
+    lat, lon = oemeta.data["LatLong"].get(site)
+    return dict(tz=tz, lat=lat, lon=lon)
+
+
+def sun_times(site, date):
+    return get_sun(date=date, **get_location_kwargs(site))
+
+
+def daylight_timestamps(site, start_date, end_date):
+    location_kwargs = get_location_kwargs(site)
+    return get_daylight_timestamps(start_date, end_date, **location_kwargs)
 
 
 getfile = lambda fplist: None if (not fplist) else max((fp.stat().st_ctime, fp) for fp in fplist)[1]
@@ -202,10 +218,12 @@ def run_auto_qc(df_raw, site, q=True, q_xtra=True):
 
     # get date range
     getdate_ = lambda tstamp_: tstamp_.floor("D")
-    start_day, end_day = map(getdate_, [df_raw.index.min(), df_raw.index.max()])
+    start_day, end_day = map(
+        getdate_, [df_raw.index.min().floor("D"), df_raw.index.max().ceil("D")]
+    )
 
     # get daylight metadata
-    daylight_tstamps = get_all_daylight_timestamps(tz, lat, lon, start_day, end_day)
+    daylight_tstamps = daylight_timestamps(site, start_day, end_day)
 
     """
     AUTO-DETECTION [PART 0] -- empty columns

@@ -100,6 +100,35 @@ def print_dataframe_info(df):
     return
 
 
+def print_list(data: list[str], max_per_row: int = 7, min_per_row: int = 3, list_name: str = ""):
+    if list_name != "":
+        list_name += " = "
+
+    if len(data) == 0:
+        print(f"{list_name}[]\n")
+        return
+
+    if max_per_row <= min_per_row:
+        raise ValueError("'max_per_row' must be greater than 'min_per_row'.")
+
+    if len(data) < max_per_row:
+        rows = [", ".join(data)]
+    else:
+        # ensure number of items in last row is not less than 'min_per_row'
+        while len(data) % max_per_row < min_per_row:
+            max_per_row -= 1
+            if max_per_row <= 0:
+                raise Exception("Unknown error")
+        rows = [", ".join(data[i : i + max_per_row]) for i in range(0, len(data), max_per_row)]
+
+    print(f"{list_name}[")
+    for row in rows:
+        print(f"    {row}")
+    print("]\n")
+
+    return
+
+
 def print_raw_module_info(module):
     for name, obj in inspect.getmembers(module):
         if not name.startswith("__"):

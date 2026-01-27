@@ -307,6 +307,13 @@ def load_kpis_from_flashreport(filepath):
         print("error")
     row_end = row_check_list.index("Timestamp")
 
+    # check for calculated curtailment value (from column directly next to curtailment total)
+    curt_row = df.iloc[:15, col_start].str.strip().to_list().index("Curtailment")
+    calc_col = col_end + 1
+    calc_curtailment = df.iat[curt_row, calc_col]
+    if not pd.isna(calc_curtailment) and not isinstance(calc_curtailment, float):
+        calc_curtailment = np.nan
+
     # extract kpi table
     dft = df.iloc[:row_end, col_start:col_end].copy()
 
@@ -354,7 +361,13 @@ def load_kpis_from_flashreport(filepath):
             soil_total_row = checkvals.index(matching_[0]) + 1
             total_soiling_loss = df.iat[soil_total_row, soil_col]
 
+    # add soiling loss column
     dft.loc[len(dft)] = [soilloss_col, total_soiling_loss]
+
+    # add calculated curtailment
+    dft.loc[len(dft)] = ["Calculated Curtailment [MWh]", calc_curtailment]
+
+    dft = dft[dft["Metric"].notna()].reset_index(drop=True)
 
     dft = dft.dropna(axis=0, how="all").reset_index(drop=True)
 

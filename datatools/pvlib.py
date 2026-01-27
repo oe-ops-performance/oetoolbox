@@ -349,6 +349,18 @@ def add_solar_metadata_to_dtn_output(df_dtn: pd.DataFrame, site: str):
     return df
 
 
+DTN_FIELDS = [
+    "airTemp",
+    "windSpeed",
+    "shortWaveRadiation",
+    "sunshineDuration",
+    "effectiveCloudCover",
+    "totalCloudCover",
+    "precipAmount",
+    "snowfallAmount",
+]
+
+
 def query_dtn_meteo_data(
     site: str,
     start_date: str,
@@ -381,10 +393,15 @@ def query_dtn_meteo_data(
     tz = SolarSite(site).timezone
     start = pd.Timestamp(start_date).floor("D")
     end = pd.Timestamp(end_date).ceil("D")
-    fields = ["airTemp", "shortWaveRadiation", "windSpeed"]
-    col_names = ["dtn_temp_air", "dtn_ghi", "dtn_wind_speed"]
-    df_dtn = query_DTN(lat, lon, start, end, interval="", fields=fields, tz=tz, q=q)
-    df_dtn = df_dtn.rename(columns=dict(zip(fields, col_names)))
+
+    df_dtn = query_DTN(lat, lon, start, end, interval="", fields=DTN_FIELDS, tz=tz, q=q)
+
+    rename_cols = {
+        "airTemp": "dtn_temp_air",
+        "shortWaveRadiation": "dtn_ghi",
+        "windSpeed": "dtn_wind_speed",
+    }
+    df_dtn = df_dtn.rename(columns=rename_cols)
 
     df = add_solar_metadata_to_dtn_output(df_dtn, site)
 
@@ -425,7 +442,7 @@ def format_meteo_data_for_pvlib(df_met, site):
         df["POA_all_bad"] = df_met["POA_all_bad"].copy()
 
     if "Average_Across_ModTemp" in df_met.columns:
-        if df_met["Average_Across_ModTemp"].isna().all():
+        if df_met["Average_Across_ModTemp"].isna().sum() / df_met.shape[0] > 0.5:
             df_met = df_met.drop(columns=["Average_Across_ModTemp"])
 
     if "Average_Across_ModTemp" not in df_met.columns:
@@ -462,7 +479,7 @@ def run_parallel_pvlib_models(inverter_configs, location, weather_data, q=True):
 
 def run_pvlib_model(
     site: str,
-    datetime_index: pd.DatetimeIndex,
+    datetime_index: pd.DatetimeIndex = None,
     poa_data: pd.Series = None,
     df_meteo: pd.DataFrame = None,
     inverter_names: list = None,
@@ -497,6 +514,14 @@ def run_pvlib_model(
         column in the output dataframe will be the name of the series.
     """
     qprint = quiet_print_function(q=q)
+    if datetime_index is None:
+        if poa_data is not None:
+            datetime_index = poa_data.index.copy()
+        elif df_meteo is not None:
+            datetime_index = df_meteo.index.copy()
+        else:
+            raise ValueError("Datetime index not provided.")
+
     if datetime_index.inferred_freq is None:
         raise ValueError("Could not infer frequency from provided datetime index.")
 

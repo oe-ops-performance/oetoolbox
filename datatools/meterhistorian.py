@@ -6,9 +6,10 @@ from pathlib import Path
 import shutil
 
 from ..datatools import meter_transforms as transforms
-from ..reporting.tools import ALL_SOLAR_SITES
+from ..reporting.tools import ALL_SOLAR_SITES, ALL_WIND_SITES
 from ..utils import oepaths
-from ..utils.helpers import quiet_print_function
+from ..utils.datetime import remove_tzinfo_and_standardize_index
+from ..utils.helpers import print_list, quiet_print_function
 from ..utils.meter_paths import get_legacy_meter_filepaths
 
 
@@ -39,6 +40,20 @@ VARSITY_STLMTUI_SITE_IDS = {
 }
 
 
+def _validate_datetime_index(df):
+    expected_index = pd.date_range(df.index.min(), df.index.max(), freq="h")
+    if len(expected_index) == df.shape[0]:
+        return df
+    # using arbitrary tz that observes DST
+    tz_aware_index = pd.date_range(df.index.min(), df.index.max(), freq="h", tz="US/Central")
+    if len(tz_aware_index) != df.shape[0]:
+        raise Exception("Could not resolve index. Check 'Day' and 'Hour Ending' columns.")
+    df.index = tz_aware_index
+    df = remove_tzinfo_and_standardize_index(df)
+    df["Hour"] = df.index.hour + 1  # hour ending
+    return df
+
+
 def load_meter_historian(year=None, month=None, dropna=True):
     df = pd.read_excel(METER_HISTORIAN_FILEPATH, engine="calamine")
     df = df.iloc[: df.Day.last_valid_index() + 1, :].copy()
@@ -54,8 +69,14 @@ def load_meter_historian(year=None, month=None, dropna=True):
         df = df[(df.index.year == year)].copy()
     if month is not None:
         df = df[(df.index.month == month)].copy()
-    if df.index.duplicated().any():
-        df = df.loc[~df.index.duplicated()].copy()
+
+    if df.empty:
+        start = pd.Timestamp(year, month, 1)
+        end = start + pd.DateOffset(months=1)
+        return pd.DataFrame(index=pd.date_range(start, end, freq="h", inclusive="left"))
+
+    df = _validate_datetime_index(df)
+
     if dropna:
         df = df.dropna(axis=1, how="all").copy()
 
@@ -66,8 +87,119 @@ def load_meter_historian(year=None, month=None, dropna=True):
     return df
 
 
+def _assess_historian_sites(
+    historian_columns: list[str], target_sites: list[str]
+) -> dict[str, list[str]]:
+    output = {"found": [], "missing": []}
+    for site in target_sites:
+        key = "found" if site in historian_columns else "missing"
+        output[key].append(site)
+    return output
+
+
+def load_utility_meter_data(
+    year: int, month: int, include_waiting_on_macro=False, fleet="all", q=True
+):
+    qprint = quiet_print_function(q=q)
+    target_sites = ALL_HISTORIAN_SITES
+    if fleet.lower() == "solar":
+        target_sites = [s for s in target_sites if s in ALL_SOLAR_SITES]
+    elif fleet.lower() == "wind":
+        target_sites = [s for s in target_sites if s in ALL_WIND_SITES]
+    elif fleet != "all":
+        raise ValueError("Invalid fleet specified.")
+
+    df = load_meter_historian(year=year, month=month, dropna=True)
+    hist_sites = _assess_historian_sites(historian_columns=df.columns, target_sites=target_sites)
+
+    df = df[hist_sites["found"]]  # filters to target_sites
+
+    n_all = len(target_sites)
+    n_found = len(hist_sites["found"])
+    message = f"Loaded data from meter historian for {n_found}/{n_all} sites."
+    if fleet != "all":
+        message += f" (subset: {fleet.capitalize()} Fleet)"
+    qprint(message)
+
+    if n_found == n_all:
+        return df
+
+    if include_waiting_on_macro is True:
+        df_waiting, fpath_dict = load_sites_waiting_on_macro(year, month, df_hist=df)
+        if not df_waiting.empty:
+            waiting_sites = [s for s in hist_sites["missing"] if s in df_waiting.columns]
+            df = df.join(df_waiting[waiting_sites])
+            qprint(f"    >> added data for {len(waiting_sites)} sites waiting on historian macro.")
+            for site in waiting_sites:
+                qprint(f"        {site} - {fpath_dict[site].name}")
+
+    if q is False:
+        print("")
+        ordered_sites = [s for s in ALL_WIND_SITES + ALL_SOLAR_SITES if s in target_sites]
+        sites_with_data = [s for s in ordered_sites if s in df.columns]
+        print_list(sites_with_data, list_name=f"sites_with_meter_data (n={len(sites_with_data)})")
+        sites_without = [s for s in ordered_sites if s not in df.columns]
+        print_list(sites_without, list_name=f"sites_without_meter_data (n={len(sites_without)})")
+
+    return df
+
+
+def _load_utility_output_file(filepath) -> pd.DataFrame:
+    """Loads output file with columns 'Day' and 'Hour' (hour ending). Normalizes index."""
+    df = pd.read_csv(filepath)
+    df.index = pd.to_datetime(
+        df.Day.astype(str) + " " + df.Hour.sub(1).astype(str).str.zfill(2) + ":00",
+        format="%Y-%m-%d %H:%M",
+    )
+    df = _validate_datetime_index(df)
+    df = df.drop(columns=["Day", "Hour"])
+    return df[[c for c in df.columns if c in ALL_HISTORIAN_SITES]]
+
+
+def load_all_output_files(year: int, month: int) -> tuple[pd.DataFrame, dict, dict]:
+    """Collects and returns meter data from output files in cdaas folder."""
+    output_fpaths = list(get_data_output_folder(year, month).glob("*output*.csv"))
+    df_list = []
+    site_fpath_dict = {}
+    fpath_sitelist_dict = {}
+    for fpath in list(sorted(output_fpaths, reverse=True)):  # filenames are numbered sequentially
+        df_ = _load_utility_output_file(fpath)
+        sitelist = [c for c in sorted(df_.columns) if c not in site_fpath_dict.keys()]
+        if not sitelist:
+            continue
+        df_list.append(df_[sitelist])
+        fpath_sitelist_dict.update({str(fpath): sitelist})
+        site_fpath_dict.update({s: fpath for s in sitelist})
+
+    if not df_list:
+        df = pd.DataFrame()
+    else:
+        df = pd.concat(df_list, axis=1)
+        df = df[[s for s in ALL_HISTORIAN_SITES if s in df.columns]]
+
+    return df, fpath_sitelist_dict, site_fpath_dict
+
+
+def load_sites_waiting_on_macro(
+    year: int, month: int, df_hist: pd.DataFrame = None
+) -> tuple[pd.DataFrame, dict]:
+    """Checks output files in cdaas folder to determine if sites have data but haven't been added to historian."""
+    if df_hist is None:
+        df_hist = load_meter_historian(year=year, month=month)
+    df_output_files, _, site_fpath_dict = load_all_output_files(year, month)
+    waiting_on_macro = lambda s: s not in df_hist.columns and s in df_output_files.columns
+    waiting_sites = list(filter(waiting_on_macro, ALL_HISTORIAN_SITES))
+    df_waiting_on_macro = df_output_files[waiting_sites]
+    waiting_fpaths = {s: fp for s, fp in site_fpath_dict.items() if s in waiting_sites}
+    return df_waiting_on_macro, waiting_fpaths
+
+
+def get_data_output_folder(year: int, month: int):
+    return Path(UTILITY_DATA_OUTPUT_FOLDER, f"{year}{month:02d}")
+
+
 def get_data_output_savepath(year: int, month: int):
-    server_folder = Path(UTILITY_DATA_OUTPUT_FOLDER, f"{year}{month:02d}")
+    server_folder = get_data_output_folder(year, month)
     filename = f"utility_meter_data_{year}-{month:02d}_output.csv"
     return oepaths.validated_savepath(Path(server_folder, filename))
 
@@ -491,19 +623,22 @@ def load_data_to_server(df, q=True):
     return
 
 
-def get_meter_totals_from_historian(year, month):
+def get_meter_totals_from_historian(year=None, month=None):
     """Get utility meter generation totals from historian; only for FL1 and FL4."""
     df = pd.read_excel(
         METER_HISTORIAN_FILEPATH, sheet_name="Monthly_Gen_Only_Plants", engine="calamine"
     )
+    if year is None and month is None:
+        return df
     target_date = pd.Timestamp(year, month, 1)
     site_names = ["FL1", "FL4"]
     data_list = df.loc[(df["Date"] == target_date), site_names].to_dict(orient="records")
-    if len(data_list) == 1:
-        return data_list[0]
-    elif not data_list:
+    if len(data_list) != 1:
+        raise ValueError("Unexpect output; check historian file for duplicate dates.")
+    output_dict = data_list[0]
+    if all(pd.isna(x) for x in output_dict.values()):
         return None
-    raise ValueError("Unexpect output; check historian file for duplicate dates.")
+    return output_dict
 
 
 # TODO: remove the below functions, as they should not be necessary moving forward

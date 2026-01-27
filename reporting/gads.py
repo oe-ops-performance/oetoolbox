@@ -276,8 +276,6 @@ class GADSSite(PISite):
                 df_list.append(dataset.data)
 
         df = pd.concat(df_list, axis=1)
-        fmt_col = lambda c: c if "_" not in c else "_".join(c.split("_")[:-1])
-        df.columns = df.columns.map(fmt_col)  # removes asset group
         if self.fleet == "solar":
             # add pvlib data from file
             dfp = self._get_pvlib_data(start_date, end_date)
@@ -387,7 +385,9 @@ class GADSSite(PISite):
             avg_offline = dfg["n_offline"].mean()
             lost_energy = dfg["lost_MW"].sum()
             data_list.append([event_start, event_end, event_hours, avg_offline, lost_energy])
-        return pd.DataFrame(data_list, columns=dfcols)
+        df_events = pd.DataFrame(data_list, columns=dfcols)
+        df_events["lost_MWh"] = df_events["lost_MWh"].round(0).astype(int)
+        return df_events
 
     def _get_query_filename(self, start_date, end_date):
         date_0, date_1 = map(lambda t: pd.Timestamp(t).strftime("%Y%m%d"), [start_date, end_date])

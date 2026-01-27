@@ -84,6 +84,7 @@ def load_clean_meteo_file(site, filepath, q=True):
     elif df.index.tz is None:
         qprint("localizing dataframe to site timezone")
         df = localize_naive_datetimeindex(df, site=site)
+    df = df.rename_axis("Timestamp")
     return df
 
 

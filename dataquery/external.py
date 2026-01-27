@@ -51,60 +51,52 @@ def request_access_token():
 @with_retries(n_max=5)
 def query_DTN_weather_data(latitude, longitude, start, end, interval, fields, q=True):
     """
-    all parameters/fields available for hourly historical data
-    https://devportal.dtn.com/catalog/Weather/dtn-weather-conditions-api/documentation#tag--Parameters
+    common parameters/fields available for hourly historical data
         airTemp - C, F
-            Air temperature at two meters above ground level. Units depend on unitcode setting.
-        cloudCover - %
-            Cloud cover data. Cloud cover refers to the percentage of the sky covered by clouds.
+            Air temperature at 2 meters above ground level.
         dewPoint - C, F
-            Dew point temperature at two meters above ground level. Dew point temperature is
-            defined as the temperature to which the air must be cooled for saturation and
-            condensation to occur.
-        iceAccPeriod - mm, in
-            Hourly ice accumulation data.
-        liquidAccPeriod - mm, in
-            Hourly liquid accumulation data.
+            Dew point temperature at 2 meters above ground level.
+        effectiveCloudCover - %
+            Weighted sum of low, medium, and high cloud cover percentage.
+        iceLweAmount - mm, in
+            Ice liquid water equivalent precipitation amount in the past hour, this is the
+            precipitation amount that occurs when the precipitation falls as sleet or ice pellets.
+        liquidPrecipAmount - mm, in
+            Total (liquid equivalent) accumulation of precipitation from rain, drizzle, freezing
+            rain, and freezing drizzle over the past hour.
+        localOffsetHours - number of hours
+            The number of hours to add or subtract from the UTC timestamp in the response to obtain
+            local time (accounting for Daylight Saving Time) at the requested latitude/longitude.
+        localTimezoneOlson - name of timezone
+            The Olson time zone name at the requested latitude and longitude.
         longWaveRadiation - W/m^2
-            Downwelling longwave radiation flux data. Longwave radiation is the energy emitted from
-            non-solar radiation sources.
-        precipAccPeriod - mm, in
-            Hourly liquid-equivalent precipitation accumulation data.
-        precipAccAdjusted - mm, in
-            Liquid-equivalent precipitation accumulation, fundamentally derived from the raw
-            precipitation product, but then adjusted to more closely match available ground truth
-            observations. Due to the delays in receiving these ground truth data, accumulation
-            adjustment typically lags real-time by a day or more.
-        precipAccRaw - mm, in
-            Liquid-equivalent precipitation accumulation, estimated from multiple sources of data
-            that may include any or all of the following: weather radar, satellite, computer
-            models, and surface observation data.
+            Downwelling longwave (non-solar) radiation flux at the surface of the earth.
+        precipAmount - mm, in
+            Total (liquid equivalent) accumulation of precipitation over the past hour.
         relativeHumidity - %
-            Relative humidity at two meters above ground level. Relative humidity is the ratio of
-            the actual amount of water vapor in the air to the maximum amount that can physically
-            exist at a given air temperature.
+            Relative humidity at 2 meters above ground level.
         shortWaveRadiation - W/m^2
-            Downwelling shortwave radiation flux data. Shortwave radiation is the high-energy solar
-            radiation that reaches Earth’s surface.
-        snowAccPeriod - mm, in
-            Hourly snow accumulation data.
+            Also called Global Horizontal Irradiance (GHI), this is the instantaneous high-energy solar
+            radiation received at the Earth's surface, including both direct (DNI) and diffuse (DHI) sunlight.
+        snowfallAmount - mm, in
+            Total accumulation of snow (measured depth, not liquid equivalent), over the past hour.
+        sunshineDuration - minutes
+            Duration of sunshine based on cloud cover and downwelling shortwave radiation over the past hour.
         surfacePressure - hPa, mb
-            This parameter represents the pressure that the air exerts on the surface of the Earth.
+            Pressure that the air exerts on the surface of the earth.
+        totalCloudCover - %
+            Percentage of the sky covered by clouds. Range from 0% (clear sky) to 100% (completely overcast).
         visibility - km, mi
-            Visibility data. Visibility is a measure of the lateral distance one can see before
-            one’s line of sight is obstructed due to weather conditions.
+            Lateral distance until line-of-sight is obstructed due to weather conditions.
         windDirection - degrees
-            Wind direction at ten meters above ground level, measured with respect to true north.
-            A wind direction from true north corresponds to a value of zero degrees, which
-            increases to 360 degrees with corresponding clockwise shifts in wind direction. Returns
-            "n/a" if wind speed is less than one mph.
-        windGust - km/h, mph
-            Wind gust at ten meters above ground level. Returns "n/a" if wind speed is less than
-            five mph, or if the difference between wind gust and wind speed is less than five mph.
+                Specifies the direction from which the wind is blowing at 10 meters above the
+                ground, measured in degrees with respect to true north.
+        windGust - m/s, mph
+            Wind gust speed at 10 meters above ground level.
         windSpeed - m/s, mph
-            Wind speed at ten meters above ground level. Units dependent on the unitcode setting.
+            Wind speed at 10 meters above ground level.
 
-    reference: https://weather.api.dtn.com/v1/docs/conditions/#section/Weather-Parameters
+    reference: https://devportal.dtn.com/catalog/Weather/dtn-weather-conditions-api/documentation#tag--Parameters
     """
     token_ = request_access_token()
     headers = {

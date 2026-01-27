@@ -3,6 +3,15 @@ import pandas as pd
 from . import oemeta
 
 
+def infer_freq_timedelta(df: pd.DataFrame):
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Error: dataframe must have datetime index")
+    freq_timedelta = df.index.diff().min()
+    if freq_timedelta != df.index.diff().max():
+        raise ValueError("Non-standard index detected. Must have uniform intervals.")
+    return freq_timedelta
+
+
 def localize_naive_datetimeindex(
     dataframe: pd.DataFrame, site: str = "", tz: str = "", q: bool = True
 ):

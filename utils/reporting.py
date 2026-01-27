@@ -1,15 +1,21 @@
 import datetime as dt
 import numpy as np
-from pathlib import Path
 import pandas as pd
+from pathlib import Path
+import plotly.graph_objects as go
 from typing import Union
 
 from .assets import SolarSite
-from .datetime import remove_tzinfo_and_standardize_index
+from .datetime import (
+    infer_freq_timedelta,
+    localize_naive_datetimeindex,
+    remove_tzinfo_and_standardize_index,
+)
 from .helpers import quiet_print_function
 from .oemeta import PI_SITES_BY_FLEET
 from .oepaths import date_created, latest_file, sorted_filepaths, validated_savepath
 from .solar import SolarDataset
+from ..dataquery.external import query_fracsun, get_fracsun_sites
 from ..datatools.backfill import process_and_backfill_meteo_data, meteo_backfill_subplots
 from ..datatools.pvlib import run_flashreport_pvlib_model, run_pvlib_model
 from ..datatools.qcutils import run_auto_qc, qc_compare_fig
@@ -18,13 +24,22 @@ from ..reporting.curtailment import (
     generate_curtailment_report,
     load_curtailment_report_data,
     curtailment_summary_table,
+    sql_curtailment_summary,
 )
 from ..reporting.flashreports import generate_monthlyFlashReport
 from ..reporting.insurance_bi import (
     calculate_insurance_bi_adjustment,
     SOLAR_PERFORMANCE_REPORT_FILEPATH,
 )
-from ..reporting.kpis import blank_kpi_dataframe, ORDERED_KPI_COLUMNS, REPORT_KPI_COLUMN_MAPPING
+from ..reporting.kpis import (
+    blank_kpi_dataframe,
+    format_kpi_data_for_waterfall,
+    reconcile_losses,
+    validate_kpi_totals,
+    ORDERED_KPI_COLUMNS,
+    REPORT_KPI_COLUMN_MAPPING,
+    KPI_COLUMNS_FOR_PLOT,
+)
 from ..reporting.solarplots import monthly_summary_subplots
 
 SOLAR_SITES = PI_SITES_BY_FLEET["solar"]
@@ -36,7 +51,7 @@ def most_recent_reporting_period() -> tuple[int]:
     return (last_month.year, last_month.month)
 
 
-def validate_reporting_period(year: int, month: int):
+def validate_reporting_period(year: int, month: int) -> None:
     """Ensures defined year/month is before the current year/month."""
     max_year, max_month = most_recent_reporting_period()
     if (year, month) > (max_year, max_month):
@@ -44,7 +59,7 @@ def validate_reporting_period(year: int, month: int):
     return
 
 
-def get_start_and_end_dates(year: int, month: int):
+def get_start_and_end_dates(year: int, month: int) -> tuple[pd.Timestamp]:
     start = pd.Timestamp(year, month, 1)
     end = start + pd.DateOffset(months=1)
     return (start, end)
@@ -59,6 +74,68 @@ def get_filenames_and_dates(fpath_list: list[Path]) -> str:
         lines.append(f"    {date_created(fpath)}    {fpath.name}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _get_performance_breakdown(
+    dfkpi: pd.DataFrame, calculated_curtailment: float = 0.0, validated: bool = True
+) -> dict:
+    """Gets totals for waterfall plot; Ensures all buckets sum to zero."""
+
+    def format_kpi_col(col):
+        return (
+            col.lower().split(" (")[0].replace(" - ", "_").replace(" ", "_").replace("/system", "")
+        )
+
+    df = dfkpi.T.copy()
+    df.columns = ["value"]
+    df.index = df.index.map(format_kpi_col)
+    val = lambda kpi: df.at[kpi, "value"]
+
+    # subtract ac module loss & soiling loss from dc health loss
+    dc_health_loss = val("dc_health_loss") - val("soiling_loss") - val("ac_module_loss")
+
+    # overwrite curtailment with calculated value (if from other source, e.g. CAISO)
+    if calculated_curtailment > 0:
+        df.loc["curtailment_total"] = calculated_curtailment
+
+    # calculate estimated ac line losses
+    ac_line_losses = val("inverter_generation") - val("meter_generation")
+
+    # ensure insurance bi is not NaN
+    insurance_adj = val("insurance_bi_adjustment")
+    if pd.isna(insurance_adj):
+        insurance_adj = 0
+
+    data = {
+        "generation": {
+            "possible": val("possible_generation"),
+            "inverter": val("inverter_generation"),
+            "meter": val("meter_generation"),
+        },
+        "losses": {
+            "soiling_loss": val("soiling_loss"),
+            "dc_health_loss": dc_health_loss,
+            "ac_module_loss": val("ac_module_loss"),
+            "downtime_loss": val("downtime_loss"),
+            "curtailment": val("curtailment_total"),
+            "ac_line_losses": ac_line_losses,
+        },
+        "adjustments": {
+            "insurance_bi": insurance_adj,
+        },
+    }
+    if validated is False:
+        return data
+
+    # validate totals
+    possible = data["generation"]["possible"]
+    total_losses = sum(data["losses"].values())
+    total_adjustments = sum(data["adjustments"].values())
+    net = possible - total_losses + total_adjustments
+    actual = data["generation"]["meter"]
+    assert actual == net
+
+    return data
 
 
 class FlashReportGenerator:
@@ -179,6 +256,120 @@ class FlashReportGenerator:
         del fpath_dict["query"]
         return {**self.query_filepaths_by_group, **fpath_dict}
 
+    @property
+    def latest_filepaths(self) -> dict[str, list[Path]]:
+        fpath_dict = {}
+        for key, fpaths in self.existing_filepaths.items():
+            if key == "other" or len(fpaths) == 0:
+                continue
+            fpath_dict.update({key: latest_file(fpaths)})
+        return fpath_dict
+
+    def _get_filepaths_for_quick_load(self):
+        quick_load_keys = ["Inverters", "Met Stations", "Meter", "pvlib"]
+        output = {}
+        for key in quick_load_keys:
+            fpath = self.latest_filepaths.get(key, None)
+            if fpath is not None:
+                output[key] = fpath
+        return output
+
+    def quick_load_latest_data(
+        self, with_tz=False, include_fpaths=False
+    ) -> dict[str, pd.DataFrame]:
+        """if include fpaths, adds key 'source_files' to output dict with list[Path] as value"""
+        data, source_fpaths = {}, []
+        for asset_group in ["Inverters", "Met Stations", "Meter", "Modules"]:
+            df, fpath = self.load_query_file(
+                asset_group=asset_group, version="all", with_tz=with_tz, return_fpath=True
+            )
+            if not df.empty:
+                data[asset_group] = df.copy()
+                source_fpaths.append(fpath)
+
+        pvl_fpath = self.latest_filepaths.get("pvlib", None)
+        if pvl_fpath is not None:
+            data["pvlib"] = self.site._load_file(filepath=pvl_fpath, with_tz=with_tz)
+            source_fpaths.append(pvl_fpath)
+
+        if len(source_fpaths) > 0 and include_fpaths:
+            data["source_files"] = source_fpaths
+
+        return data
+
+    def load_fracsun_soiling(self, with_tz=False, q: bool = True):
+        if self.site.name not in get_fracsun_sites():
+            return
+        df = query_fracsun(
+            site=self.site.name, start_date=self.start_date, end_date=self.end_date, q=q
+        )
+        df = df[["soiling"]].resample("1h").ffill()
+        df["soilingPercent"] = df["soiling"].div(100)
+        df = df[["soilingPercent"]]
+
+        expected_index = pd.date_range(self.start_date, self.end_date, freq="h", inclusive="left")
+        df = df.reindex(expected_index)
+        if with_tz is True:
+            df = localize_naive_datetimeindex(df, site=self.site.name, q=q)
+        if q is False:
+            print("Loaded Fracsun soiling data.")
+        return df
+
+    def load_data(self, with_tz: bool = False, return_fpaths: bool = False):
+        data_dict = self.quick_load_latest_data(with_tz=with_tz, include_fpaths=True)
+        output_data = {
+            key.lower().replace(" ", "_"): df
+            for key, df in data_dict.items()
+            if key != "source_files"
+        }
+
+        # get site-level generation interval data
+        site_col_dict = {
+            "Inverters": "Inv_Total_MW",
+            "Meter": "PI_Meter_MW",
+            "pvlib": "Possible_MW",
+        }
+        site_level_data = {}
+        for key, col in site_col_dict.items():
+            if key not in data_dict:
+                continue
+            if key == "Meter":
+                df = data_dict[key].iloc[:, [0]].copy()
+            elif key in ("Inverters", "pvlib"):
+                matching_str = "ActivePower" if key == "Inverters" else "Possible_Power"
+                df = data_dict[key].filter(like=matching_str).sum(axis=1).div(1e3).to_frame()
+            else:
+                continue
+            df.columns = [col]
+            site_level_data[key.lower()] = df.copy()
+
+        # get site-level losses interval data
+        if all(key in data_dict for key in ["Modules", "pvlib"]):
+            dfm = data_dict["Modules"]
+            if dfm.index.diff().max() != pd.Timedelta(hours=1):
+                dfm = dfm.resample("h").mean()
+            mcol, mloss_col = "OE.ModulesOffline_Percent", "AC_Module_Loss_MW"
+            if mcol in dfm.columns:
+                dfp = site_level_data["pvlib"]
+                if dfp.index.diff().max() != pd.Timedelta(hours=1):
+                    dfp = dfp.resample("h").mean()
+                df_mloss = dfm[mcol].mul(dfp["Possible_MW"]).to_frame(name=mloss_col)
+                site_level_data["ac_module_loss"] = df_mloss
+
+        df_soil = self.load_fracsun_soiling(with_tz=with_tz)
+        if df_soil is not None:
+            site_level_data["soiling_loss"] = df_soil
+
+        if self.df_util is not None:
+            util_data = self.df_util[[self.site.name]].copy()
+            site_level_data["utility"] = util_data.rename(columns={self.site.name: "Util_Meter_MW"})
+
+        output_data["site_level"] = site_level_data
+
+        if return_fpaths is True:
+            return output_data, data_dict.get("source_files", [])
+        return output_data
+
     def data_filepaths_by_version(self, asset_group: str, version="all") -> Union[dict, list]:
         """Retrieves PI query filepaths from flashreport folder.
 
@@ -222,6 +413,16 @@ class FlashReportGenerator:
         return latest_file(fpath_list)
 
     @property
+    def status(self) -> dict:
+        return {
+            "query": self.query_status,
+            "qc": self.qc_status,
+            "backfill": self.backfill_status,
+            "pvlib": self.pvlib_status,
+            "report": self.report_status,
+        }
+
+    @property
     def query_status(self) -> dict[str, bool]:
         return {
             query_group: len(fpaths) > 0
@@ -260,13 +461,15 @@ class FlashReportGenerator:
             month=self.month,
             asset_group=asset_group,
             freq=freq,
+            keep_tzinfo=True,
             q=q,
         )
+        df = remove_tzinfo_and_standardize_index(dataset.data)
         if save is True:
             savepath = self._generate_data_savepath(asset_group, version="raw")
-            dataset.data.to_csv(savepath)
+            df.to_csv(savepath)
             qprint(f"Saved: {str(savepath).split('FlashReports')[-1]}")
-        return dataset.data
+        return df
 
     def load_query_file(
         self, asset_group: str, version="all", with_tz=False, return_fpath=False
@@ -491,25 +694,59 @@ class FlashReportGenerator:
     ) -> Union[None, pd.DataFrame]:
         """Runs script to generate Comanche curtailment report for XCEL.
         -> set check_loss=True to return the daily summary table & get total loss without generating full report
+        -> if check_loss=True and include_sql=True, includes sql data in output
+        -> if check_loss=False and include_sql=True, includes sql table in report file
         """
         qprint = quiet_print_function(q=q)
         if self.site.name != "Comanche":
             qprint(f"Note: curtailment report not supported for site = {self.site.name}.")
             return
 
-        if check_loss is True:
-            df = load_curtailment_report_data(
-                self.year, self.month, pvlib_scaling_factor=scaling_factor
+        if check_loss is False:
+            _ = generate_curtailment_report(
+                self.year, self.month, scaling_factor=scaling_factor, include_sql=include_sql, q=q
             )
-            dfs = curtailment_summary_table(df)
-            lost_mw = dfs["lost_nrg"].sum() / 1e3
-            qprint(f"Total Loss = {lost_mw:.2f}")
-            return dfs
+            return
 
-        _ = generate_curtailment_report(
-            self.year, self.month, scaling_factor=scaling_factor, include_sql=include_sql
+        df_data = load_curtailment_report_data(
+            self.year, self.month, pvlib_scaling_factor=scaling_factor
         )
-        return
+        df = curtailment_summary_table(df_data, all_columns=True)  # from PI
+        df = df.rename(
+            columns={
+                "pvlib": "possible_PI",
+                "meter": "meter_PI",
+                "lost_nrg": "curtailment_PI",
+            }
+        )
+        lost_mw = df["curtailment_PI"].sum() / 1e3
+        qprint(f"Total Loss (PI) = {lost_mw:.2f}")
+
+        if include_sql is True:
+            qprint("Querying SQL data...", end="\r")
+            dfsql = sql_curtailment_summary(self.year, self.month)
+            dfsql.index = pd.to_datetime(dfsql[["Year", "Month", "Day"]])
+            rename_cols = {
+                "Sum_ExpKWh": "possible_SQL",
+                "Sum_MeterKWh": "meter_SQL",
+                "Sum_CurtKWh": "curtailment_SQL",
+            }
+            dfsql = dfsql.rename(columns=rename_cols)
+            df = df.join(dfsql[list(rename_cols.values())])
+
+            lost_mw_sql = df["curtailment_SQL"].sum() / 1e3
+            delta_pct = (lost_mw_sql - lost_mw) / lost_mw
+            qprint(f"Total Loss (SQL) = {lost_mw_sql:.2f} (delta: {delta_pct:.1%})")
+            ordered_cols = []
+            for key in ("possible", "meter", "curtailment"):
+                pi_col, sql_col, delta_col = [f"{key}_PI", f"{key}_SQL", f"delta_{key}"]
+                df[delta_col] = df[sql_col].sub(df[pi_col])
+                ordered_cols.extend([pi_col, sql_col, delta_col])
+            df[ordered_cols] = df[ordered_cols].div(1e3)
+            other_cols = [c for c in df.columns if c not in ordered_cols]
+            df = df[ordered_cols + other_cols]
+
+        return df
 
     @property
     def report_status(self) -> bool:
@@ -633,7 +870,10 @@ class FlashReportGenerator:
         return df
 
     def get_kpis(
-        self, return_fpaths: bool = False
+        self,
+        return_fpaths: bool = False,
+        return_calculated_curtailment: bool = False,
+        remove_gross_if_below_meter: bool = True,  # not sure why would be False; option for now
     ) -> Union[pd.DataFrame, tuple[pd.DataFrame, list[Path]]]:
         """Collects KPIs from FlashReport and formats for transfer to KPI tracker file(s)."""
         if self.report_status is False:
@@ -652,6 +892,10 @@ class FlashReportGenerator:
             if col not in df.columns:
                 df.insert(i, col, np.nan)
 
+        calc_curt = np.nan
+        if "Calculated Curtailment [MWh]" in df.columns:
+            calc_curt = df.at[0, "Calculated Curtailment [MWh]"]
+
         if self.site.name == "Comanche":
             df["Curtailment - Compensable (MWh)"] = df["Curtailment - Non_Compensable (MWh)"]
             df["Curtailment - Non_Compensable (MWh)"] = np.nan
@@ -665,10 +909,11 @@ class FlashReportGenerator:
         for col in pos_cols:
             df.loc[df[col].lt(0), col] = 0
 
-        # remove gross generation values that are less than net gen.
-        gross_ = "Inverter Generation (MWh)"
-        net_ = "Meter Generation (MWh)"
-        df.loc[df[gross_].lt(df[net_]), gross_] = np.nan
+        # overwrite gross generation values that are less than net gen.
+        if remove_gross_if_below_meter is True:
+            gross_ = "Inverter Generation (MWh)"
+            net_ = "Meter Generation (MWh)"
+            df.loc[df[gross_].lt(df[net_]), gross_] = df[net_]  # does nothing if gross > net
 
         # limit availability to 100%
         inv_avail_ = "Inverter Uptime Availability (%)"
@@ -683,9 +928,155 @@ class FlashReportGenerator:
         df["Insurance BI Adjustment (MWh)"] = claim_total
         source_fpaths.append(fpath)
 
+        # load snow loss from file if exists (TODO: add this to the flashreport)
+        snow_fpath = latest_file(list(self.folder.glob("*Snow*Losses*.csv")))
+        if snow_fpath is not None:
+            df_snow = pd.read_csv(snow_fpath, index_col=0, parse_dates=True)
+            # taking the sum of derate and outage losses
+            snow_loss = df_snow.filter(like="lostMWh").sum().sum()
+            df["Snow Derate Loss (MWh)"] = snow_loss
+            source_fpaths.append(snow_fpath)
+        else:
+            df["Snow Derate Loss (MWh)"] = 0  # i.e. overwriting the NaN value
+
         if return_fpaths is True:
-            return df, source_fpaths
+            if return_calculated_curtailment is False:
+                return df, source_fpaths
+            return df, source_fpaths, calc_curt
+        elif return_calculated_curtailment is True:
+            return df, calc_curt
         return df
+
+    def _get_performance_breakdown(
+        self, dfkpi: pd.DataFrame, calculated_curtailment: float = 0.0, validated: bool = False
+    ) -> dict:
+        """Gets totals for waterfall plot; Ensures all buckets sum to zero."""
+
+        def format_kpi_col(col):
+            return (
+                col.lower()
+                .split(" (")[0]
+                .replace(" - ", "_")
+                .replace(" ", "_")
+                .replace("/system", "")
+            )
+
+        df = dfkpi.T.copy()
+        df.columns = ["value"]
+        df.index = df.index.map(format_kpi_col)
+        val = lambda kpi: df.at[kpi, "value"]
+
+        # subtract ac module, soiling, and snow losses from dc health loss
+        dc_health_loss = (
+            val("dc_health_loss")
+            - val("soiling_loss")
+            - val("ac_module_loss")
+            - val("snow_derate_loss")
+        )
+        if dc_health_loss < 0:
+            dc_health_loss = 0
+
+        # overwrite curtailment with calculated value (if from other source, e.g. CAISO)
+        if calculated_curtailment > 0:
+            df.loc["curtailment_total"] = calculated_curtailment
+
+        # calculate estimated ac line losses
+        ac_line_losses = val("inverter_generation") - val("meter_generation")
+        # if ac_line_losses < 0:
+        #     ac_line_losses = 0
+
+        # ensure insurance bi is not NaN
+        insurance_adj = val("insurance_bi_adjustment")
+        if pd.isna(insurance_adj):
+            insurance_adj = 0
+
+        data = {
+            "generation": {
+                "possible": val("possible_generation"),
+                "inverter": val("inverter_generation"),
+                "meter": val("meter_generation"),
+            },
+            "losses": {
+                "soiling": val("soiling_loss"),
+                "snow_derate": val("snow_derate_loss"),
+                "dc_health": dc_health_loss,
+                "ac_module": val("ac_module_loss"),
+                "downtime": val("downtime_loss"),
+                "curtailment": val("curtailment_total"),
+                "ac_line_losses": ac_line_losses,
+            },
+            "adjustments": {
+                "insurance_bi": insurance_adj,
+            },
+        }
+        if validated is False:
+            return data
+
+        # validate totals to confirm they sum to zero
+        assert validate_kpi_totals(data) is True
+        return data
+
+    def get_kpi_data(
+        self, adjusted: bool = False, use_calc_curtailment=True, return_fpaths=False, q=True
+    ):
+        """If adjusted=True, remove_gross_if_below_meter=True & losses are reconciled as much as possible."""
+        qprint = quiet_print_function(q=q)
+        # load kpis from flashreport
+        dfkpi, source_fpaths, calc_curt = self.get_kpis(
+            return_fpaths=True,
+            return_calculated_curtailment=True,
+            remove_gross_if_below_meter=adjusted,
+        )
+        data = self._get_performance_breakdown(
+            dfkpi=dfkpi,
+            calculated_curtailment=calc_curt if use_calc_curtailment else 0.0,
+            validated=False,  # allow invalid totals, otherwise raises error
+        )
+        valid, delta = validate_kpi_totals(data, return_delta=True)
+        qprint(f"{delta = :.5f} ({valid=})")
+        if valid is True:
+            if return_fpaths:
+                return data, source_fpaths
+            return data
+
+        if adjusted is True:
+            reconcile_losses(data, q=q)
+            valid, delta = validate_kpi_totals(data, return_delta=True)
+            qprint(f"new {delta = :.5f} ({valid=})")
+
+        if return_fpaths:
+            return data, source_fpaths
+        return data
+
+    def create_kpi_waterfall(self, kpi_data) -> go.Figure:
+        """Creates waterfall plot using monthly kpi data. TODO: move this to figures.py"""
+        waterfall_data = format_kpi_data_for_waterfall(kpi_data=kpi_data)
+        x_vals = list(waterfall_data.keys())
+        y_vals = list(waterfall_data.values())
+        measure = ["absolute" if x in ("inverter", "meter") else "relative" for x in x_vals]
+        text = [f"{y:.2f}" if y != 0 else "" for y in y_vals]  # TEMP
+
+        kwargs = dict(
+            # name="20",
+            orientation="v",
+            textposition="outside",
+            connector=dict(
+                line=dict(
+                    color="rgb(63, 63, 63)",
+                    width=1,
+                ),
+                mode="spanning",
+            ),
+        )
+        fig = go.Figure(go.Waterfall(x=x_vals, y=y_vals, measure=measure, text=text, **kwargs))
+        fig.update_layout(
+            title=f"{self.site.name} - Performance Breakdown for {self.year}-{self.month:02d}",
+            showlegend=False,
+            margin=dict(t=80, b=60, l=60, r=60),
+        )
+        fig.update_xaxes(fixedrange=True)
+        fig.update_yaxes(fixedrange=True)
+        return fig
 
     @classmethod
     def load_kpis(
@@ -764,6 +1155,83 @@ class FlashReportGenerator:
         if return_fpaths:
             return df, source_files
         return df
+
+    def get_historical_kpi_table(self, n_prev_months=3):
+        """Returns dataframe with kpis from flashreport & kpis from tracker from previous months.
+        -> index = KPI_COLUMNS_FOR_PLOT (name: Metric / KPI)
+        -> columns = YYYY-MM for specified months (ascending order)
+        """
+        # historical kpis
+        kpi_list = []
+        prev_periods = pd.date_range(
+            end=pd.Timestamp(self.year, self.month, 1),
+            freq="MS",
+            periods=n_prev_months + 1,
+            inclusive="left",
+        )
+        for date in prev_periods:
+            dfk = self.site.get_monthly_kpis(date.year, date.month, source="tracker")
+            dfk.index = dfk["Combo Date"].dt.strftime("%Y-%m")
+            dfk = dfk[KPI_COLUMNS_FOR_PLOT].T
+            kpi_list.append(dfk)
+
+        # kpis from specified reporting period (from report)
+        df = self.get_kpis()
+        budget_vals = self.site.get_budget_values(self.year, self.month)
+        budget_key_mapping = {
+            "poa": "Budgeted POA (kWh/m2)",
+            "production": "Budgeted Production (MWh)",
+            "curtailment": "Budgeted Curtailment (MWh)",
+        }
+        for key, val in budget_vals.items():
+            col = budget_key_mapping[key]
+            df[col] = val
+        df = df[KPI_COLUMNS_FOR_PLOT].T
+        df.columns = [f"{self.year}-{self.month:02d}"]
+        kpi_list.append(df)
+
+        df_kpis = pd.concat(kpi_list, axis=1)
+        df_kpis.index.name = "Mertric / KPI"
+        return df_kpis
+
+    def get_data_for_summary_plot(self, return_fpaths=False):
+        site_col_dict = {
+            "Inverters": "Inv_Total_MW",
+            "Meter": "PI_Meter_MW",
+            "pvlib": "Possible_MW",
+        }
+        data_dict = self.quick_load_latest_data(with_tz=False, include_fpaths=True)
+        missing_keys = list(filter(lambda k: k not in data_dict, site_col_dict.keys()))
+        if len(missing_keys) > 0:
+            raise KeyError(f"Missing the following data: {missing_keys}")
+
+        output_data = {key.lower(): df for key, df in data_dict.items() if key in site_col_dict}
+
+        # get site-level interval data
+        site_level_data = {}
+        for key, col in site_col_dict.items():
+            if key == "Meter":
+                df = data_dict[key].iloc[:, [0]].copy()
+            elif key in ("Inverters", "pvlib"):
+                matching_str = "ActivePower" if key == "Inverters" else "Possible_Power"
+                df = data_dict[key].filter(like=matching_str).sum(axis=1).div(1e3).to_frame()
+            else:
+                continue
+            df.columns = [col]
+            site_level_data[key] = df.copy()
+
+        if self.df_util is not None:
+            util_data = self.df_util[[self.site.name]].copy()
+            output_data["utility"] = util_data
+            site_level_data["utility"] = util_data.rename(columns={self.site.name: "Util_Meter_MW"})
+
+        output_data["site_level"] = site_level_data
+
+        # get historical kpis
+        output_data["kpis"] = self.get_historical_kpi_table()
+        if return_fpaths is True:
+            return output_data, data_dict.get("source_files", [])
+        return output_data
 
     # TODO: refactor the below function (from SolarSite)
     # def calculate_monthly_variance_kpis(self, year: int, month: int, meter_total: float = None):
