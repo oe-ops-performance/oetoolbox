@@ -13,6 +13,7 @@ from ..reporting.functions import (
 )
 from ..reporting.tools import get_solar_budget_values
 from ..reporting.query_attributes import attribute_path, monthly_query_attribute_paths
+from .pi_meta import PISiteElement
 
 
 class PISite:
@@ -98,10 +99,16 @@ class PISite:
     @property
     def asset_names_by_group(self) -> dict:
         """Returns dictionary with asset groups as keys, and asset names as values"""
-        return {
-            group: list(self.af_dict[group][f"{group}_Assets"].keys())
-            for group in self.asset_groups
-        }
+        if self.name != "Richland":
+            return {
+                group: list(self.af_dict[group][f"{group}_Assets"].keys())
+                for group in self.asset_groups
+            }
+        names = {}
+        pi_element = PISiteElement(fleet=self.fleet, site_name=self.name)
+        for group in self.asset_groups:
+            names[group] = pi_element.get_asset_names(asset_group=group)
+        return names
 
     @property
     def timezone(self) -> str:
@@ -282,11 +289,14 @@ class SolarSite(PISite):
             "Inverters": ["OE.ActivePower"],
             "Met Stations": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],
             "Met Station": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],  # TEMP
-            "Meter": ["OE_MeterMW"],
+            "Meter": ["OE.MeterMW"],
             "Modules": ["OE.ModulesOffline", "OE.ModulesOffline_Percent"],  # site-level attributes
             "PPC": ["xcel_MW_cmd_request", "xcel_MW_setpoint"],  # TEMP: only for Comanche
         }
         valid_groups = [x for x in self.asset_groups if x in STANDARD_ATTRIBUTES]
+        if "Meter" not in valid_groups:
+            valid_groups.append("Meter")  # for Somers
+
         if "Inverters" in valid_groups:
             valid_groups.append("Modules")
 
@@ -304,7 +314,7 @@ class SolarSite(PISite):
         for group in valid_groups:
             asset_names = self.asset_names_by_group.get(group, [])
             attributes = STANDARD_ATTRIBUTES[group]
-            asset_group = group if group != "Modules" else ""
+            asset_group = group if group not in ("Meter", "Modules") else ""
             output[group] = self.get_attribute_paths(
                 asset_group=asset_group,
                 asset_names=asset_names,
