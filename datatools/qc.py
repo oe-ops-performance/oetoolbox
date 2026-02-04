@@ -10,6 +10,21 @@ from ..utils.dataset import Dataset
 from ..utils.helpers import quiet_print_function
 
 
+def _get_the_sun(observer, date):
+    target_date = pd.Timestamp(date).floor("D")
+    date_before = date - pd.Timedelta(days=1)
+    date_after = date + pd.Timedelta(days=1)
+    for d in (target_date, date_before, date_after):
+        try:
+            the_sun = sun(observer, date=d)
+            return the_sun
+        except ValueError:
+            continue
+        except Exception as e:
+            raise e
+    raise ValueError
+
+
 def get_sun(
     date: str, tz: str, lat: float, lon: float, name: str = "", region: str = ""
 ) -> dict[str, pd.Timestamp]:
@@ -39,11 +54,16 @@ def get_sun(
     location = LocationInfo(name=name, region=region, timezone=tz, latitude=lat, longitude=lon)
     observer = location.observer
     target_date = pd.Timestamp(date).floor("D")
+    the_sun = _get_the_sun(observer, date=target_date)
     output = {}
-    for key, dtime in sun(observer, date=target_date).items():
+    for key, dtime in the_sun.items():
         local_tstamp = pd.Timestamp(dtime).tz_convert(tz).tz_localize(None)
         if local_tstamp.date() != dtime.date():
             local_tstamp = pd.Timestamp(dt.datetime.combine(dtime.date(), local_tstamp.time()))
+        elif local_tstamp.date() != target_date.date():
+            local_tstamp = pd.Timestamp(
+                dt.datetime.combine(target_date.date(), local_tstamp.time())
+            )
         tstamp = local_tstamp.round("min")  # round to nearest minute
         if pd.Timestamp(date).tzinfo is not None:
             tstamp = tstamp.tz_localize(tz=tz)

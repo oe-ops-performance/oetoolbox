@@ -785,6 +785,7 @@ def df_comparison_subplots(df0_, df1_, resample_=True, freq_="15min", round_=Non
     )
 
     ## common plot trace kwargs
+    colors2_ = plotly.colors.qualitative.Dark24
     idx_ = df0_plot.index
     plot_kwargs = dict(x=idx_, showlegend=False, hovertemplate=hvtemp)
     for i, col in enumerate(cols_to_compare):
