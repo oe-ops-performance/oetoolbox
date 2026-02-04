@@ -687,7 +687,7 @@ class PIDataset(Dataset):
             return df_
 
         # long format for attribute paths
-        df_["Attribute"] = item_name
+        df_["Attribute"] = item.split("|")[-1]
         for element, id_col in zip(self._get_item_elements(item), self.id_columns):
             df_[id_col] = element
         return df_

@@ -250,6 +250,7 @@ def get_inverter_configs(site, inv_names=None):
                     temperature_model_parameters=TEMPERATURE_PARAMETERS,
                     modules_per_string=dict_cmb[f"String Length {i+1}"],
                     strings=dict_cmb[f"String Count {i+1}"],
+                    name=cmb,
                 )
                 cmb_arrays.append(array)
 

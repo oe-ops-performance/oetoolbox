@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 
 from ..utils import oepaths
+from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.helpers import with_retries
 
 ## function to load most recently-created file in fpath list
@@ -25,7 +26,12 @@ def load_curtailment_report_data(year, month, q=True, pvlib_scaling_factor=1):
         return pd.DataFrame()
 
     ## load files
-    load_file = lambda fp: pd.read_csv(fp, index_col=0, parse_dates=True)
+    def load_file(fp):
+        df = pd.read_csv(fp, index_col=0, parse_dates=True)
+        if df.index.tzinfo is not None:
+            df = remove_tzinfo_and_standardize_index(df)
+        return df
+
     df_pvl, df_mtr, df_ppc = map(load_file, reqd_fpaths)
 
     qprint("Loaded the following files:")
