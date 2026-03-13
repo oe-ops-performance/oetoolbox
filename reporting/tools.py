@@ -8,6 +8,8 @@ import itertools
 import tempfile, shutil, pythoncom
 import xlwings as xw
 from pathlib import Path
+from functools import lru_cache
+
 from ..utils import oepaths, oemeta
 from ..dataquery import pireference as ref
 from ..dataquery.external import query_DTN
@@ -389,6 +391,7 @@ def load_monthly_query_files(
 
 
 # function to load utility meter data from historian
+@lru_cache(maxsize=128)
 def load_meter_historian(year=None, month=None, dropna=True):
     df = pd.read_excel(oepaths.meter_generation_historian, engine="calamine")
     df = df.iloc[: df.Day.last_valid_index() + 1, :].copy()
@@ -415,6 +418,7 @@ def load_meter_historian(year=None, month=None, dropna=True):
 
 
 # function to load kpi tracker (updated Aug.2024 for rev1)
+@lru_cache(maxsize=128)
 def load_kpi_tracker(sheet="ALL PROJECTS"):
     kwargs = dict(sheet_name=sheet, engine="calamine")
     header_row_dict = {"Ref Tables": 1, "Site List": 1, "ALL PROJECTS": 0}
@@ -455,11 +459,18 @@ def load_kpi_tracker(sheet="ALL PROJECTS"):
 # function to get ppa rate from kpi tracker  (used in flashreport script)
 def get_ppa_rate(site, year, month):
     dfk = load_kpi_tracker(sheet="Ref Tables")
-    try:
-        ppa = dfk.at[site, f"{year}-{month:02d}"] if (site in dfk.index) else None
-    except:
-        ppa = None
-    return ppa
+    if site not in dfk.index:
+        return 0
+
+    last_period = list(sorted(dfk.columns))[-1]
+    latest_date = pd.Timestamp(f"{last_period}-01")
+
+    ref_date = pd.Timestamp(year, month, 1)
+    if ref_date > latest_date:
+        ref_date = latest_date
+
+    ref_col = ref_date.strftime("%Y-%m")
+    return dfk.at[site, ref_col]
 
 
 ## function to load kpi tracker data
@@ -689,10 +700,19 @@ def get_flashreport_kpis(site, year, month, q=True, return_df_and_fpath=False):
     mfp_ = fp_dict.get("met2")
     qprint(" " * 20, end="")
     if not isinstance(mfp_, Path):
-        qprint(">> no processed met file! querying DTN GHI data..", end=" ")
-        df_dtn = get_monthly_DTN_ghi_total(site, year, month)
-        qprint("done!")
-        ghi_total = df_dtn["DTN_GHI"].sum() / 1e3
+        dtn_fpaths = list(
+            oepaths.frpath(year, month, ext="solar").joinpath("DTN").glob(f"*{site}*.csv")
+        )
+        if not dtn_fpaths:
+            qprint(">> no processed met file or DTN file! querying DTN GHI data..", end=" ")
+            df_dtn = get_monthly_DTN_ghi_total(site, year, month)
+            qprint("done!")
+            ghi_total = df_dtn["DTN_GHI"].sum() / 1e3
+        else:
+            dtn_fp = oepaths.latest_file(dtn_fpaths)
+            df_dtn = pd.read_csv(dtn_fp, index_col=0, parse_dates=True)
+            ghi_total = df_dtn["dtn_ghi"].sum() / 1e3
+            qprint(f"Loaded DTN GHI data from file: {dtn_fp.name}")
     else:
         dfm = pd.read_csv(mfp_, index_col=0, parse_dates=True)  # met files should have freq=1min
         ghi_source = "measured" if "Average_Across_GHI" in dfm.columns else "DTN"
