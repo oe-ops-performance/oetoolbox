@@ -20,12 +20,6 @@ from ..datatools.backfill import process_and_backfill_meteo_data, meteo_backfill
 from ..datatools.pvlib import run_flashreport_pvlib_model, run_pvlib_model
 from ..datatools.qcutils import run_auto_qc, qc_compare_fig
 from ..datatools.meterhistorian import add_pi_data_files_to_server_folder, load_meter_historian
-from ..reporting.curtailment import (
-    generate_curtailment_report,
-    load_curtailment_report_data,
-    curtailment_summary_table,
-    sql_curtailment_summary,
-)
 from ..reporting.flashreports import generate_monthlyFlashReport
 from ..reporting.insurance_bi import (
     calculate_insurance_bi_adjustment,
@@ -275,11 +269,17 @@ class FlashReportGenerator:
         return output
 
     def quick_load_latest_data(
-        self, with_tz=False, include_fpaths=False
+        self, groups=[], with_tz=False, include_fpaths=False
     ) -> dict[str, pd.DataFrame]:
         """if include fpaths, adds key 'source_files' to output dict with list[Path] as value"""
         data, source_fpaths = {}, []
+        DEFAULT_GROUPS = ["Inverters", "Met Stations", "Meter", "Modules", "pvlib"]
+        if not groups:
+            groups = DEFAULT_GROUPS
+        groups = [g for g in DEFAULT_GROUPS if g in groups]
         for asset_group in ["Inverters", "Met Stations", "Meter", "Modules"]:
+            if asset_group not in groups:
+                continue
             df, fpath = self.load_query_file(
                 asset_group=asset_group, version="all", with_tz=with_tz, return_fpath=True
             )
@@ -288,7 +288,7 @@ class FlashReportGenerator:
                 source_fpaths.append(fpath)
 
         pvl_fpath = self.latest_filepaths.get("pvlib", None)
-        if pvl_fpath is not None:
+        if pvl_fpath is not None and "pvlib" in groups:
             data["pvlib"] = self.site._load_file(filepath=pvl_fpath, with_tz=with_tz)
             source_fpaths.append(pvl_fpath)
 
@@ -358,11 +358,19 @@ class FlashReportGenerator:
 
         df_soil = self.load_fracsun_soiling(with_tz=with_tz)
         if df_soil is not None:
-            site_level_data["soiling_loss"] = df_soil
+            dfp = site_level_data["pvlib"]
+            site_level_data["soiling_loss"] = (
+                df_soil.clip(lower=0.0)["soilingPercent"]
+                .mul(dfp["Possible_MW"])
+                .to_frame(name="Soiling_Loss_MW")
+            )
 
         if self.df_util is not None:
-            util_data = self.df_util[[self.site.name]].copy()
-            site_level_data["utility"] = util_data.rename(columns={self.site.name: "Util_Meter_MW"})
+            if self.site.name in self.df_util.columns:
+                util_data = self.df_util[[self.site.name]].copy()
+                site_level_data["utility"] = util_data.rename(
+                    columns={self.site.name: "Util_Meter_MW"}
+                )
 
         output_data["site_level"] = site_level_data
 
@@ -689,65 +697,6 @@ class FlashReportGenerator:
 
         return df_pvlib
 
-    def run_curtailment_report(
-        self, scaling_factor=1, include_sql=True, check_loss=False, q=True
-    ) -> Union[None, pd.DataFrame]:
-        """Runs script to generate Comanche curtailment report for XCEL.
-        -> set check_loss=True to return the daily summary table & get total loss without generating full report
-        -> if check_loss=True and include_sql=True, includes sql data in output
-        -> if check_loss=False and include_sql=True, includes sql table in report file
-        """
-        qprint = quiet_print_function(q=q)
-        if self.site.name != "Comanche":
-            qprint(f"Note: curtailment report not supported for site = {self.site.name}.")
-            return
-
-        if check_loss is False:
-            _ = generate_curtailment_report(
-                self.year, self.month, scaling_factor=scaling_factor, include_sql=include_sql, q=q
-            )
-            return
-
-        df_data = load_curtailment_report_data(
-            self.year, self.month, pvlib_scaling_factor=scaling_factor
-        )
-        df = curtailment_summary_table(df_data, all_columns=True)  # from PI
-        df = df.rename(
-            columns={
-                "pvlib": "possible_PI",
-                "meter": "meter_PI",
-                "lost_nrg": "curtailment_PI",
-            }
-        )
-        lost_mw = df["curtailment_PI"].sum() / 1e3
-        qprint(f"Total Loss (PI) = {lost_mw:.2f}")
-
-        if include_sql is True:
-            qprint("Querying SQL data...", end="\r")
-            dfsql = sql_curtailment_summary(self.year, self.month)
-            dfsql.index = pd.to_datetime(dfsql[["Year", "Month", "Day"]])
-            rename_cols = {
-                "Sum_ExpKWh": "possible_SQL",
-                "Sum_MeterKWh": "meter_SQL",
-                "Sum_CurtKWh": "curtailment_SQL",
-            }
-            dfsql = dfsql.rename(columns=rename_cols)
-            df = df.join(dfsql[list(rename_cols.values())])
-
-            lost_mw_sql = df["curtailment_SQL"].sum() / 1e3
-            delta_pct = (lost_mw_sql - lost_mw) / lost_mw
-            qprint(f"Total Loss (SQL) = {lost_mw_sql:.2f} (delta: {delta_pct:.1%})")
-            ordered_cols = []
-            for key in ("possible", "meter", "curtailment"):
-                pi_col, sql_col, delta_col = [f"{key}_PI", f"{key}_SQL", f"delta_{key}"]
-                df[delta_col] = df[sql_col].sub(df[pi_col])
-                ordered_cols.extend([pi_col, sql_col, delta_col])
-            df[ordered_cols] = df[ordered_cols].div(1e3)
-            other_cols = [c for c in df.columns if c not in ordered_cols]
-            df = df[ordered_cols + other_cols]
-
-        return df
-
     @property
     def report_status(self) -> bool:
         return len(self.existing_filepaths.get("report", [])) > 0
@@ -820,7 +769,7 @@ class FlashReportGenerator:
                 incomplete.update({k: sts for k, sts in status.items() if sts is False})
         return incomplete
 
-    def create_monthly_subplots(self, save_html=True, skip_existing=True, q=True):
+    def create_monthly_subplots(self, save_html=True, overwrite=False, skip_existing=True, q=True):
         qprint = quiet_print_function(q=q)
         if skip_existing:
             if list(self.folder.glob("*summary*plots*.html")):
@@ -830,7 +779,9 @@ class FlashReportGenerator:
             _ = self.get_report_status()
             qprint("Loaded meter historian file.")
         try:
-            fig = monthly_summary_subplots(*self.args, save_html=save_html, df_util=self.df_util)
+            fig = monthly_summary_subplots(
+                *self.args, save_html=save_html, df_util=self.df_util, overwrite=overwrite
+            )
         except Exception as e:
             fig = None
             qprint(f"ERROR: {e}")
