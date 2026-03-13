@@ -219,6 +219,23 @@ def get_surface_parameters(site, df_met):
     return tracking_profile["surface_tilt"], tracking_profile["surface_azimuth"]
 
 
+def parse_dict_cmb(dict_cmb):
+    cols = ["string_count", "string_length", "mod_type", "mod_wattage"]
+    getkeys = lambda i: [
+        f"String Count {i}",
+        f"String Length {i}",
+        f"Module Type {i}",
+        f"Module Wattage {i}",
+    ]
+    data_list = []
+    for i in range(1, 7):
+        data_list.append([dict_cmb.get(key, np.nan) for key in getkeys(i)])
+    df = pd.DataFrame(data=data_list, columns=cols, index=list(range(1, 7)))
+    df["n_mods"] = df["string_length"].mul(df["string_count"])
+    df["cmb_wattage"] = df["mod_wattage"].mul(df["n_mods"])
+    return df
+
+
 def get_inverter_configs(site, inv_names=None):
     """Generates a list of PVSystem objects"""
     design_db = design_database(site)
@@ -234,25 +251,39 @@ def get_inverter_configs(site, inv_names=None):
         racking_mount = get_racking_mount(dict_inv)
         combiner_list = get_combiner_list(dict_inv)
 
-        for cmb, dict_cmb in dict_inv.items():
+        for cmb in combiner_list:
+            dict_cmb = dict_inv[cmb]
+            df = parse_dict_cmb(dict_cmb)
+            df = df.dropna(axis=0, how="all")
+            if df.empty:
+                raise ValueError("No combiner module wattage data found.")
+
+            cec_mod_type = dict_cmb["Module Type (CEC)"]
+            module_parameters = CEC_MODULES[cec_mod_type]
+
             cmb_arrays = []  # init
-            if cmb not in combiner_list:
-                continue
-            mod_type = dict_cmb["Module Type (CEC)"]
-            mod_wattage_keys = [k for k in dict_cmb if "Wattage" in k]
-            for i, key in enumerate(mod_wattage_keys):  # should always be 6
-                if not (dict_cmb[key] > 0):
-                    continue
-                array = Array(
-                    mount=racking_mount,
-                    module_type="glass_polymer",
-                    module_parameters=CEC_MODULES[mod_type],
-                    temperature_model_parameters=TEMPERATURE_PARAMETERS,
-                    modules_per_string=dict_cmb[f"String Length {i+1}"],
-                    strings=dict_cmb[f"String Count {i+1}"],
-                    name=cmb,
-                )
-                cmb_arrays.append(array)
+            if len(df) == 1:
+                modules_per_string = df["string_length"].values[0]
+                string_count = df["string_count"].values[0]
+            else:
+                # use average string length as a proxy (TODO update to use multiple cmb arrays)
+                modules_per_string = int(df["string_length"].mean())
+
+                # calculate an equivalent string count
+                total_dc_watts = df["cmb_wattage"].sum()
+                cec_mod_watts = module_parameters["STC"]
+                string_count = int(total_dc_watts / (cec_mod_watts * modules_per_string))
+
+            array = Array(
+                mount=racking_mount,
+                module_type="glass_polymer",
+                module_parameters=module_parameters,
+                temperature_model_parameters=TEMPERATURE_PARAMETERS,
+                modules_per_string=modules_per_string,
+                strings=string_count,
+                name=cmb,
+            )
+            cmb_arrays.append(array)
 
             inv_arrays.extend(cmb_arrays)
 
@@ -288,6 +319,8 @@ def apply_dst_shift_to_dtn_data(df_dtn):
     df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
     df_dates["offset"] = df_dates.index.strftime("%z")
     tz_offsets = list(df_dates["offset"].unique())
+    if len(tz_offsets) != 2:
+        raise ValueError("Unsupported condition -> found more than two unique timezones.")
     shift_date = df_dates.loc[df_dates["offset"].eq(tz_offsets[0])].index[-1]
     shifted = df.index >= shift_date
     for col in df.columns:
@@ -407,8 +440,8 @@ def query_dtn_meteo_data(
     df = add_solar_metadata_to_dtn_output(df_dtn, site)
 
     # check for march dst condition & apply shift if necessary
-    if dtn_data_requires_dst_shift(df):
-        df = apply_dst_shift_to_dtn_data(df)
+    # if dtn_data_requires_dst_shift(df):
+    #     df = apply_dst_shift_to_dtn_data(df)
 
     if not keep_tz:
         df = remove_tzinfo_and_standardize_index(df)
@@ -642,3 +675,67 @@ def run_flashreport_pvlib_model(
 
     qprint("Done.")
     return df_model
+
+
+def _run_pvlib_combiner_level_single_inv(system, location, weather_data):
+    """note: 'system' is from inverter_configs; system.name = inv_name"""
+    # define model chain and run model
+    mc = ModelChain(system, location, aoi_model="physical", spectral_model="no_loss")
+    data = [weather_data] * len(system.arrays)
+    mc.run_model_from_effective_irradiance(data=data)
+
+    # get ac possible power
+    inv = system.name
+    df_ac = mc.results.ac.div(1e3).rename(f"possible_kw_{inv}").to_frame()
+
+    # extract/format dc results, then join with df_ac
+    df_list = []
+    for arr, df_dc in zip(system.arrays, mc.results.dc):
+        cmb = arr.name
+        df_list.append(df_dc[["i_mp"]].rename(columns={"i_mp": f"i_mp_{cmb}_{inv}"}))
+    df_dc = pd.concat(df_list, axis=1)
+    return df_ac.join(df_dc)
+
+
+def _format_poa_data_for_model(site: str, poa_data: pd.Series) -> pd.DataFrame:
+    """Returns dataframe with adjusted 'effective_irradiance' column using losses."""
+    array_losses, dc_losses, _ = get_site_model_losses(site)
+    weather_data = poa_data.to_frame()
+    weather_data["effective_irradiance"] = poa_data.mul(array_losses).mul(dc_losses)
+    return weather_data
+
+
+def run_pvlib_combiner_level(
+    site: str, poa_data: pd.Series, return_dict=False, q: bool = True
+) -> dict[str, pd.DataFrame]:
+    """When return_dict=True, returns dictionary w/ inv names as keys & dataframes as values.
+    -> otherwise, returns combined dataframe (wide-format)
+    """
+    qprint = lambda msg, end="\n": None if q else print(msg, end=end)
+    location = get_site_location(site)
+    weather_data = _format_poa_data_for_model(site, poa_data)
+    inverter_configs = get_inverter_configs(site)
+    n_systems = len(inverter_configs)
+
+    qprint(f"Begin combiner-level pvlib script for {site}; {n_systems=} (inverters).")
+    output_data = {}
+    for i, system in enumerate(inverter_configs, start=1):
+        qprint(f">>> system {i} of {n_systems}".ljust(20), end="\r" if i < n_systems else "\n")
+        df = _run_pvlib_combiner_level_single_inv(system, location, weather_data)
+        output_data[str(system.name)] = df
+    qprint("Done; End pvlib script.")
+
+    if return_dict is True:
+        return output_data
+    return pd.concat(list(output_data.values()), axis=1)
+
+
+def pvlib_dataframe_to_dict(df) -> dict[str, pd.DataFrame]:
+    # designed for use with combined df (output from run_pvlib_combiner_level)
+    inv_kw_cols = list(df.filter(like="possible_kw").columns)
+    inv_ids = list(sorted(c.replace("possible_kw_", "") for c in inv_kw_cols))
+    cmb_pvlib_data = {}
+    for inv in inv_ids:
+        matching_cols = [c for c in df.columns if c.endswith(inv)]
+        cmb_pvlib_data[inv] = df[matching_cols].copy()
+    return cmb_pvlib_data
