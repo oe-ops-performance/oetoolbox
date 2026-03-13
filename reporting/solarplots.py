@@ -157,6 +157,7 @@ def monthly_summary_subplots(
     savepath=None,
     df_util=None,
     return_df_and_fpaths=False,
+    overwrite=False,
 ):
     # error handling for invalid savepath
     if savepath is not None:
@@ -263,21 +264,25 @@ def monthly_summary_subplots(
         dfkpi = get_flashreport_kpis(site, year, month, q=True)
         dfkpi = dfkpi.merge(dfb, how="left", on="Project").set_index("Project")
         dfkpi = dfkpi.apply(pd.to_numeric).fillna(0)
-
-        val_ = lambda col_: dfkpi.at[site, col_]
-        dfkpi["Performance Availability (%)"] = 1 + (
-            (
+        if dfb.empty or dfkpi.filter(like="Budget").isna().all().any():
+            dfkpi["Performance Availability (%)"] = np.nan
+        else:
+            val_ = lambda col_: dfkpi.at[site, col_]
+            dfkpi["Performance Availability (%)"] = 1 + (
                 (
-                    val_("Meter Generation (MWh)")
-                    + val_("Snow Derate Loss (MWh)")
-                    + val_("Insurance BI Adjustment (MWh)")
+                    (
+                        val_("Meter Generation (MWh)")
+                        + val_("Snow Derate Loss (MWh)")
+                        + val_("Insurance BI Adjustment (MWh)")
+                    )
+                    + (val_("Curtailment - Total (MWh)") - val_("Budgeted Curtailment (MWh)"))
+                    - (val_("POA Insolation (kWh/m2)") / val_("Budgeted POA (kWh/m2)"))
+                    * val_("Budgeted Production (MWh)")
                 )
-                + (val_("Curtailment - Total (MWh)") - val_("Budgeted Curtailment (MWh)"))
-                - (val_("POA Insolation (kWh/m2)") / val_("Budgeted POA (kWh/m2)"))
-                * val_("Budgeted Production (MWh)")
+                / val_("Budgeted Production (MWh)")
             )
-            / val_("Budgeted Production (MWh)")
-        )
+
+        val_ = lambda col_: dfkpi.at[site, col_]  # redefine in case perf avail is referenced
 
         # add current kpis from report (b/c probably haven't been transferred to tracker yet)
         newcol = f"{year}-{month:02d}"
@@ -688,7 +693,8 @@ def monthly_summary_subplots(
         if len(frfpaths) == 0:
             sfile_ = sfile_.split(".html")[0] + "_rev0.html"
         spath_ = Path(sfolder_, sfile_)
-        spath_ = oepaths.validated_savepath(spath_)
+        if overwrite is False:
+            spath_ = oepaths.validated_savepath(spath_)
         fig.write_html(spath_, config=config_)
         disppath = (
             str(spath_) if (savepath is not None) else ".." + str(spath_).split("Operations")[-1]
