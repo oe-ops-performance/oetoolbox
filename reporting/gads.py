@@ -72,13 +72,26 @@ GADS_METADATA = pd.DataFrame.from_dict(
 )
 
 
+def get_gads_reference_year(year, fleet):
+    """Get the reference year used to determine capacity limits."""
+    if year > pd.Timestamp.now().year:
+        raise ValueError("Year cannot be in the future.")
+    valid_years = [int(k) for k in GADS_CAPACITY_LIMITS[fleet].keys()]
+    if year not in valid_years:
+        if year < min(valid_years):
+            return min(valid_years)
+        return max(valid_years)
+    return year
+
+
 def eligible_gads_sites(year: int, by_fleet=True) -> list:
     """Returns list of sites at or above the GADS capacity limit for selected year."""
     eligible_sites = {}
     for fleet in ["solar", "wind"]:
-        min_capacity = GADS_CAPACITY_LIMITS[fleet].get(str(year))
+        ref_year = get_gads_reference_year(year, fleet)
+        min_capacity = GADS_CAPACITY_LIMITS[fleet].get(ref_year)
         if not min_capacity:
-            raise KeyError(f"The capacity limit for {year=} is not defined.")
+            raise KeyError(f"Undetermined capacity limit for {year=}.")
         sitelist = GADS_METADATA.loc[GADS_METADATA["capacity"].ge(min_capacity)].index.to_list()
         eligible_sites[fleet] = list(
             sorted([s for s in sitelist if s in oemeta.PI_SITES_BY_FLEET[fleet]])
@@ -234,10 +247,13 @@ class GADSSite(PISite):
             savepath.mkdir(parents=True)
         return savepath
 
+    def ref_year(self, year: int) -> int:
+        return get_gads_reference_year(year, self.fleet)
+
     def is_eligible(self, year: int) -> bool:
         if self.ac_capacity is None:
             return False
-        gads_minimum = GADS_CAPACITY_LIMITS[self.fleet].get(str(year))
+        gads_minimum = GADS_CAPACITY_LIMITS[self.fleet].get(self.ref_year(year))
         return self.ac_capacity >= gads_minimum  # returns None if minimum not defined for year
 
     def query_pi_data(self, start_date: str, end_date: str, q: bool = True):
@@ -260,7 +276,7 @@ class GADSSite(PISite):
         )
         for attpaths in [self.site_level_attribute_paths, self.asset_level_attribute_paths]:
             q_kwargs = {**kwargs, "freq": "1h"}
-            if len(attpaths) > 400:
+            if len(attpaths) > 250:
                 idx1 = int(round((len(attpaths) / 3), 0))
                 idx2 = idx1 * 2
                 paths_1 = attpaths[:idx1]
