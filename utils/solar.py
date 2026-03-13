@@ -114,6 +114,10 @@ class SolarDataset(Dataset):
                     df_.columns = df_.columns.map(str.lower)
                 elif "meter" in latest_fp.name.lower():
                     df_.columns = df_.columns.str.replace("_", ".")  # should be OE.MeterMW
+
+                if df_.index.diff().max() > pd.Timedelta(minutes=1):
+                    df_ = df_.resample("1min").interpolate()
+
                 df_list.append(df_)
                 self.source_files.append(str(latest_fp))
             except:

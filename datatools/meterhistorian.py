@@ -1,5 +1,6 @@
 import openpyxl
 import calendar
+from functools import lru_cache
 import pandas as pd
 import datetime as dt
 from pathlib import Path
@@ -54,6 +55,7 @@ def _validate_datetime_index(df):
     return df
 
 
+@lru_cache(maxsize=128)
 def load_meter_historian(year=None, month=None, dropna=True):
     df = pd.read_excel(METER_HISTORIAN_FILEPATH, engine="calamine")
     df = df.iloc[: df.Day.last_valid_index() + 1, :].copy()

@@ -212,8 +212,8 @@ def generate_monthlyFlashReport(
         pi_meter_fpath = oepaths.latest_file(site.get_data_filepaths(year, month, "Meter"))
         if pi_meter_fpath is not None:
             df_meter = site.load_query_file(year, month, asset_group="Meter")
-            df_meter = df_meter.resample("h").mean()
-            df_meter = df_meter.rename(columns={df_meter.columns[0]: sitename})
+            df_meter = df_meter.iloc[:, [0]].resample("h").mean()
+            df_meter.columns = [sitename]
             qprint(f'No utility meter found; Loaded PI Meter file ------ "{pi_meter_fpath.name}"')
             meterpath = pi_meter_fpath
         else:

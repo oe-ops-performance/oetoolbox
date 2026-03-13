@@ -1,332 +1,311 @@
 import calendar
 import openpyxl
 from openpyxl.utils.dataframe import dataframe_to_rows
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from sqlalchemy import create_engine
+from types import SimpleNamespace
 
 from ..utils import oepaths
 from ..utils.datetime import remove_tzinfo_and_standardize_index
-from ..utils.helpers import with_retries
+from ..utils.helpers import with_retries, quiet_print_function
 
 ## function to load most recently-created file in fpath list
 get_file = lambda fp_list: max((fp.stat().st_ctime, fp) for fp in fp_list)[1] if fp_list else None
 
 
-## COMANCHE CURTAILMENT REPORT
-## function to load supporting documents for curtailment report
-def load_curtailment_report_data(year, month, q=True, pvlib_scaling_factor=1):
-    qprint = lambda msg: None if q else print(msg)
-    frpath_ = Path(oepaths.frpath(year, month, ext="Solar"), "Comanche")
-    globstr_list = [f"PVLib_InvAC*Comanche*.csv", "PIQuery_Meter_*.csv", "PIQuery_PPC_*.csv"]
-    glob_fplists = list(map(lambda str_: list(frpath_.glob(str_)), globstr_list))
-    reqd_fpaths = list(map(get_file, glob_fplists))
-    if any((fp is None) for fp in reqd_fpaths):
-        print("Supporting file requirements not met.")
-        return pd.DataFrame()
-
-    ## load files
-    def load_file(fp):
-        df = pd.read_csv(fp, index_col=0, parse_dates=True)
-        if df.index.tzinfo is not None:
-            df = remove_tzinfo_and_standardize_index(df)
-        return df
-
-    df_pvl, df_mtr, df_ppc = map(load_file, reqd_fpaths)
-
-    qprint("Loaded the following files:")
-    for fp in reqd_fpaths:
-        qprint(f"    {fp.name}")
-    qprint("")
-
-    ## check for processed col in mtr
-    if df_mtr.shape[1] > 1:
-        df_mtr = df_mtr.iloc[:, :1]
-
-    ## get pvlib data
-    poacol = "POA" if "POA" in df_pvl.columns else "POA_DTN"
-    if poacol not in df_pvl.columns:
-        print("!! ERROR !!")  # shouldn't happen; exit function (if not in notebook)
-        return pd.DataFrame()
-    invcols = [c for c in df_pvl.columns if "Possible_Power" in c]
-    df_pvl["inv_sum"] = df_pvl[invcols].sum(axis=1).div(1e3)  # kW to MW
-    df_pvl.loc[df_pvl["inv_sum"].gt(120), "inv_sum"] = 120.0  # limit to site capacity
-
-    ## find ppc setpoint col
-    spcols_ = [c for c in df_ppc.columns if "setpoint" in c]
-    if not spcols_:
-        print("!! ERROR !!")  # shouldn't happen; exit function (if not in notebook)
-        return pd.DataFrame()
-    spcol = spcols_[0]
-
-    ## create new dataframe
-    df = df_pvl[[poacol, "inv_sum"]].join(df_mtr).join(df_ppc[[spcol]])
-    df.columns = ["poa", "pvlib", "meter", spcol.replace("_PPC", "")]
-    if pvlib_scaling_factor != 1:
-        df["pvlib"] = df["pvlib"].mul(pvlib_scaling_factor)
-
-    ## calculate lost energy from curtailment using conditions below
-    df.loc[:, "lost_nrg"] = float(0)  # init
-    c1 = df["xcel_MW_setpoint"].lt(120)
-    c2 = df["xcel_MW_setpoint"].lt(df["pvlib"])
-    c3 = df["pvlib"].gt(df["meter"])
-    df.loc[(c1 & c2 & c3), "lost_nrg"] = df["pvlib"].sub(df["meter"]).div(60).mul(1e3)
-
-    ## add curtailment rate column (fixed/constant)
-    df.loc[:, "curt_rate"] = 0.0625
-
-    ## add lost revenue column using ppc rate
-    df.loc[:, "lost_revenue"] = df["lost_nrg"].mul(df["curt_rate"])
-
-    ## add number of curtailments column (for curt. hours in summary table)
-    df.loc[:, "n_curtailments"] = int(0)
-    df.loc[df["lost_nrg"].gt(0), "n_curtailments"] = 1
-
-    return df
+REPORT_TEMPLATE_PATH = Path(
+    oepaths.solar, "Data", "Comanche", "Templates", "Curtailment_Report_TEMPLATE.xlsx"
+)
+FMT = SimpleNamespace(
+    datetime="yyyy-mm-dd hh:mm;@",
+    date="yyyy-mm-dd;@",
+    z4="0.0000",
+    z2="0.00",
+    rev="#,##0.00",
+    int="0",
+)
 
 
-## function to get summary table from req'd files (uses df from above function as input)
-def curtailment_summary_table(df, all_columns=False):
-    if df.empty:
-        return pd.DataFrame()
-    y, m = df.index[0].year, df.index[0].month
-    summary_cols = ["lost_nrg", "n_curtailments", "lost_revenue"]
-    if all_columns:
-        summary_cols.extend(["meter", "pvlib"])
-    dfs = df[summary_cols].rename(columns={"n_curtailments": "curt_hours"}).copy()
-    dfs = dfs.groupby(dfs.index.day).sum().copy()
-    dfs["curt_hours"] = dfs["curt_hours"].div(60)
-    if all_columns:
-        dfs["meter"] = dfs["meter"].div(60).mul(1e3)
-        dfs["pvlib"] = dfs["pvlib"].div(60).mul(1e3)
-    dfs.index = pd.to_datetime(
-        f"{y}-{m:02d}-" + dfs.index.astype(str).str.zfill(2), format="%Y-%m-%d"
-    )
-    return dfs
+class ComancheCurtailment:
+    def __init__(self, year: int, month: int, scaling_factor: float):
+        self.year = year
+        self.month = month
+        self.flashreport_path = oepaths.frpath(year, month, ext="solar", site="Comanche")
+        self.scaling_factor = scaling_factor
+        self.data = {  # everything is minute-level
+            "poa": None,  # dataframe with poa from pvlib file (sourced from PI or DTN)
+            "pi": None,  # dataframe with pvlib, pi meter, and ppc setpoint
+            "sql": None,  # dataframe with expected, sql meter, and curtailment
+        }
+        self.report_data = {
+            "pi": {"interval": None, "summary": None},
+            "sql": {"interval": None, "summary": None},
+        }
+        self.source_files = []
+        self._load_data_from_files()
+        self._query_sql_data()
 
+    def _load_data_from_files(self):
+        """Loads data from PI query and PVLib files in FlashReport folder.
+        -> self.data["poa"] - columns: ["POA" or "POA_DTN"]
+        -> self.data["pi"] - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment"]
+        -> updates self.source_files
+        """
 
-def comanche_reporting_timeseries(year, month):
-    start_ = pd.Timestamp(year, month, 1)
-    end_ = start_ + pd.DateOffset(months=1)
-    start_date, end_date = map(lambda ts: ts.strftime("%Y-%m-%d"), [start_, end_])
+        def getloadfile(pattern) -> pd.DataFrame:
+            fpath = oepaths.latest_file(list(self.flashreport_path.glob(pattern)))
+            if fpath is None:
+                raise ValueError(f"Missing required file: {pattern}")
+            self.source_files.append(fpath.name)
+            df = pd.read_csv(fpath, index_col=0, parse_dates=True)
+            if df.index.tzinfo is not None:
+                df = remove_tzinfo_and_standardize_index(df)
+            return df
 
-    ## create engine for connection to SQL server, then use pandas to get query results
-    engine = create_engine(
-        "mssql+pyodbc://CORP-OPSSQL/Comanche?driver=ODBC+Driver+17+for+SQL+Server"
-    )
-    with engine.connect() as conn, conn.begin():
-        df_sql = pd.read_sql_query(
-            """
-            DECLARE @StartDate date;
-            DECLARE @EndDate date;
+        # load pvlib file and get poa & site-level possible generation
+        df_pvl = getloadfile("PVLib_InvAC*.csv")
+        poacol = "POA" if "POA" in df_pvl.columns else "POA_DTN"
+        if poacol not in df_pvl.columns:
+            raise ValueError("Could not find POA column in pvlib dataset.")
+        if df_pvl.index.diff().max() > pd.Timedelta(minutes=1):
+            df_pvl = df_pvl.resample("1min").ffill()
+            df_pvl = df_pvl.reindex(df_mtr.index)
+            print("Warning: possible power native freq is 1-hour (uses DTN POA).")
 
-            SET @StartDate = ?;
-            SET @EndDate = ?;
+        # get poa data
+        self.data["poa"] = df_pvl[[poacol]].copy()
 
-            WITH CTE_POI AS
-            (
-            SELECT POIData.Timestamp_UTC
-                   ,POIData.Meter_KW/60.0 as [Meter_KWh]
-                   ,POIData.Park_Potential_KW/60.0 as [Expected_KWh]
-                   ,POIData.Power_Limit_SP as [PowerSP]
-                   ,CASE
-                       WHEN (POIData.Park_Potential_KW > POIData.Meter_KW)
-                           AND (POIData.Power_Limit_SP < 120000)
-                           AND (POIData.Park_Potential_KW > POIData.Power_Limit_SP)
-                           THEN (POIData.Park_Potential_KW/60.0) - (POIData.Meter_KW/60.0)
-                       WHEN (POIData.Park_Potential_KW <= POIData.Meter_KW)
-                           OR (POIData.Park_Potential_KW < 0)
-                           OR (POIData.Power_Limit_SP = 120000)
-                           OR (POIData.Park_Potential_KW < POIData.Power_Limit_SP)
-                           THEN 0
-                   END AS [Curtailed_KWh]
-            FROM [Comanche].dbo.POIData
-            )
-            SELECT DATEPART(YEAR, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC)) as [Year]
-                   ,DATEPART(MONTH, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC)) as [Mon]
-                   ,DATEPART(DAY, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC)) as [Day]
-                   ,DATEPART(HOUR, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC)) as [Hour]
-                   ,DATEPART(MINUTE, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC)) as [Minute]
-                   ,Avg([PowerSP]) as Avg_PowerSP
-                   ,Avg([Curtailed_KWh]) as Avg_CurtKWh
-                   ,Avg([Meter_KWh]) as Avg_MeterKWh
-                   ,Avg([Expected_KWh]) as Avg_ExpKWH
-            FROM CTE_POI
-            WHERE (DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC) >= @StartDate)
-            AND (DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC) < @EndDate)
-            GROUP BY DATEPART(YEAR, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC))
-                     ,DATEPART(MONTH, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC))
-                     ,DATEPART(DAY, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC))
-                     ,DATEPART(HOUR, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC))
-                     ,DATEPART(MINUTE, DATEADD(HOUR, -6, CTE_POI.Timestamp_UTC))
-            ORDER BY Year, Mon, Day, Hour, Minute
-            """,
-            con=conn,
-            params=(start_date, end_date),
+        # calculate pvlib inverter sum
+        pvlib_inv_sum = df_pvl.filter(like="Possible_Power").sum(axis=1).div(1e3)  # kW to MW
+        pvlib_inv_sum = pvlib_inv_sum.clip(upper=120.0)  # limit to site capacity
+        if self.scaling_factor != 1:
+            pvlib_inv_sum = pvlib_inv_sum.mul(self.scaling_factor)
+
+        # create df for data sourced from pi
+        df = pd.Series(pvlib_inv_sum, name="possible").to_frame()
+
+        # get pi meter data
+        df_mtr = getloadfile("PIQuery_Meter_*.csv")
+        df["meter"] = df_mtr.iloc[:, 0].copy()
+
+        # get ppc data
+        sp_col = "xcel_MW_setpoint"
+        df_ppc = getloadfile("PIQuery_PPC_*.csv")
+        if sp_col not in df_ppc.columns:
+            raise ValueError(f"Column '{sp_col}' not found in PPC dataset.")
+        df[sp_col] = df_ppc[sp_col].copy()
+
+        # create column for curtailed kW
+        is_curtailed = (
+            df[sp_col].lt(120.0) & df[sp_col].lt(df["possible"]) & df["possible"].gt(df["meter"])
         )
-    return df_sql
-
-
-## function to query Comanche SQL data for comparison to calculated values in summary table
-@with_retries(n_max=5)
-def sql_curtailment_summary(year, month, q=True):
-    start_ = pd.Timestamp(year, month, 1)
-    end_ = start_ + pd.DateOffset(months=1)
-    start_date, end_date = map(lambda ts: ts.strftime("%Y-%m-%d"), [start_, end_])
-
-    ## create engine for connection to SQL server, then use pandas to get query results
-    engine = create_engine(
-        "mssql+pyodbc://CORP-OPSSQL/Comanche?driver=ODBC+Driver+17+for+SQL+Server"
-    )
-    with engine.connect() as conn, conn.begin():
-        df_sql = pd.read_sql_query(
-            """
-            DECLARE @StartDate date;
-            DECLARE @EndDate date;
-
-            SET @StartDate = ?;
-            SET @EndDate = ?;
-
-            WITH CTE_POI AS
-                (
-                SELECT
-                    Timestamp_UTC
-                   ,Meter_KW/60.0 AS Meter_KWh
-                   ,Park_Potential_KW/60.0 AS Expected_KWh
-                   ,Power_Limit_SP AS Power_SP
-                   ,CASE
-                       WHEN (Park_Potential_KW > Meter_KW) AND (Power_Limit_SP < 120000) AND (Park_Potential_KW > Power_Limit_SP) THEN (Park_Potential_KW/60.0) - (Meter_KW/60.0)
-                       WHEN (Park_Potential_KW <= Meter_KW) OR (Park_Potential_KW < 0) OR (Power_Limit_SP = 120000) OR (Park_Potential_KW < Power_Limit_SP) THEN 0
-                    END AS Curtailed_KWh
-                FROM [Comanche].dbo.POIData
-                )
-            SELECT
-                DATEPART(YEAR, DATEADD(HOUR, -6, Timestamp_UTC)) AS Year
-               ,DATEPART(MONTH, DATEADD(HOUR, -6, Timestamp_UTC)) AS Month
-               ,DATEPART(DAY, DATEADD(HOUR, -6, Timestamp_UTC)) AS Day
-               ,Sum(Meter_KWh) AS Sum_MeterKWh
-               ,Sum(Curtailed_KWh) AS Sum_CurtKWh
-               ,Sum(Expected_KWh) AS Sum_ExpKWh
-            FROM CTE_POI
-            WHERE DATEADD(HOUR, -6, Timestamp_UTC) >= @StartDate AND DATEADD(HOUR, -6, Timestamp_UTC) < @EndDate
-            GROUP BY
-                 DATEPART(YEAR, DATEADD(HOUR, -6, Timestamp_UTC))
-                ,DATEPART(MONTH, DATEADD(HOUR, -6, Timestamp_UTC))
-                ,DATEPART(DAY, DATEADD(HOUR, -6, Timestamp_UTC))
-            ORDER BY Year, Month, Day
-            """,
-            con=conn,
-            params=(start_date, end_date),
+        # NOTE: this is in kW; converted to kWh in subsequent steps
+        df["curtailment"] = np.where(  # poss/meter are in MW
+            is_curtailed, df["possible"].sub(df["meter"]).mul(1e3), 0.0
         )
-    return df_sql
 
+        # assign pi data - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment"]
+        self.data["pi"] = df.copy()
 
-## main function to generate Comanche monthly curtailment report
-# TODO: create two separate sheets for PI data & SQL data, then can remove whichever sheet & re-save as "_XCEL" copy
-def generate_curtailment_report(
-    year, month, local=False, scaling_factor=1, include_sql=True, q=True
-):
-    qprint = lambda msg, end="\n": None if q else print(msg, end=end)
+    def _query_sql_data(self):
+        """Queries interval data from SQL.
+        -> self.data["sql"] - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment"]
+        """
+        df = comanche_reporting_timeseries(self.year, self.month)
+        df = df.rename(
+            columns={
+                "Expected_KW": "possible",
+                "Meter_KW": "meter",
+                "Power_SP_KW": "xcel_MW_setpoint",
+                "Curtailed_KW": "curtailment",
+            }
+        )
+        mw_cols = ["possible", "meter", "xcel_MW_setpoint"]
+        df[mw_cols] = df[mw_cols].div(1e3)  # convert kW to MW
+        self.data["sql"] = df.copy()
 
-    df = load_curtailment_report_data(year, month, q=q, pvlib_scaling_factor=scaling_factor)
-    dfs = curtailment_summary_table(df)
-    if dfs.empty:
-        print("Error generating report.\nExiting..")
+    def _generate_report_interval_data(self, source):
+        # combine: [poa, possible, meter, xcel_MW_setpoint, curtailment]
+        df = self.data[source].copy()
+        df.insert(0, "poa", self.data["poa"])
+        df["curt_rate"] = 0.0625  # units: $/kWh
+
+        # convert curtailment data from power (kW) to energy (kWh)
+        df["curtailment"] = df["curtailment"].div(60)  # minute-level data
+
+        df["lost_revenue"] = df["curtailment"].mul(df["curt_rate"])
+        df["n_curtailments"] = np.where(df["curtailment"].gt(0), 1, 0)  # for summary table
+        self.report_data[source]["interval"] = df.copy()
+
+    def _generate_daily_summary_table(self, source):
+        # get report interval data
+        df = self.report_data[source]["interval"].copy()
+        summary_cols = ["curtailment", "n_curtailments", "lost_revenue"]
+        df = df[summary_cols].rename(columns={"n_curtailments": "curt_hours"})
+        df = df.groupby(df.index.day).sum()
+        df["curt_hours"] = df["curt_hours"].div(60)
+        df.index = pd.to_datetime(
+            f"{self.year}-{self.month:02d}-" + df.index.astype(str).str.zfill(2),
+            format="%Y-%m-%d",
+        )
+        self.report_data[source]["summary"] = df.copy()
+
+    def _generate_data_for_report(self):
+        for source in ("pi", "sql"):
+            self._generate_report_interval_data(source=source)
+            self._generate_daily_summary_table(source=source)
+
+    @classmethod
+    def load(cls, year: int, month: int, scaling_factor: float = 1.0):
+        curt = cls(
+            year=year,
+            month=month,
+            scaling_factor=scaling_factor,
+        )
+        curt._generate_data_for_report()
+        return curt
+
+    def compare_totals(self):
+        print(f"Total curtailment losses:")
+        for source, dict_ in self.report_data.items():
+            lost_mw = dict_["interval"]["curtailment"].sum() / 1e3  # curtailment is in kW
+            print(f"   {source.rjust(3)} -> {lost_mw:.2f}")
         return
 
-    if include_sql:
-        qprint("Querying SQL data... ", end="")
-        dfsql = sql_curtailment_summary(year, month)
-        qprint("done!\n")
+    def generate_report(self, source, q=True, local=False):
+        qprint = quiet_print_function(q=q)
+        df = self.report_data[source]["interval"].copy()
+        dfs = self.report_data[source]["summary"].copy()
 
-    ## reset index of df and dfs (for dataframe_to_rows function)
-    df = df.resample("5min").mean().copy()
-    df = df.reset_index(drop=False)
-    dfs = dfs.reset_index(drop=False)
+        # resample to 5-minute interval data, reset index for dataframe_to_rows function
+        df = df.resample("5min").mean().copy()
+        df = df.reset_index(drop=False)
+        dfs = dfs.reset_index(drop=False)
 
-    ## get path of curtailment report template
-    tpath_ = Path(
-        oepaths.solar, "Data", "Comanche", "Templates", "Curtailment_Report_TEMPLATE.xlsx"
-    )
+        # open Excel template workbook
+        qprint("Generating report... ", end="")
+        wb = openpyxl.load_workbook(REPORT_TEMPLATE_PATH)
+        ws = wb["Curtailment_ONW"]
 
-    ## establish cell number format strings
-    fmt_datetime = "yyyy-mm-dd hh:mm;@"
-    fmt_date = "yyyy-mm-dd;@"
-    fmt_4z = "0.0000"
-    fmt_2z = "0.00"
-    fmt_rev = "#,##0.00"
-    fmt_int = "0"
-
-    ## OPEN WORKBOOK (template)
-    qprint("Generating report... ", end="")
-    wb = openpyxl.load_workbook(tpath_)
-    ws = wb["Curtailment_ONW"]
-
-    ## MAIN DATA TABLE (from df)
-    ## cols. A-I:     [Timestamp,  poa,  pvlib,  meter, xcel_sp, lost_nrg,  rate, lost_rev, n_curt]
-    rng1_formats = [fmt_datetime, fmt_4z, fmt_4z, fmt_4z, fmt_2z, fmt_4z, fmt_4z, fmt_rev, fmt_int]
-    for r, row in enumerate(dataframe_to_rows(df, index=False, header=False)):
-        for c, val in enumerate(row):
-            ws.cell(r + 2, c + 1).value = val
-            ws.cell(r + 2, c + 1).number_format = rng1_formats[c]
-
-    ## SUMMARY TABLE (from dfs)
-    ## cols. L-O: [Timestamp, lost_nrg, curt_hrs, lost_rev]
-    rng2_formats = [fmt_date, fmt_2z, fmt_2z, fmt_rev]
-    rng2_offset = 12  # starts at col idx 12
-    for r, row in enumerate(dataframe_to_rows(dfs, index=False, header=False)):
-        for c, val in enumerate(row):
-            cell = ws.cell(r + 2, c + rng2_offset)
-            cell.value = val
-            cell.number_format = rng2_formats[c]
-
-    totals_row = 33  # hard-coded (to accommodate months with diff # of days)
-    totals_cols = ["lost_nrg", "curt_hours", "lost_revenue"]
-    totals_formats = [fmt_rev, fmt_2z, fmt_rev]
-    for c, col in enumerate(totals_cols):
-        col_idx = c + rng2_offset + 1
-        cell = ws.cell(totals_row, col_idx)
-        cell.value = dfs[col].sum()
-        cell.number_format = totals_formats[c]
-        if col_idx == 13:
-            ws.cell(totals_row + 1, col_idx).value = dfs[col].sum() / 1000
-            ws.cell(totals_row + 1, col_idx).number_format = totals_formats[c]
-
-    ## SQL SUMMARY TABLE (from dfsql)
-    ## cols. R-W:  [Year, Month, Day, Sum_Meter, Sum_Curt, Sum_Expected]
-    if include_sql:
-        rng3_formats = [fmt_int] * 3 + [fmt_2z] * 3
-        rng3_offset = 18  # starts at col idx 18
-        for r, row in enumerate(dataframe_to_rows(dfsql, index=False, header=False)):
+        # write main data table using interval dataframe
+        # cols. A-I:  [Timestamp, poa,pvlib,meter, xcel_sp, curtailment, rate, lost_rev, n_curt]
+        rng1_formats = [FMT.datetime] + [FMT.z4] * 3 + [FMT.z2, FMT.z4, FMT.z4, FMT.rev, FMT.int]
+        for r, row in enumerate(dataframe_to_rows(df, index=False, header=False)):
             for c, val in enumerate(row):
-                cell = ws.cell(r + 2, c + rng3_offset)
+                ws.cell(r + 2, c + 1).value = val
+                ws.cell(r + 2, c + 1).number_format = rng1_formats[c]
+
+        # SUMMARY TABLE (from dfs)
+        # cols. L-O: [Timestamp, curtailment, curt_hrs, lost_rev]
+        rng2_formats = [FMT.date, FMT.z2, FMT.z2, FMT.rev]
+        rng2_offset = 12  # starts at col idx 12
+        for r, row in enumerate(dataframe_to_rows(dfs, index=False, header=False)):
+            for c, val in enumerate(row):
+                cell = ws.cell(r + 2, c + rng2_offset)
                 cell.value = val
-                cell.number_format = rng3_formats[c]
+                cell.number_format = rng2_formats[c]
 
-        sql_curt_col = rng3_offset + 4
-        sql_curt_kwh = dfsql["Sum_CurtKWh"].sum()
-        ws.cell(totals_row, sql_curt_col).value = sql_curt_kwh
-        ws.cell(totals_row, sql_curt_col).number_format = fmt_rev
-        ws.cell(totals_row + 1, sql_curt_col).value = sql_curt_kwh / 1000
-        ws.cell(totals_row + 1, sql_curt_col).number_format = fmt_rev
+        totals_row = 33  # hard-coded (to accommodate months with diff # of days)
+        totals_cols = ["curtailment", "curt_hours", "lost_revenue"]
+        totals_formats = [FMT.rev, FMT.z2, FMT.rev]
+        for c, col in enumerate(totals_cols):
+            col_idx = c + rng2_offset + 1
+            cell = ws.cell(totals_row, col_idx)
+            cell.value = dfs[col].sum()
+            cell.number_format = totals_formats[c]
+            if col_idx == 13:
+                ws.cell(totals_row + 1, col_idx).value = dfs[col].sum() / 1000
+                ws.cell(totals_row + 1, col_idx).number_format = totals_formats[c]
 
-        ref_kwh_lost = dfs["lost_nrg"].sum()  # from first summary table (for comparison)
-        ws.cell(totals_row + 2, sql_curt_col).value = (sql_curt_kwh - ref_kwh_lost) / ref_kwh_lost
-        ws.cell(totals_row + 2, sql_curt_col).number_format = "0.00%"
-    else:
+        # remove columns previously used for including sql data - TODO: update template
         ws.delete_cols(idx=17, amount=7)  # cols Q through W
 
-    ## SAVE FILE TO FLASHREPORT FOLDER
-    spath_ = Path(oepaths.frpath(year, month, ext="Solar"), "Comanche")
-    if local:
-        spath_ = Path.home().joinpath("Downloads")
-    fname_ = f"Comanche_Curtailment_Report_{calendar.month_abbr[month]}-{year}.xlsx"
-    savepath = oepaths.validated_savepath(Path(spath_, fname_))
+        if local is True:
+            savedir = Path.home().joinpath("Downloads")
+        else:
+            savedir = self.flashreport_path
+        fname_ext = f"{calendar.month_abbr[self.month]}-{self.year}"
+        filename = f"Comanche_Curtailment_Report_{fname_ext}.xlsx"
+        savepath = oepaths.validated_savepath(Path(savedir, filename))
 
-    wb.save(savepath)
-    wb.close()
-    qprint(f'done!\n    >> saved file: "{fname_}"')
-    return
+        wb.save(savepath)
+        wb.close()
+        qprint(f'done!\n    >> saved file: "{filename}"')
+        return
+
+
+@with_retries(n_max=3)
+def comanche_reporting_timeseries(year, month, q=True) -> pd.DataFrame:
+    """Queries interval data from Comanche SQL database.
+
+    Returns
+    -------
+    pd.DataFrame
+        A dataframe with columns: Expected_KWh, Meter_KWh, Power_SP, Curtailed_KWh
+    """
+    qprint = quiet_print_function(q=q)
+
+    start = pd.Timestamp(year, month, 1)
+    end = start + pd.DateOffset(months=1)
+    start_date, end_date = map(lambda ts: ts.strftime("%Y-%m-%d"), [start, end])
+
+    # create engine for connection to SQL server, then use pandas to get query results
+    engine = create_engine(
+        "mssql+pyodbc://CORP-OPSSQL/Comanche?driver=ODBC+Driver+17+for+SQL+Server"
+    )
+    with engine.connect() as conn, conn.begin():
+        df = pd.read_sql_query(
+            """
+            DECLARE @startDate date;
+            DECLARE @endDate date;
+
+            SET @startDate = ?;
+            SET @endDate = ?;
+
+            SELECT
+                Timestamp_UTC
+                ,Park_Potential_KW AS Expected_KW
+                ,Meter_KW AS Meter_KW
+                ,Power_Limit_SP AS Power_SP_KW
+                ,CASE
+                    WHEN (Park_Potential_KW > Meter_KW)
+                        AND (Power_Limit_SP < 120000)
+                        AND (Park_Potential_KW > Power_Limit_SP)
+                    THEN Park_Potential_KW - Meter_KW
+                    ELSE 0
+                END AS Curtailed_KW
+            FROM [Comanche].dbo.POIData
+            WHERE DATEADD(HOUR, -6, Timestamp_UTC) BETWEEN @startDate AND @endDate
+            ORDER BY Timestamp_UTC;
+            """,
+            con=conn,
+            params=(start_date, end_date),
+        )
+
+    df["Timestamp"] = df["Timestamp_UTC"] - pd.Timedelta(hours=6)
+    df = df.set_index("Timestamp").drop(columns=["Timestamp_UTC"])
+
+    # format/validate index
+    idx_kwargs = dict(start=start_date, end=end_date, freq="1min")
+    expected_sql_index = pd.date_range(**idx_kwargs, inclusive="both")
+    n_diff = len(df.index) - len(expected_sql_index)
+    if n_diff != 0:
+        if month == 3 and n_diff < 0:
+            # missing hour (60 missing timestamps)
+            pass  # reindexed below
+        elif month == 11 and n_diff > 0:
+            # extra hour (60 extra/duplicate timestamps)
+            df = df[~df.index.duplicated(keep="first")]
+        else:
+            raise ValueError("Unexpected timestamp mismatch in SQL output.")
+        df = df.reindex(expected_sql_index)
+        qprint("Reindexed DST condition")
+
+    expected_index = pd.date_range(**idx_kwargs, inclusive="left")
+    df = df.reindex(expected_index)
+    return df
 
 
 def get_comanche_curtailment(year, month, return_fpath: bool = False):

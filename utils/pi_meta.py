@@ -2,11 +2,7 @@ import clr, sys
 
 sys.path.append(r"C:\Program Files (x86)\PIPC\AF\PublicAssemblies\4.0")
 clr.AddReference("OSIsoft.AFSDK")
-import OSIsoft  # type: ignore
 from OSIsoft.AF import AFObject, PISystems  # type: ignore
-
-pisystem = PISystems().DefaultPISystem
-database = pisystem.Databases.get_Item("Onward Energy")
 
 
 class PISiteElement:
@@ -14,6 +10,8 @@ class PISiteElement:
 
     def __init__(self, fleet: str, site_name: str, q: bool = True):
 
+        pisystem = PISystems().DefaultPISystem
+        database = pisystem.Databases.get_Item("Onward Energy")
         if not any(x in fleet.lower() for x in ["gas", "solar", "wind"]):
             raise ValueError("Invalid fleet specified.")
 
@@ -40,8 +38,6 @@ class PISiteElement:
         """Returns a dictionary with all existing element names (groups, assets, etc.)
         -> note: directly from PI (i.e. not from meta JSON files)
         """
-        if not q:
-            print("Loading AF structure from PI", end=" ... ")
         hierarchy = {}
         for group_element in self.element.Elements:
             group_name = group_element.Name
@@ -78,8 +74,6 @@ class PISiteElement:
 
             hierarchy[group_name] = group_hierarchy
 
-        if not q:
-            print("done.")
         self.hierarchy = hierarchy
 
     def _another_level_exists(self, element):
@@ -183,3 +177,27 @@ class PISiteElement:
         element_path = self._get_element_path(asset_group, asset, sub_asset, sub_2_asset)
         element = self._get_element_from_path(element_path)
         return self._get_element_attributes(element)
+
+    def _validate_asset_args(self, asset_group: str, asset_names: list):
+        self._validate_asset_group(asset_group)
+        for asset in asset_names:
+            self._validate_asset(asset_group, asset_name=asset)
+        return
+
+    def build_attribute_path_list(
+        self,
+        asset_group: str = "",
+        asset_names: list = [],
+        attributes: list = [],
+    ):
+        self._validate_asset_args(asset_group=asset_group, asset_names=asset_names)
+        grp_path = self._get_element_path(asset_group=asset_group)
+        specified = lambda attlist: [a for a in attributes if a in attlist]  # validates
+        if len(asset_names) == 0:
+            grp_atts = self.get_attribute_names(asset_group=asset_group)
+            return [f"{grp_path}|{att}" for att in specified(grp_atts)]
+        attribute_paths = []
+        for asset in asset_names:
+            asset_atts = self.get_attribute_names(asset_group=asset_group, asset=asset)
+            attribute_paths.extend([f"{grp_path}\\{asset}|{att}" for att in specified(asset_atts)])
+        return attribute_paths
