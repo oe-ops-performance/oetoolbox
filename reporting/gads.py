@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from ..reporting.query_attributes import attribute_path
 from ..utils import oemeta, oepaths
 from ..utils.assets import PISite
 from ..utils.helpers import quiet_print_function
