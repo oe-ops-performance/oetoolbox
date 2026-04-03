@@ -149,25 +149,39 @@ class SolarDataset(Dataset):
         end_date: str,
         asset_group: str,
         freq: str,
+        method: str = "summaries",
         keep_tzinfo: bool = False,
         data_format: str = "wide",
+        n_segment: int = 11,
         q: bool = True,
+        raise_error: bool = True,
     ):
         """Queries data from PI for pre-defined attributes used in monthly reporting."""
         site = SolarSite(site_name)
-        query_att_dict = site.get_reporting_query_attributes()
+        query_att_dict = site.query_attributes
         attribute_paths = query_att_dict.get(asset_group, [])
 
+        dataset = cls(site, start_date, end_date)
         if not attribute_paths:
+            if raise_error is False:
+                return dataset
             err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
             raise KeyError(f"{err_msg}\nSupported asset groups: {[*query_att_dict]}")
 
-        dataset = cls(site, start_date, end_date)
-        dataset._query_data_from_pi(attribute_paths, freq, keep_tzinfo, data_format, q)
+        dataset._query_data_from_pi(
+            attribute_paths, freq, method, keep_tzinfo, data_format, n_segment, q
+        )
         return dataset
 
     def _query_data_from_pi(
-        self, attribute_paths: list, freq: str, keep_tzinfo: bool, data_format: str, q: bool
+        self,
+        attribute_paths: list,
+        freq: str,
+        method: str,
+        keep_tzinfo: bool,
+        data_format: str,
+        n_segment: int,
+        q: bool,
     ):
         dataset = PIDataset.from_attribute_paths(
             site_name=self.site.name,
@@ -175,8 +189,10 @@ class SolarDataset(Dataset):
             start_date=self.start_date,
             end_date=self.end_date,
             freq=freq,
+            method=method,
             keep_tzinfo=keep_tzinfo,
             data_format=data_format,
+            n_segment=n_segment,
             q=q,
         )
         # TEMP
@@ -186,6 +202,51 @@ class SolarDataset(Dataset):
             ]
         self.data = dataset.data.copy()
         self.invalid_items = dataset.invalid_items
+
+    @classmethod
+    def express_query(
+        cls,
+        site,
+        start_date,
+        end_date,
+        groups,
+        freq="1h",
+        method="summaries",
+        with_tz=True,
+        with_qc=True,
+        with_backfill=True,
+        q=True,
+    ) -> dict[str, pd.DataFrame]:
+        qprint = quiet_print_function(q=q)
+        # groups is list, or a dict of {group: freq}
+        # ["dtn", "combiners", "inverters", "meter", "met_stations", "ppc"]
+        args = [site, start_date, end_date]
+        instance = cls(*args)
+        if type(groups) is list:
+            groups = {grp: freq for grp in groups}
+        data = {}
+        for grp, freq in groups.items():
+            qprint(f"Querying data for {grp} ({freq=})...")
+            if grp == "dtn":
+                df = instance.from_dtn(*args, q=q)
+            else:
+                asset_group = grp.replace("_", " ").title()
+                df = instance.from_defined_query_attributes(
+                    *args,
+                    asset_group=asset_group,
+                    freq=freq,
+                    method=method,
+                    keep_tzinfo=with_tz,
+                    q=q,
+                    raise_error=False,
+                )
+            if df is None:
+                qprint(f">>> no data found for {grp=}.")
+                continue
+            qprint(f">>> added data for {grp=}.")
+            data[grp] = df.copy()
+
+        return data
 
     @classmethod
     def from_pi_for_monthly_report(
