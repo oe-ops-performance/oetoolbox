@@ -456,8 +456,13 @@ class PIDataset(Dataset):
             return dataframe
         df = dataframe.copy()
         is_object_col = lambda col: col.endswith("_ID") or col in ["Attribute", "PIPoint"]
-        numeric_cols = [c for c in df.columns if not is_object_col(c)]
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce").copy()
+        expected_numeric_cols = [c for c in df.columns if not is_object_col(c)]
+        df[expected_numeric_cols] = df[expected_numeric_cols].apply(pd.to_numeric, errors="coerce")
+
+        for dtype in ("float", "integer"):
+            dtype_cols = list(df.select_dtypes(include=dtype).columns)
+            df[dtype_cols] = df[dtype_cols].apply(pd.to_numeric, downcast=dtype)
+
         df.index = pd.to_datetime(df.index.astype(str), utc=True)
         df = df.tz_convert(tz=self.site.timezone)
         if self.tz is None:
