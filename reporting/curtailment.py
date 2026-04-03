@@ -180,7 +180,12 @@ class ComancheCurtailment:
         dfs = self.report_data[source]["summary"].copy()
 
         # resample to 5-minute interval data, reset index for dataframe_to_rows function
-        df = df.resample("5min").mean().copy()
+        sum_cols = ["curtailment", "lost_revenue", "n_curtailments"]
+        df = (
+            df.resample("5min")
+            .agg({c: "sum" if c in sum_cols else "mean" for c in df.columns})
+            .copy()
+        )
         df = df.reset_index(drop=False)
         dfs = dfs.reset_index(drop=False)
 
@@ -232,7 +237,7 @@ class ComancheCurtailment:
 
         wb.save(savepath)
         wb.close()
-        qprint(f'done!\n    >> saved file: "{filename}"')
+        qprint(f'done!\n    >> saved file: "{savepath.name}"')
         return
 
 
