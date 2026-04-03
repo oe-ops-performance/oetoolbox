@@ -12,8 +12,7 @@ from ..reporting.functions import (
     load_kpis_from_flashreport,
 )
 from ..reporting.tools import get_solar_budget_values
-from ..reporting.query_attributes import attribute_path, monthly_query_attribute_paths
-from .pi_meta import PISiteElement
+from ..reporting.query_attributes import attribute_path, get_solar_attributes
 
 
 class PISite:
@@ -50,19 +49,7 @@ class PISite:
     @property
     def af_dict(self) -> dict:
         """Returns dictionary of PI AF structure/metadata"""
-        af_dict = oemeta.data[self.fleet_key].get(self.name)
-        if "Met Station" in af_dict.keys():
-            af_dict["Met Stations"] = af_dict["Met Station"].copy()
-            af_dict["Met Stations"]["Met Stations_Assets"] = af_dict["Met Station"][
-                "Met Station_Assets"
-            ].copy()
-            af_dict["Met Stations"]["Met Stations_Attributes"] = af_dict["Met Station"][
-                "Met Station_Attributes"
-            ].copy()
-            del af_dict["Met Stations"]["Met Station_Assets"]
-            del af_dict["Met Stations"]["Met Station_Attributes"]
-            del af_dict["Met Station"]
-        return af_dict
+        return oemeta.data[self.fleet_key].get(self.name, {})
 
     @property
     def asset_heirarchy(self) -> dict:
@@ -70,8 +57,6 @@ class PISite:
         -> if no assets, {asset_group: []}
         -> assets in list if no subassets, otherwise keys of dict w/ list of subassets as values
         """
-        if not self.af_dict:
-            return
         heirarchy = {}
         subassets_exist = lambda dict_: any(dict_[a].get(f"{a}_Subassets") for a in dict_)
         for asset_group, group_dict in self.af_dict.items():
@@ -99,16 +84,10 @@ class PISite:
     @property
     def asset_names_by_group(self) -> dict:
         """Returns dictionary with asset groups as keys, and asset names as values"""
-        if self.name != "Richland":
-            return {
-                group: list(self.af_dict[group][f"{group}_Assets"].keys())
-                for group in self.asset_groups
-            }
-        names = {}
-        pi_element = PISiteElement(fleet=self.fleet, site_name=self.name)
-        for group in self.asset_groups:
-            names[group] = pi_element.get_asset_names(asset_group=group)
-        return names
+        return {
+            group: list(self.af_dict[group][f"{group}_Assets"].keys())
+            for group in self.asset_groups
+        }
 
     @property
     def timezone(self) -> str:
@@ -274,58 +253,10 @@ class SolarSite(PISite):
     def query_attributes(self) -> dict:
         """Returns dictionary with asset groups as keys and list of attribute paths as values"""
         try:
-            attribute_dict = monthly_query_attribute_paths(self.name)
+            attribute_dict = get_solar_attributes(self.name, validated=True)
         except:
             attribute_dict = {}
         return attribute_dict
-
-    def get_reporting_query_attributes(
-        self, asset_group=None, validated=False, raise_errors=False
-    ) -> dict:
-        """Returns dict of reporting attribute paths for relevant groups using standard OE. attributes."""
-        original_asset_group = asset_group
-        RETURN_ALL = asset_group is None
-        STANDARD_ATTRIBUTES = {
-            "Inverters": ["OE.ActivePower"],
-            "Met Stations": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],
-            "Met Station": ["OE.POA", "OE.Ambient_Temp", "OE.Module_Temp", "OE.Wind_Speed"],  # TEMP
-            "Meter": ["OE.MeterMW"],
-            "Modules": ["OE.ModulesOffline", "OE.ModulesOffline_Percent"],  # site-level attributes
-            "PPC": ["xcel_MW_cmd_request", "xcel_MW_setpoint"],  # TEMP: only for Comanche
-        }
-        valid_groups = [x for x in self.asset_groups if x in STANDARD_ATTRIBUTES]
-        if "Meter" not in valid_groups:
-            valid_groups.append("Meter")  # for Somers
-
-        if "Inverters" in valid_groups:
-            valid_groups.append("Modules")
-
-        if "PPC" in valid_groups and self.name != "Comanche":
-            valid_groups.remove("PPC")  # temp
-
-        if not valid_groups:
-            return {}
-        if asset_group is not None:
-            if asset_group not in valid_groups:
-                raise ValueError("Invalid asset group specified.")
-            valid_groups = [asset_group]
-
-        output = {}
-        for group in valid_groups:
-            asset_names = self.asset_names_by_group.get(group, [])
-            attributes = STANDARD_ATTRIBUTES[group]
-            asset_group = group if group not in ("Meter", "Modules") else ""
-            output[group] = self.get_attribute_paths(
-                asset_group=asset_group,
-                asset_names=asset_names,
-                attributes=attributes,
-                only_valid=validated,
-                raise_validation_errors=raise_errors,
-            )
-
-        if not RETURN_ALL:
-            return output.get(original_asset_group, [])
-        return output
 
     @property
     def existing_report_periods(self):

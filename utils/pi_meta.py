@@ -5,6 +5,154 @@ clr.AddReference("OSIsoft.AFSDK")
 from OSIsoft.AF import AFObject, PISystems  # type: ignore
 
 
+class PIDatabase:
+    def __init__(self, database_name: str = "Onward Energy"):
+        self.pisystem = PISystems().DefaultPISystem
+        self.name = database_name
+        self._get_database_object()
+        self.hierarchy = {}
+
+    def _get_database_object(self):
+        existing_dbs = [x.Name for x in self.pisystem.Databases]
+        if self.name not in existing_dbs:
+            raise KeyError(f"Name '{self.name}' is invalid. Existing databases: {existing_dbs}")
+        self.db = self.pisystem.Databases.get_Item(self.name)
+
+    def generate_hierarchy(self, fleet=None) -> dict:
+        """Returns a dictionary with all existing element names (fleets, sites, groups, assets, etc.)
+        -> note: directly from PI (i.e. not from meta JSON files)
+        """
+        if not self.name.startswith("Onward Energy"):
+            print(f"Database {self.name} is currently not supported for this function.")
+            return {}
+        if str(fleet) not in ("None", "gas", "wind", "solar"):
+            print(f"Fleet {fleet} is currently not supported for this function.")
+            return {}
+
+        if fleet is None:
+            start_element = self.db
+        else:
+            database_path = self.db.GetPath()
+            if "gas" in fleet.lower():
+                fleet_path = f"{database_path}\\Gas Fleet"
+            else:
+                fleet_id = "Solar" if "solar" in fleet.lower() else "Wind"
+                fleet_path = f"{database_path}\\Renewable Fleet\\{fleet_id} Assets"
+            start_element = AFObject.FindObject(fleet_path)
+            if start_element is None:
+                raise Exception("Unknown error finding element for specified fleet/site.")
+
+        hierarchy = {}
+
+        # level 0 (top-level)
+        for element_0 in start_element.Elements:
+            #  site-level elements
+            name_0 = element_0.Name
+            if element_0.Elements.Count == 0:
+                hierarchy[name_0] = []
+                continue
+            if not self._another_level_exists(element_0):
+                hierarchy[name_0] = [e.Name for e in element_0.Elements]
+                continue
+
+            hierarchy_0 = {}
+
+            # level 1
+            for element_1 in element_0.Elements:
+                #  asset group-level elements
+                name_1 = element_1.Name
+                if element_1.Elements.Count == 0:
+                    hierarchy_0[name_1] = []
+                    continue
+                if not self._another_level_exists(element_1):
+                    hierarchy_0[name_1] = [e.Name for e in element_1.Elements]
+                    continue
+
+                hierarchy_1 = {}
+
+                # level 2
+                for element_2 in element_1.Elements:
+                    # asset-level elements
+                    name_2 = element_2.Name
+                    if element_2.Elements.Count == 0:
+                        hierarchy_1[name_2] = []
+                        continue
+                    if not self._another_level_exists(element_2):
+                        hierarchy_1[name_2] = [e.Name for e in element_2.Elements]
+                        continue
+
+                    hierarchy_2 = {}
+
+                    # level 3
+                    for element_3 in element_2.Elements:
+                        # subasset-level elements
+                        name_3 = element_3.Name
+                        if element_3.Elements.Count == 0:
+                            hierarchy_2[name_3] = []
+                            continue
+                        if not self._another_level_exists(element_3):
+                            hierarchy_2[name_3] = [e.Name for e in element_3.Elements]
+                            continue
+
+                        hierarchy_3 = {}
+
+                        # level 4
+                        for element_4 in element_3.Elements:
+                            # sub-subasset-level elements
+                            name_4 = element_4.Name
+                            if element_4.Elements.Count == 0:
+                                hierarchy_3[name_4] = []
+                                continue
+                            if not self._another_level_exists(element_4):
+                                hierarchy_3[name_4] = [e.Name for e in element_4.Elements]
+                                continue
+
+                            hierarchy_4 = {}
+
+                            # level 5
+                            for element_5 in element_4.Elements:
+                                name_5 = element_5.Name
+                                if element_5.Elements.Count == 0:
+                                    hierarchy_4[name_5] = []
+                                    continue
+                                if not self._another_level_exists(element_5):
+                                    hierarchy_4[name_5] = [e.Name for e in element_5.Elements]
+                                    continue
+
+                                hierarchy_5 = {}
+
+                                # level 6
+                                for element_6 in element_5.Elements:
+                                    name_6 = element_6.Name
+                                    if element_6.Elements.Count == 0:
+                                        hierarchy_5[name_6] = []
+                                        continue
+                                    if not self._another_level_exists(element_6):
+                                        hierarchy_5[name_6] = [e.Name for e in element_6.Elements]
+                                    else:
+                                        print("WARNING -- additional levels exist")
+
+                                hierarchy_4[name_5] = hierarchy_5
+
+                            hierarchy_3[name_4] = hierarchy_4
+
+                        hierarchy_2[name_3] = hierarchy_3
+
+                    hierarchy_1[name_2] = hierarchy_2
+
+                hierarchy_0[name_1] = hierarchy_1
+
+            hierarchy[name_0] = hierarchy_0
+
+        self.hierarchy = hierarchy
+
+    def _another_level_exists(self, element):
+        """Returns True if any of the sub_elements have additional elements."""
+        if element.Elements.Count == 0:
+            return False
+        return any(e.Elements.Count > 0 for e in element.Elements)
+
+
 class PISiteElement:
     """A class for accessing PI Element metadata via AFSDK."""
 

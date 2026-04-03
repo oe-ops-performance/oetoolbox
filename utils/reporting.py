@@ -173,18 +173,11 @@ class FlashReportGenerator:
             flashreport_folder.mkdir(parents=True)
         self.folder = flashreport_folder
 
-        # print warning if utility meter data not provided
-        if df_util is None:
-            print(
-                "Note: recommended to provide df_util if using in loop to for multiple sites.\n"
-                "If not provided, meter historian will be loaded if any of the following methods\n"
-                'are called: "get_report_status", "create_monthly_report", "create_monthly_subplots".'
-            )
-        elif not isinstance(df_util, pd.DataFrame):
-            if df_util != "ignore_warning":
+        if not isinstance(df_util, pd.DataFrame) and df_util is not None:
+            if str(df_util) != "ignore_warning":
                 raise ValueError("Argument 'df_util' must be a DataFrame.")
-            df_util = None
-
+            else:
+                df_util = None  # preserve existing behavior
         self.df_util = df_util
 
     def __str__(self):
@@ -221,14 +214,9 @@ class FlashReportGenerator:
         return [self.site.name, self.year, self.month]
 
     @property
-    def query_attributes(self) -> dict[str, list]:
-        """Dictionary of reporting attribute paths for relevant groups using standard OE. attributes."""
-        return self.site.get_reporting_query_attributes(validated=False)
-
-    @property
     def query_groups(self) -> list[str]:
         """Returns list of asset groups with defined monthly query attributes."""
-        return list(self.query_attributes.keys())
+        return list(self.site.query_attributes.keys())
 
     @property
     def flashreport_fpaths(self) -> dict[str, list]:
@@ -455,7 +443,7 @@ class FlashReportGenerator:
         return validated_savepath(Path(self.folder, filename))
 
     def run_pi_query(
-        self, asset_group, freq=None, skip_if_exists=True, save=True, q=True
+        self, asset_group, freq=None, keep_tzinfo=True, skip_if_exists=True, save=True, q=True
     ) -> Union[pd.DataFrame, None]:
         """Runs monthly PI query."""
         qprint = quiet_print_function(q=q)
@@ -463,6 +451,7 @@ class FlashReportGenerator:
         if skip_if_exists and self.query_status[asset_group] is True and save is True:
             qprint(f"Found existing PI query file for {asset_group}. ({skip_if_exists = })")
             return
+        qprint(f"Running PI query for {asset_group}...")
         dataset = SolarDataset.from_pi_for_monthly_report(
             site=self.site.name,
             year=self.year,
@@ -472,7 +461,9 @@ class FlashReportGenerator:
             keep_tzinfo=True,
             q=q,
         )
-        df = remove_tzinfo_and_standardize_index(dataset.data)
+        df = dataset.data
+        if keep_tzinfo is False:
+            df = remove_tzinfo_and_standardize_index(df)
         if save is True:
             savepath = self._generate_data_savepath(asset_group, version="raw")
             df.to_csv(savepath)
@@ -494,7 +485,7 @@ class FlashReportGenerator:
 
     @property
     def qc_groups(self) -> list[str]:
-        return [g for g in self.query_groups if g not in ("Modules", "PPC")]
+        return [g for g in self.query_groups if g not in ("Modules", "PPC", "Combiners")]
 
     @property
     def qc_status(self) -> dict[str, bool]:
@@ -503,34 +494,34 @@ class FlashReportGenerator:
             for group in self.qc_groups
         }
 
-    def _validate_qc_group(self, asset_group):
+    def _validate_qc_group(self, asset_group) -> Path:
+        raw_fpath = self.get_data_filepath(asset_group, version="raw")
         if asset_group not in self.qc_groups:
             raise KeyError("Invalid asset group specified for QC.")
-        elif self.get_data_filepath(asset_group, version="raw") is None:
+        elif raw_fpath is None:
             raise Exception(f"No raw PI query file exists for {asset_group = }.")
-        return
+        return raw_fpath
 
     def run_qc(
         self, asset_group, df_raw=None, skip_if_exists=True, save=True, q=True
     ) -> Union[pd.DataFrame, None]:
         """Runs auto_qc script on data files for select query groups."""
         qprint = quiet_print_function(q=q)
-        self._validate_qc_group(asset_group)
+        raw_fpath = self._validate_qc_group(asset_group)
         if skip_if_exists and self.qc_status[asset_group] is True and save is True:
             qprint(f"Found existing file for {asset_group}. ({skip_if_exists = })")
             return
-        if df_raw is not None:
-            if "PROCESSED" in df_raw.columns:
-                raise ValueError("Found PROCESSED column in df_raw; expecting raw PI query data.")
-            qprint(
-                "Warning: when providing df_raw, there are no checks to validate asset_group. "
-                "Proceed with caution."
+
+        if df_raw is None:
+            df_raw, raw_fpath = self.load_query_file(
+                asset_group, version="raw", with_tz=True, return_fpath=True
             )
-            savepath = self._generate_data_savepath(asset_group, version="cleaned")
-        else:
-            df_raw, raw_fpath = self.load_query_file(asset_group, version="raw", return_fpath=True)
             qprint(f"Loaded raw query data from file: {raw_fpath.name}")
-            savepath = validated_savepath(raw_fpath.with_stem(raw_fpath.stem + "_CLEANED"))
+        elif "PROCESSED" in df_raw.columns:
+            raise ValueError("Found PROCESSED column in df_raw; expecting raw PI query data.")
+
+        # generate savepath using source filename for traceability
+        savepath = validated_savepath(raw_fpath.with_stem(raw_fpath.stem + "_CLEANED"))
 
         df_clean = run_auto_qc(df_raw, site=self.site.name)
         n_total_changed = df_clean["PROCESSED"].sum() if "PROCESSED" in df_clean.columns else 0

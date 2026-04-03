@@ -357,6 +357,156 @@ def process_sensor_outliers(series, sensor_group):
     return output
 
 
+def backfill_meteo_data(df_met, df_ext, site, n_clearsky=5, r2_diff=0.1, q=True):
+    qprint = quiet_print_function(q=q)
+    if df_met.index.tzinfo is None:
+        raise ValueError("Input df index must have tzinfo.")
+    native_freq = df_met.index.to_series().diff().min()
+    grouped_sensor_cols = grouped_meteo_columns(df_met.columns)
+    sensor_cols = list(itertools.chain.from_iterable(grouped_sensor_cols.values()))
+    df_met = df_met[sensor_cols]
+
+    # identify top N clearsky days
+    clearsky_date_list = identify_clearsky_days_using_dtn_ghi(site, df_ext)
+    if not clearsky_date_list:
+        qprint(f"WARNING -- no clearsky days identified; using best {n_clearsky} days available")
+        clearsky_date_list = identify_clearsky_days_using_dtn_ghi(site, df_ext, return_all=True)
+    top_clearsky_dates = [item[0] for item in clearsky_date_list[:n_clearsky]]
+
+    # create dictionary to track changes
+    changes_dict = {}
+    df = df_met.copy()  # create copy of original data
+
+    ########################################
+    # PART 1 - DETECT AND REMOVE BAD SENSORS
+    # -> for POA and GHI via DTN comparison
+    ########################################
+    sensor_summaries = get_sensor_summaries(df, df_ext, top_clearsky_dates)
+    bad_col_dict = bad_cols_from_sensor_summaries(sensor_summaries, r2_diff=r2_diff)
+    all_bad_columns = []
+    for key, dict_ in bad_col_dict.items():
+        bad_cols, n_bad, n_all = dict_.values()
+        pct_bad = n_bad / n_all
+        qprint(f"\n{key} - {n_bad} of {n_all} ({pct_bad:.1%}) of sensors are bad - {bad_cols}")
+        qprint(sensor_summaries[key][["r2_score"]].to_string())
+        all_bad_columns.extend(bad_cols)
+
+    if len(all_bad_columns) == len(sensor_cols):
+        qprint("WARNING -- all existing sensor columns have been flagged as bad & removed.")
+        return pd.DataFrame()
+
+    # remove bad columns
+    if all_bad_columns:
+        qprint(
+            f"\n\n>> REMOVING THE FOLLOWING ({len(all_bad_columns)}) COLUMNS  ->  {all_bad_columns}"
+        )
+        df = df.drop(columns=all_bad_columns)
+        changes_dict["removed_columns"] = all_bad_columns
+        grouped_sensor_cols = grouped_meteo_columns(df.columns)
+
+    original_cols = list(df.columns)
+
+    #########################################
+    # PART 2 - OUTLIER DETECTION
+    # -> outside normal range for sensor type
+    #########################################
+    removed_outliers = {}
+    for sensor_group, sensor_columns in grouped_sensor_cols.items():
+        group_outliers = {}
+        for col in sensor_columns:
+            series = df[col].copy()
+            col_outliers = process_sensor_outliers(series, sensor_group)
+            clean_col, bad_col = f"Cleaned_{col}", f"Bad_Data_{col}"
+            df[clean_col] = series.copy()
+            changed_idx = df[col].compare(df[clean_col]).index
+            df[bad_col] = np.where(df.index.isin(changed_idx), 1, 0)
+            df.loc[df[clean_col].isna(), bad_col] = 1
+            if col_outliers:
+                group_outliers[col] = col_outliers.copy()
+
+        if group_outliers:
+            removed_outliers[sensor_group] = group_outliers.copy()
+
+    if removed_outliers:
+        changes_dict["removed_outliers"] = removed_outliers
+
+    # average across sensor columns by group to get avg. daily profile for each group
+    grp_id_dict = {
+        "poa": "POA",
+        "ghi": "GHI",
+        "mod_temp": "ModTemp",
+        "amb_temp": "AmbTemp",
+        "wind": "Wind",
+    }
+    profile_cols = []
+    for sensor_group, sensor_columns in grouped_sensor_cols.items():
+        cleaned_cols = [f"Cleaned_{c}" for c in sensor_columns]
+        grp_id = grp_id_dict[sensor_group]
+        df[f"Average_Across_{grp_id}"] = df[cleaned_cols].mean(axis=1).copy()
+        profile_cols.append(f"{grp_id}_Monthly_Profile")
+
+    avg_cols = list(filter(lambda c: c.startswith("Average_Across"), df.columns))
+    avg_prof = df[avg_cols].groupby([df.index.month, df.index.hour]).mean()
+    avg_prof.columns = profile_cols
+    avg_prof = avg_prof.rename_axis(("Month", "Hour")).reset_index()
+
+    # add average hourly profiles to df
+    dff = pd.DataFrame(index=df.index)
+    dff["Month"] = dff.index.month
+    dff["Hour"] = dff.index.hour
+
+    df_avg_profile = dff.reset_index().merge(
+        avg_prof,
+        how="left",
+        on=["Month", "Hour"],
+        sort=True,
+    )
+    df_avg_profile = df_avg_profile.set_index("Timestamp")
+
+    # add average hourly profiles to df
+    for c in profile_cols:
+        df[c] = df_avg_profile[c].copy()
+
+    # determine ranges for backfill using "Bad_Data" columns
+    for sensor_group, sensor_columns in grouped_sensor_cols.items():
+        bad_sensor_cols = [f"Bad_Data_{c}" for c in sensor_columns]
+        grp_id = grp_id_dict[sensor_group]
+        df[f"{grp_id}_all_bad"] = df[bad_sensor_cols].prod(axis=1)
+
+    # backfill data (NOTE: includes all groups in BACKFILL_COLUMNS)
+    df_backfill = df_ext.copy()
+    if len(df.index.difference(df_backfill.index)) == 0:
+        if df_backfill.index.tz != df.index.tz:
+            df_backfill = df_backfill.tz_convert(df.index.tz)  # otherwise, problem with join
+
+    df = df.join(df_backfill)
+
+    backfilled_data = {}
+    for grp, fill_col in BACKFILL_COLUMNS.items():
+        grp_id = grp_id_dict[grp]
+        avg_col, processed_col = f"Average_Across_{grp_id}", f"Processed_{grp_id}"
+        fill_data = df[fill_col].copy() if fill_col in df.columns else np.nan
+        if avg_col in df.columns:
+            df[processed_col] = np.where(df[f"{grp_id}_all_bad"].eq(0), df[avg_col], fill_data)
+            changed_index = df[avg_col].compare(df[processed_col]).index
+            n_filled = df.loc[df.index.isin(changed_index)].shape[0]
+        else:
+            df[processed_col] = fill_data
+            n_filled = df.shape[0]
+
+        if n_filled > 0 and grp in grouped_sensor_cols:
+            backfilled_data[grp] = {"n_filled": n_filled}
+
+    if backfilled_data:
+        changes_dict["backfilled_data"] = backfilled_data
+
+    processed_cols = list(df.filter(like="Processed_").columns)
+    avgcol = lambda pcol: "Average_Across_" + pcol.replace("Processed_", "")
+    valid_processed_cols = [c for c in processed_cols if avgcol(c) in df.columns]
+    df = df[original_cols + valid_processed_cols]
+    return df, changes_dict
+
+
 def process_and_backfill_meteo_data(filepath, site, n_clearsky=5, r2_diff=0.1, q=True):
     """checks sensor data, detects and removes bad columns/data, then backfills using external data
 
