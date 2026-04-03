@@ -65,7 +65,7 @@ def process_specified_date_range(start_date, end_date):
     return dict(file_range=file_range, query_range=query_range)
 
 
-class SensorJudge(SolarSite):
+class SensorValidator(SolarSite):
     """Class for assessment of solar site sensor quality."""
 
     def __init__(self, site: str):
@@ -81,7 +81,7 @@ class SensorJudge(SolarSite):
     @property
     def sensor_attribute_paths(self) -> list[str]:
         """Returns a list of all associated Met Station attributes that exist in PI."""
-        return self.get_reporting_query_attributes("Met Stations", validated=True)
+        return self.query_attributes.get("Met Stations", [])
 
     @property
     def expected_sensor_columns(self) -> list[str]:
