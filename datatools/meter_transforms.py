@@ -685,14 +685,15 @@ def load_selmer(fpath, fmt=True):
 
 def load_somers(fpath, fmt=True):
     site = "Somers"
-    df = pd.read_csv(
-        fpath, header=6
-    )  # NOTE: setting header to anything below 6 causes parsing error
+
+    # NOTE: setting header to anything below 6 causes parsing error
+    df = pd.read_csv(fpath, header=6)
     if "DATE" not in df.columns:  # checking if header was 7
         hdr = df[df.isin(["DATE"]).any(axis=1)].index[0]
         df.columns = df.iloc[hdr].values
         df = df.iloc[hdr + 1 :, :].reset_index(drop=True)
     df = df.dropna(axis=1, how="all")
+
     uniquecols = []
     for c in df.columns:
         n, col = 1, c
@@ -701,7 +702,6 @@ def load_somers(fpath, fmt=True):
         uniquecols.append(col)
     df.columns = uniquecols
 
-    df = df.shift(1)  # file is always missing first timestamp
     df.loc[0, "DATE"] = df.loc[1, "DATE"]
     df.loc[0, "TIME"] = "00:00"
     df.index = pd.to_datetime(
@@ -710,6 +710,13 @@ def load_somers(fpath, fmt=True):
     )
     df["kWh.1"] = pd.to_numeric(df["kWh.1"])
     df["MWh"] = df["kWh.1"].div(1000).copy()
+
+    # file is always missing one of the first timestamps
+    expected_index = pd.date_range(df.index.min(), df.index.max(), freq="h", inclusive="left")
+    if len(expected_index) == len(df):
+        if not all(expected_index == df.index):
+            df.index = expected_index  # not reindexing; data is correct, but index wrong/shifted
+
     df = validated_datetime_index(df, site)
     return formatted_dataframe(df) if fmt else df
 
