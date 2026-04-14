@@ -60,6 +60,11 @@ class ComancheCurtailment:
                 raise ValueError(f"Missing required file: {pattern}")
             self.source_files.append(fpath.name)
             df = pd.read_csv(fpath, index_col=0, parse_dates=True)
+            if not isinstance(df.index, pd.DatetimeIndex):
+                # this can happen if .csv already has tz info & an error prevents parsing (e.g. dst)
+                format_ = "%Y-%m-%d %H:%M:%S%z"
+                tz = "US/Mountain"  # hardcoded for Comanche
+                df.index = pd.to_datetime(df.index, format=format_, utc=True).tz_convert(tz)
             if df.index.tzinfo is not None:
                 df = remove_tzinfo_and_standardize_index(df)
             return df
