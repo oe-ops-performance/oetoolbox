@@ -88,7 +88,7 @@ def eligible_gads_sites(year: int, by_fleet=True) -> list:
     eligible_sites = {}
     for fleet in ["solar", "wind"]:
         ref_year = get_gads_reference_year(year, fleet)
-        min_capacity = GADS_CAPACITY_LIMITS[fleet].get(ref_year)
+        min_capacity = GADS_CAPACITY_LIMITS[fleet].get(str(ref_year))
         if not min_capacity:
             raise KeyError(f"Undetermined capacity limit for {year=}.")
         sitelist = GADS_METADATA.loc[GADS_METADATA["capacity"].ge(min_capacity)].index.to_list()
