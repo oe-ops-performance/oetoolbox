@@ -1,3 +1,4 @@
+from functools import lru_cache
 import itertools
 import pandas as pd
 from pathlib import Path
@@ -484,6 +485,7 @@ class SolarSite(PISite):
         return df_all
 
     # functions to get kpis and summary metrics
+    @lru_cache(maxsize=128)
     def get_monthly_kpis(self, year: int, month: int, source: str, return_fpaths: bool = False):
         """Returns dataframe of kpis loaded from specified source file.
 
