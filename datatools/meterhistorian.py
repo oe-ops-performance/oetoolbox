@@ -77,14 +77,13 @@ def load_meter_historian(year=None, month=None, dropna=True):
         end = start + pd.DateOffset(months=1)
         return pd.DataFrame(index=pd.date_range(start, end, freq="h", inclusive="left"))
 
-    df = _validate_datetime_index(df)
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
     if dropna:
         df = df.dropna(axis=1, how="all").copy()
 
-    convert_cols = [c for c in df.columns if c not in df.select_dtypes("number").columns]
-    for c in convert_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = _validate_datetime_index(df)
 
     return df
 
