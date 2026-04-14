@@ -101,19 +101,12 @@ class SolarDataset(Dataset):
             matching_query_fpaths = fpaths_by_period[f"{year}{month:02d}"]
             latest_fp = latest_file(matching_query_fpaths)
             try:
-                df_ = pd.read_csv(latest_fp, index_col=0, parse_dates=True)
-                if not isinstance(df_.index, pd.DatetimeIndex):
-                    df_.index = pd.to_datetime(
-                        df_.index, format="%Y-%m-%d %H:%M:%S%z", utc=True
-                    ).tz_convert(self.site.timezone)
-
-                if df_.index.duplicated().any():
-                    df_ = df_.loc[~df_.index.duplicated(keep="first")]
+                df_ = self.site._load_file(latest_fp, with_tz=True)
                 df_ = df_.rename(columns={"POA_DTN": "POA"})
                 if "pvlib" in latest_fp.name.lower():
                     df_.columns = df_.columns.map(str.lower)
                 elif "meter" in latest_fp.name.lower():
-                    df_.columns = df_.columns.str.replace("_", ".")  # should be OE.MeterMW
+                    df_ = df_.rename(columns={df_.columns[0]: "OE.MeterMW"})
 
                 if df_.index.diff().max() > pd.Timedelta(minutes=1):
                     df_ = df_.resample("1min").interpolate()
@@ -221,17 +214,16 @@ class SolarDataset(Dataset):
         # groups is list, or a dict of {group: freq}
         # ["dtn", "combiners", "inverters", "meter", "met_stations", "ppc"]
         args = [site, start_date, end_date]
-        instance = cls(*args)
         if type(groups) is list:
             groups = {grp: freq for grp in groups}
         data = {}
         for grp, freq in groups.items():
-            qprint(f"Querying data for {grp} ({freq=})...")
             if grp == "dtn":
-                df = instance.from_dtn(*args, q=q)
+                df = cls.from_dtn(*args, q=q)
             else:
+                qprint(f"\nQuerying data for {grp} ({freq=})...")
                 asset_group = grp.replace("_", " ").title()
-                df = instance.from_defined_query_attributes(
+                dataset = cls.from_defined_query_attributes(
                     *args,
                     asset_group=asset_group,
                     freq=freq,
@@ -240,9 +232,10 @@ class SolarDataset(Dataset):
                     q=q,
                     raise_error=False,
                 )
-            if df is None:
-                qprint(f">>> no data found for {grp=}.")
-                continue
+                if dataset.data is None:
+                    qprint(f">>> no data found for {grp=}.")
+                    continue
+                df = dataset.data
             qprint(f">>> added data for {grp=}.")
             data[grp] = df.copy()
 
@@ -271,15 +264,23 @@ class SolarDataset(Dataset):
         return cls.from_defined_query_attributes(site_name=site, **kwargs, asset_group=asset_group)
 
     def _load_single_dtn_file(self, filepath):
-        df = pd.read_csv(filepath, index_col=0, parse_dates=True)
-        if type(df.index) != pd.DatetimeIndex:
-            df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S%z", utc=True).tz_convert(
-                self.site.timezone
-            )
+        df = self.site._load_file(filepath, with_tz=True)
+
+        # dtn files can have different timezone names, which causes issues when reindexing
+        fmt = lambda tstamp: tstamp.strftime("%Y-%m-%d %H:%M:%S")
+        expected_index = pd.date_range(
+            fmt(df.index.min()),
+            fmt(df.index.max()),
+            freq=df.index.diff().max(),
+            tz=self.site.timezone,
+        )
+        if len(df.index) == len(expected_index):
+            df.index = expected_index
+
         self.source_files.append(str(filepath))
         return df
 
-    def _load_dtn_data_from_files(self, keep_tz: bool = False, q: bool = True):
+    def _load_dtn_data_from_files(self, keep_tz: bool = True, q: bool = True):
         """loads data from existing files in the flashreport DTN folders"""
         qprint = quiet_print_function(q=q)
 
@@ -319,16 +320,7 @@ class SolarDataset(Dataset):
             df = remove_tzinfo_and_standardize_index(df)
 
         if len(expected_index) != len(df):
-            df = df.drop_duplicates().reindex(expected_index)
-
-        # df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
-        # df_dates["tz_offset"] = df_dates.index.strftime("%z")
-        # unique_offsets = df_dates["tz_offset"].unique()
-        # if 3 in df.index.month.unique() and len(unique_offsets) > 1:
-        #     shift_date = df_dates.loc[df_dates["tz_offset"].eq(unique_offsets[0])].index[-1]
-        #     shifted = df.index >= shift_date
-        #     for col in df.columns:
-        #         df.loc[shifted, col] = df.loc[shifted, col].shift(1)
+            df = df.reindex(expected_index)
 
         self.data = df.copy()
         return
