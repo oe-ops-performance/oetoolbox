@@ -133,3 +133,35 @@ def year_month_list(start_date: str, end_date: str):
     unique_year_month = pd.date_range(start_date, end_date).strftime("%Y_%m").unique().to_list()
     tuple_from_string = lambda ym_str: tuple(map(lambda x: int(x), ym_str.split("_")))
     return list(map(tuple_from_string, unique_year_month))
+
+
+def get_dates(year: int, month: int, as_string: bool = False, tz: str = None):
+    start = pd.Timestamp(year, month, 1, tz=tz)
+    end = start + pd.DateOffset(months=1)
+    if as_string is False:
+        return [start, end]
+    return list(map(lambda x: x.strftime("%Y-%m-%d"), [start, end]))
+
+
+def infer_freq(datetime_index: pd.DatetimeIndex):
+    diffs = datetime_index.to_series().diff().dropna()
+    mode_diffs = diffs.mode()
+    return mode_diffs.iloc[0] if not mode_diffs.empty else diffs.min()
+
+
+def upsample(df, new_freq, agg_type="interpolate"):
+    if type(df.index) is not pd.DatetimeIndex:
+        raise TypeError("Dataframe must have a DatetimeIndex.")
+    freq_td = infer_freq(df.index)
+    if pd.Timedelta(new_freq) > freq_td:
+        raise ValueError("New frequency must be smaller than native data interval.")
+    shift_td = freq_td
+    if agg_type == "interpolate":
+        df_r = df.resample(new_freq).interpolate()
+    elif agg_type in ("ffill", "mean", "max", "min"):
+        df_r = df.resample(new_freq).agg(agg_type)
+    else:
+        raise KeyError("Invalid agg_type specified.")
+    df_r = df_r.shift(periods=1, freq=shift_td)
+    new_index = pd.date_range(df.index.min(), df_r.index.max(), freq=new_freq, inclusive="left")
+    return df_r.reindex(new_index)
