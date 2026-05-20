@@ -7,12 +7,13 @@ from pathlib import Path
 import shutil
 
 from ..datatools import meter_transforms as transforms
-from ..reporting.tools import ALL_SOLAR_SITES, ALL_WIND_SITES
-from ..utils import oepaths
+from ..utils import oemeta, oepaths
 from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.helpers import print_list, quiet_print_function
 from ..utils.meter_paths import get_legacy_meter_filepaths
 
+ALL_SOLAR_SITES = oemeta.PI_SITES_BY_FLEET["solar"]
+ALL_WIND_SITES = oemeta.PI_SITES_BY_FLEET["wind"]
 
 UTILITY_DATA_SOURCE_DIRS = {
     "solar": Path(oepaths.UTILITY_METER_DIR, "Solar"),

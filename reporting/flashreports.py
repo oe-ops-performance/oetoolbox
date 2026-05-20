@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 import numpy as np
 import pandas as pd
 import missingno as msno
@@ -10,7 +11,7 @@ from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.assets import SolarSite
 from ..utils.solar import SolarDataset
 from ..reporting.curtailment import load_external_curtailment_totals
-from ..reporting.tools import get_ppa_rate
+from ..reporting.functions import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
 from ..dataquery.external import query_fracsun, get_fracsun_sites
 from ..datatools.meterhistorian import (
@@ -50,9 +51,14 @@ def get_caiso_filepath(year, month):
     return oepaths.latest_file(caiso_fpaths)
 
 
+@lru_cache(maxsize=128)
+def _caiso_sheets(caiso_fpath):
+    return list(pd.read_excel(caiso_fpath, sheet_name=None, nrows=0).keys())
+
+
 def _get_caiso_sheetname(site, caiso_fpath):
     """Returns the sheetname in the CAISO file corresponding to the given site"""
-    all_sheets = list(pd.read_excel(caiso_fpath, sheet_name=None, nrows=0).keys())
+    all_sheets = _caiso_sheets(caiso_fpath)
     site_keyword = sorted(site.replace("-", " ").split(), key=len)[-1]  # longest word
     matching_sheets = [s for s in all_sheets if site_keyword in s]
     if len(matching_sheets) != 1:
@@ -60,6 +66,7 @@ def _get_caiso_sheetname(site, caiso_fpath):
     return matching_sheets[0]
 
 
+@lru_cache(maxsize=128)
 def load_caiso_data(site, year, month):
     caiso_fpath = get_caiso_filepath(year, month)
     if not caiso_fpath:
@@ -138,6 +145,7 @@ def generate_monthlyFlashReport(
     return_df_and_fpath=False,
     df_util=None,
     return_df_and_log_info=False,
+    force_dtn: bool = False,
 ):
     """
     creates and saves flash report (Excel file) for specified PI site/project
@@ -182,6 +190,17 @@ def generate_monthlyFlashReport(
     met_fpath = oepaths.latest_file(
         site.get_met_stations_filepaths(year, month, version="processed")
     )
+
+    if force_dtn is True:
+        qprint(f"NOTE: forcing dtn data")
+        met_fpath = None
+        if "DTN" not in pvlib_fpath.name:
+            dtnpvlfpaths = [
+                fp for fp in site.get_flashreport_files(year, month)["pvlib"] if "DTN" in fp.name
+            ]
+            pvlib_fpath = oepaths.latest_file(dtnpvlfpaths)
+            if pvlib_fpath is None:
+                raise ValueError("!! No DTN PVLib file found !!")
 
     # create dictionary for log info output (source filepaths)
     source_fpath_dict = {}  # init

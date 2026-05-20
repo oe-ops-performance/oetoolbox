@@ -2,10 +2,8 @@ import calendar
 import pandas as pd
 from pathlib import Path
 
-from ..reporting.tools import ALL_SOLAR_SITES, ALL_WIND_SITES
 from ..utils import oepaths
 from ..utils.helpers import quiet_print_function
-
 
 UTILITY_DATA_OUTPUT_FOLDER = Path(oepaths.UTILITY_METER_DIR, "Output")
 
