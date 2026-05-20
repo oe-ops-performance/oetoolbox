@@ -1,6 +1,8 @@
 from functools import wraps
 import inspect
 
+from .datetime import localize_naive_datetimeindex, remove_tzinfo_and_standardize_index
+
 
 def with_retries(n_max: int = 5, raise_error: bool = True):
     """Decorator factory - returns retry decorator and supports additional args.
@@ -53,6 +55,22 @@ def quiet_print_function(q: bool):
     """
     qprint = lambda msg, end="\n": None if q else print(msg, end=end)
     return qprint
+
+
+def load_file(filepath, tz, keep_tz=True):
+    df = pd.read_csv(filepath, index_col=0, parse_dates=True)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        # this can happen if .csv already has tz info & an error prevents parsing (e.g. dst)
+        format_ = "%Y-%m-%d %H:%M:%S%z"
+        df.index = pd.to_datetime(df.index, format=format_, utc=True).tz_convert(tz)
+
+    already_has_tz = df.index.tzinfo is not None
+    if keep_tz and not already_has_tz:
+        df = localize_naive_datetimeindex(df, tz=tz)
+    elif already_has_tz and not keep_tz:
+        df = remove_tzinfo_and_standardize_index(df)
+
+    return df
 
 
 def print_dataframe_info(df):

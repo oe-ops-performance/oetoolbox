@@ -1,14 +1,17 @@
 import itertools
+import numpy as np
 import pandas as pd
 from pathlib import Path
 
 from .assets import SolarSite
 from .dataset import Dataset
-from .datetime import remove_tzinfo_and_standardize_index
+from .datetime import get_dates, remove_tzinfo_and_standardize_index, localize_naive_datetimeindex
 from .helpers import quiet_print_function
 from .oepaths import frpath, latest_file
 from .pi import PIDataset
+from ..dataquery.external import query_fracsun
 from ..datatools.pvlib import query_dtn_meteo_data
+from ..reporting.curtailment import load_caiso_data
 
 
 class SolarDataset(Dataset):
@@ -101,19 +104,12 @@ class SolarDataset(Dataset):
             matching_query_fpaths = fpaths_by_period[f"{year}{month:02d}"]
             latest_fp = latest_file(matching_query_fpaths)
             try:
-                df_ = pd.read_csv(latest_fp, index_col=0, parse_dates=True)
-                if not isinstance(df_.index, pd.DatetimeIndex):
-                    df_.index = pd.to_datetime(
-                        df_.index, format="%Y-%m-%d %H:%M:%S%z", utc=True
-                    ).tz_convert(self.site.timezone)
-
-                if df_.index.duplicated().any():
-                    df_ = df_.loc[~df_.index.duplicated(keep="first")]
+                df_ = self.site._load_file(latest_fp, with_tz=True)
                 df_ = df_.rename(columns={"POA_DTN": "POA"})
                 if "pvlib" in latest_fp.name.lower():
                     df_.columns = df_.columns.map(str.lower)
                 elif "meter" in latest_fp.name.lower():
-                    df_.columns = df_.columns.str.replace("_", ".")  # should be OE.MeterMW
+                    df_ = df_.rename(columns={df_.columns[0]: "OE.MeterMW"})
 
                 if df_.index.diff().max() > pd.Timedelta(minutes=1):
                     df_ = df_.resample("1min").interpolate()
@@ -221,17 +217,16 @@ class SolarDataset(Dataset):
         # groups is list, or a dict of {group: freq}
         # ["dtn", "combiners", "inverters", "meter", "met_stations", "ppc"]
         args = [site, start_date, end_date]
-        instance = cls(*args)
         if type(groups) is list:
             groups = {grp: freq for grp in groups}
         data = {}
         for grp, freq in groups.items():
-            qprint(f"Querying data for {grp} ({freq=})...")
             if grp == "dtn":
-                df = instance.from_dtn(*args, q=q)
+                df = cls.from_dtn(*args, q=q)
             else:
+                qprint(f"\nQuerying data for {grp} ({freq=})...")
                 asset_group = grp.replace("_", " ").title()
-                df = instance.from_defined_query_attributes(
+                dataset = cls.from_defined_query_attributes(
                     *args,
                     asset_group=asset_group,
                     freq=freq,
@@ -240,9 +235,10 @@ class SolarDataset(Dataset):
                     q=q,
                     raise_error=False,
                 )
-            if df is None:
-                qprint(f">>> no data found for {grp=}.")
-                continue
+                if dataset.data is None:
+                    qprint(f">>> no data found for {grp=}.")
+                    continue
+                df = dataset.data
             qprint(f">>> added data for {grp=}.")
             data[grp] = df.copy()
 
@@ -271,15 +267,23 @@ class SolarDataset(Dataset):
         return cls.from_defined_query_attributes(site_name=site, **kwargs, asset_group=asset_group)
 
     def _load_single_dtn_file(self, filepath):
-        df = pd.read_csv(filepath, index_col=0, parse_dates=True)
-        if type(df.index) != pd.DatetimeIndex:
-            df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S%z", utc=True).tz_convert(
-                self.site.timezone
-            )
+        df = self.site._load_file(filepath, with_tz=True)
+
+        # dtn files can have different timezone names, which causes issues when reindexing
+        fmt = lambda tstamp: tstamp.strftime("%Y-%m-%d %H:%M:%S")
+        expected_index = pd.date_range(
+            fmt(df.index.min()),
+            fmt(df.index.max()),
+            freq=df.index.diff().max(),
+            tz=self.site.timezone,
+        )
+        if len(df.index) == len(expected_index):
+            df.index = expected_index
+
         self.source_files.append(str(filepath))
         return df
 
-    def _load_dtn_data_from_files(self, keep_tz: bool = False, q: bool = True):
+    def _load_dtn_data_from_files(self, keep_tz: bool = True, q: bool = True):
         """loads data from existing files in the flashreport DTN folders"""
         qprint = quiet_print_function(q=q)
 
@@ -319,19 +323,23 @@ class SolarDataset(Dataset):
             df = remove_tzinfo_and_standardize_index(df)
 
         if len(expected_index) != len(df):
-            df = df.drop_duplicates().reindex(expected_index)
-
-        # df_dates = pd.DataFrame(index=pd.date_range(df.index[0], df.index[-1].ceil("D")))
-        # df_dates["tz_offset"] = df_dates.index.strftime("%z")
-        # unique_offsets = df_dates["tz_offset"].unique()
-        # if 3 in df.index.month.unique() and len(unique_offsets) > 1:
-        #     shift_date = df_dates.loc[df_dates["tz_offset"].eq(unique_offsets[0])].index[-1]
-        #     shifted = df.index >= shift_date
-        #     for col in df.columns:
-        #         df.loc[shifted, col] = df.loc[shifted, col].shift(1)
+            df = df.reindex(expected_index)
 
         self.data = df.copy()
         return
+
+    def _process_date_args(self, start_date, end_date, year, month) -> tuple[pd.Timestamp]:
+        # assigns start/end timestamps from input strings/int
+        if start_date is not None and end_date is not None:
+            target_start = pd.Timestamp(start_date).floor("D")
+            target_end = pd.Timestamp(end_date).ceil("D")
+        elif year is not None and month is not None:
+            target_start = pd.Timestamp(year, month, 1)
+            target_end = target_start + pd.DateOffset(months=1)
+        else:
+            raise Exception("Invalid arguments.")
+        self.start_date = target_start.strftime("%Y-%m-%d")
+        self.end_date = target_end.strftime("%Y-%m-%d")
 
     @classmethod
     def from_dtn_files(
@@ -345,18 +353,10 @@ class SolarDataset(Dataset):
         q: bool = True,
     ):
         """loads data from existing files in the flashreport DTN folders"""
-        if start_date is not None and end_date is not None:
-            target_start = pd.Timestamp(start_date).floor("D")
-            target_end = pd.Timestamp(end_date).ceil("D")
-        elif year is not None and month is not None:
-            target_start = pd.Timestamp(year, month, 1)
-            target_end = target_start + pd.DateOffset(months=1)
-        else:
-            raise Exception("Invalid arguments.")
-
-        dataset = cls(SolarSite(site_name), target_start, target_end)
-        dataset._load_dtn_data_from_files(keep_tz=keep_tz, q=q)
-        return dataset
+        instance = cls(SolarSite(site_name))
+        instance._process_date_args(start_date, end_date, year, month)
+        instance._load_dtn_data_from_files(keep_tz=keep_tz, q=q)
+        return instance
 
     @classmethod
     def from_dtn(cls, site, start_date, end_date, keep_tz=True, q=True):
@@ -426,3 +426,75 @@ class SolarDataset(Dataset):
         if return_dataframe:
             return dataset.data
         return dataset
+
+    @classmethod
+    def from_fracsun(
+        cls,
+        site_name: str,
+        start_date: str = None,
+        end_date: str = None,
+        year: int = None,
+        month: int = None,
+        keep_tz: bool = True,
+        all_columns: bool = False,
+        q: bool = True,
+    ) -> pd.DataFrame:
+        """queries daily soiling data via fracsun api."""
+        instance = cls(SolarSite(site_name))
+        instance._process_date_args(start_date, end_date, year, month)
+        return instance._query_data_from_fracsun(all_columns=all_columns, keep_tz=keep_tz, q=q)
+
+    def _query_data_from_fracsun(self, all_columns: bool, keep_tz: bool, q: bool):
+        qprint = quiet_print_function(q=q)
+        expected_idx = pd.date_range(self.start_date, self.end_date, freq="1h", inclusive="left")
+        try:
+            df = query_fracsun(self.site.name, self.start_date, self.end_date, q=q)
+        except Exception as e:
+            qprint("Warning: error retrieving fracsun data.")
+            return
+        keepcols = ["soiling"] if all_columns is False else list(df.columns)
+        df = df[keepcols].resample("1h").ffill()
+        df["soilingPercent"] = df["soiling"].div(100)
+        if all_columns is False:
+            df = df[["soilingPercent"]]
+        df = df.reindex(expected_idx)
+        qprint("Loaded Fracsun soiling data.")
+        if keep_tz is True:
+            return localize_naive_datetimeindex(df, site=self.site.name, q=q)
+        return df
+
+    @classmethod
+    def from_caiso_file(
+        cls,
+        site_name: str,
+        year: int,
+        month: int,
+        keep_tz: bool = True,
+        freq: str = "5min",  # either 5min or 1min
+        return_fpath: bool = False,
+        q: bool = True,
+    ):
+        qprint = quiet_print_function(q=q)
+        if freq not in ("1min", "5min"):
+            raise ValueError("Invalid frequency specified. Only supports '1min' or '5min'.")
+        output = load_caiso_data(site_name, year, month, return_fpath=return_fpath)
+        if output is None:
+            qprint("No CAISO data found.")
+            return
+        df, fpath = output if return_fpath else [output, None]
+        qprint("Loaded CAISO curtailment data from file.")
+        df = localize_naive_datetimeindex(df, site=site_name, q=q)
+        df["CurtailmentStatus"] = np.where(
+            df["CAISO_MW_Setpoint"] < SolarSite(site_name).ac_capacity, 1, 0
+        )
+
+        if freq == "1min":
+            df = df.resample("1min").ffill().shift(periods=1, freq=pd.Timedelta(minutes=5))
+            start, end = get_dates(year, month, tz=df.index.tzinfo)
+            df = df.reindex(pd.date_range(start, end, freq="1min", inclusive="left"))
+
+        if keep_tz is False:
+            df = remove_tzinfo_and_standardize_index(df)
+        if return_fpath is True:
+            return df, fpath
+        return df

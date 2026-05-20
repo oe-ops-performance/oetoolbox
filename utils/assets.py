@@ -1,3 +1,4 @@
+from functools import lru_cache
 import itertools
 import pandas as pd
 from pathlib import Path
@@ -11,7 +12,6 @@ from ..reporting.functions import (
     get_solar_budget_values,
     load_kpis_from_flashreport,
 )
-from ..reporting.tools import get_solar_budget_values
 from ..reporting.query_attributes import attribute_path, get_solar_attributes
 
 
@@ -103,6 +103,11 @@ class PISite:
     def altitude(self):
         """Returns altitude"""
         return oemeta.data["Altitude"].get(self.name)
+
+    @property
+    def ac_capacity(self):
+        """Returns AC capacity of site"""
+        return oemeta.data["SystemSize"]["MWAC"].get(self.name)
 
     @property
     def af_path(self) -> str:
@@ -400,6 +405,27 @@ class SolarSite(PISite):
             return []
         return [fp for fp in query_fp_list if asset_group.replace(" ", "") in fp.name]
 
+    def get_latest_filepaths(self, year: int, month: int) -> dict[str, Path]:
+        output = {}
+        for grp in self.query_attributes.keys():
+            fpath = oepaths.latest_file(self.get_data_filepaths(year, month, grp))
+            if fpath is not None:
+                output[grp] = fpath
+        pvl_fpaths = self.get_flashreport_files(year, month, types=["pvlib"])
+        if pvl_fpaths:
+            output["pvlib"] = oepaths.latest_file(pvl_fpaths)
+        return output
+
+    def load_latest_reporting_files(
+        self, year: int, month: int, with_tz: bool = False
+    ) -> dict[str, Path]:
+        output = {}
+        for grp, fpath in self.get_latest_filepaths(year, month).items():
+            df = self._load_file(fpath, with_tz=with_tz)
+            df = df[[c for c in df.columns if c != "PROCESSED"]]
+            output[grp] = df.copy()
+        return output
+
     def get_met_stations_filepaths(self, year: int, month: int, version="all"):
         """Retrieves Met Station PI query files from flashreport folder.
 
@@ -484,6 +510,7 @@ class SolarSite(PISite):
         return df_all
 
     # functions to get kpis and summary metrics
+    @lru_cache(maxsize=128)
     def get_monthly_kpis(self, year: int, month: int, source: str, return_fpaths: bool = False):
         """Returns dataframe of kpis loaded from specified source file.
 

@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 import numpy as np
 import pandas as pd
 import missingno as msno
@@ -6,10 +7,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from ..utils import oepaths, oemeta
+from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.assets import SolarSite
 from ..utils.solar import SolarDataset
 from ..reporting.curtailment import load_external_curtailment_totals
-from ..reporting.tools import get_ppa_rate
+from ..reporting.functions import get_ppa_rate
 from ..reporting.openpyxl_monthly import create_monthly_report
 from ..dataquery.external import query_fracsun, get_fracsun_sites
 from ..datatools.meterhistorian import (
@@ -49,9 +51,14 @@ def get_caiso_filepath(year, month):
     return oepaths.latest_file(caiso_fpaths)
 
 
+@lru_cache(maxsize=128)
+def _caiso_sheets(caiso_fpath):
+    return list(pd.read_excel(caiso_fpath, sheet_name=None, nrows=0).keys())
+
+
 def _get_caiso_sheetname(site, caiso_fpath):
     """Returns the sheetname in the CAISO file corresponding to the given site"""
-    all_sheets = list(pd.read_excel(caiso_fpath, sheet_name=None, nrows=0).keys())
+    all_sheets = _caiso_sheets(caiso_fpath)
     site_keyword = sorted(site.replace("-", " ").split(), key=len)[-1]  # longest word
     matching_sheets = [s for s in all_sheets if site_keyword in s]
     if len(matching_sheets) != 1:
@@ -59,6 +66,7 @@ def _get_caiso_sheetname(site, caiso_fpath):
     return matching_sheets[0]
 
 
+@lru_cache(maxsize=128)
 def load_caiso_data(site, year, month):
     caiso_fpath = get_caiso_filepath(year, month)
     if not caiso_fpath:
@@ -104,6 +112,7 @@ def create_curtailment_table_from_caiso_data(site, df_caiso, df_meter, df_pvlib)
     """
     dfc = format_caiso_data(df_caiso)
     dfm = df_meter.resample("5min").mean().copy()
+    dfm = remove_tzinfo_and_standardize_index(dfm)
     poacol = "POA" if "POA" in df_pvlib.columns else "POA_DTN"
     pvlib_inv_cols = [c for c in df_pvlib.columns if "Possible_Power" in c]
     pvlib_cols = [poacol, *pvlib_inv_cols]
@@ -136,6 +145,7 @@ def generate_monthlyFlashReport(
     return_df_and_fpath=False,
     df_util=None,
     return_df_and_log_info=False,
+    force_dtn: bool = False,
 ):
     """
     creates and saves flash report (Excel file) for specified PI site/project
@@ -181,6 +191,17 @@ def generate_monthlyFlashReport(
         site.get_met_stations_filepaths(year, month, version="processed")
     )
 
+    if force_dtn is True:
+        qprint(f"NOTE: forcing dtn data")
+        met_fpath = None
+        if "DTN" not in pvlib_fpath.name:
+            dtnpvlfpaths = [
+                fp for fp in site.get_flashreport_files(year, month)["pvlib"] if "DTN" in fp.name
+            ]
+            pvlib_fpath = oepaths.latest_file(dtnpvlfpaths)
+            if pvlib_fpath is None:
+                raise ValueError("!! No DTN PVLib file found !!")
+
     # create dictionary for log info output (source filepaths)
     source_fpath_dict = {}  # init
 
@@ -211,9 +232,10 @@ def generate_monthlyFlashReport(
     if sitenotexist:
         pi_meter_fpath = oepaths.latest_file(site.get_data_filepaths(year, month, "Meter"))
         if pi_meter_fpath is not None:
-            df_meter = site.load_query_file(year, month, asset_group="Meter")
+            df_meter = site._load_file(pi_meter_fpath, with_tz=True)
             df_meter = df_meter.iloc[:, [0]].resample("h").mean()
             df_meter.columns = [sitename]
+            df_meter = remove_tzinfo_and_standardize_index(df_meter)
             qprint(f'No utility meter found; Loaded PI Meter file ------ "{pi_meter_fpath.name}"')
             meterpath = pi_meter_fpath
         else:
@@ -422,7 +444,10 @@ def generate_monthlyFlashReport(
                 df_caiso.insert(loc=0, column="Unnamed: 0", value=0)  # for excel formula
 
             # load pi meter data
-            dfm = site.load_query_file(year, month, asset_group="Meter")
+            mfp = oepaths.latest_file(
+                site.flashreport_folder(year, month).glob("PIQuery*Meter*.csv")
+            )
+            dfm = site._load_file(mfp, with_tz=True)
 
             df_caiso2 = create_curtailment_table_from_caiso_data(sitename, df_caiso, dfm, dfpvlib)
 

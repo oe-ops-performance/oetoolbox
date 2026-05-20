@@ -11,8 +11,6 @@ from astral import LocationInfo
 
 from .qc import get_daylight_timestamps, get_sun
 from ..utils import oemeta, oepaths
-from ..reporting.tools import get_solar_FR_status, solar_frpaths
-
 
 hasID_ = lambda col, ids_: any(i in col.casefold() for i in ids_)
 isGHI = lambda c: hasID_(c, ["ghi", "hor"])
@@ -152,48 +150,6 @@ def get_qc_fpaths(site, year, month, type_=None):
     if len(qctypes_) == 1:
         return qc_fpaths
     return fpath_dict
-
-
-grouped_lists = lambda list_, n_: [list_[i : i + n_] for i in range(0, len(list_), n_)]
-
-
-def show_qc_status(year, month):
-
-    ##check meter files
-    all_frsite_fps = solar_frpaths(year, month, all_fps=True)
-    hasmeterfile = lambda site_fp: len(list(site_fp.glob("PIQuery_Meter*.csv"))) > 0
-    hascleanmeterfile = lambda site_fp: len(list(site_fp.glob("PIQuery_Meter*CLEANED*.csv"))) > 0
-    site_fps_with_meter = [fp for fp in all_frsite_fps if hasmeterfile(fp)]
-    needs_meter = [fp.name for fp in site_fps_with_meter if (not hascleanmeterfile(fp))]
-    meter_qc_complete = [fp.name for fp in site_fps_with_meter if hascleanmeterfile(fp)]
-
-    frstatus_dict = get_solar_FR_status(year, month, output=True, all_fps=True)
-    completed_ = frstatus_dict["qc complete"]
-    completed_sites = [s for s in completed_ if s in meter_qc_complete]
-    if completed_sites:
-        print("Sites with existing clean/qc'd data:")
-    for list_ in grouped_lists(sorted(completed_sites), 4):
-        print(" " * 4, end="")
-        for i, site in enumerate(list_):
-            print(site.ljust(19), end="" if (i + 1) < len(list_) else "\n")
-
-    sites_in_need = list(sorted(set(frstatus_dict["needs manual qc"] + needs_meter)))
-    needs_met, needs_inv = (frstatus_dict[f"needs {k_} qc"] for k_ in ["met", "inv"])
-
-    output_dict = {}
-    if sites_in_need:
-        print("\nSites that require qc:")
-    for site in sites_in_need:
-        types_ = []
-        if site in needs_met:
-            types_.append("met")
-        if site in needs_inv:
-            types_.append("inv")
-        if site in needs_meter:
-            types_.append("meter")
-        print(f'    {site.ljust(20)}({"+".join(types_)})')
-        output_dict[site] = types_
-    return output_dict
 
 
 def run_auto_qc(df_raw, site, q=True, q_xtra=True):

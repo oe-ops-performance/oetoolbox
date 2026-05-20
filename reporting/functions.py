@@ -1,3 +1,4 @@
+from functools import lru_cache
 import time
 import calendar
 import openpyxl
@@ -13,7 +14,6 @@ from ..utils import oepaths, oemeta
 from ..datatools.meterhistorian import load_meter_historian
 from ..dataquery import pireference as ref
 from ..dataquery.external import query_DTN
-
 
 ALL_PI_SITES = {
     "gas": list(oemeta.data["AF_Gas_V3"].keys()),
@@ -38,48 +38,59 @@ CAISO_SITES = [
 ]
 
 
+@lru_cache(maxsize=128)
 def load_kpi_tracker(sheet="ALL PROJECTS"):
     kwargs = dict(sheet_name=sheet, engine="calamine")
-    header_row = {"Ref Tables": 1, "Site List": 1, "ALL PROJECTS": 0}.get(sheet)
-    if header_row is not None:
-        kwargs.update(dict(header=header_row))
+    header_row_dict = {"Ref Tables": 1, "Site List": 1, "ALL PROJECTS": 0}
+    hdr_row = header_row_dict.get(sheet)
+    keepcols = lambda df: [c for c in df.columns if "Unnamed" not in c]
 
-    df = pd.read_excel(oepaths.kpi_tracker_rev1, **kwargs)
-    if not header_row:
-        return df
+    kpi_fpath = Path(oepaths.kpi_tracker_rev1)
 
-    if sheet != "Ref Tables":
-        df = df[[c for c in df.columns if "Unnamed" not in c]]
-        if sheet == "ALL PROJECTS":
-            end_row = df.Project.last_valid_index() + 1
-            df = df.iloc[:end_row, :].copy()
-            for col in ["Year", "Month"]:
-                df[col] = df[col].astype(int)
-        return df
+    if hdr_row is not None:
+        df_ = pd.read_excel(kpi_fpath, **kwargs, header=hdr_row)
+        if sheet != "Ref Tables":
+            df = df_[keepcols(df_)].copy()
+        else:
+            df_.columns = df_.iloc[0].astype(str).str.replace(".0", "")
+            ppc_column_indexes = [
+                index
+                for index, col in enumerate(df_.columns)
+                if not pd.isna(pd.to_datetime(col, errors="coerce"))
+            ]
+            ppc_column_indexes.insert(0, ppc_column_indexes[0] - 1)  # for site column
+            df = df_.iloc[1:, ppc_column_indexes].reset_index(drop=True).copy()
+            df.columns = ["Site", *list(df.columns[1:])]
+            end_row = df.loc[df.Site.isna()].index[0]
+            df = df.iloc[:end_row, :].set_index("Site").copy()
+            df.columns = df.columns.map(lambda c: pd.to_datetime(c).strftime("%Y-%m"))
+    else:
+        df = pd.read_excel(kpi_fpath, **kwargs)
 
-    df.columns = df.iloc[0].astype(str).str.replace(".0", "")
-    ppc_column_indexes = [
-        index
-        for index, col in enumerate(df.columns)
-        if not pd.isna(pd.to_datetime(col, errors="coerce"))
-    ]
-    ppc_column_indexes.insert(0, ppc_column_indexes[0] - 1)  # for site column
-    df = df.iloc[1:, ppc_column_indexes].reset_index(drop=True).copy()
-    df.columns = ["Site", *list(df.columns[1:])]
-    end_row = df.loc[df.Site.isna()].index[0]
-    df = df.iloc[:end_row, :].set_index("Site").copy()
-    df.columns = df.columns.map(lambda c: pd.to_datetime(c).strftime("%Y-%m"))
+    if sheet == "ALL PROJECTS":
+        end_row = df.Project.last_valid_index() + 1
+        df = df.iloc[:end_row, :].copy()
+        for col in ["Year", "Month"]:
+            df[col] = df[col].astype(int)
+
     return df
 
 
 # function to get ppa rate from kpi tracker (used in flashreport script)
 def get_ppa_rate(site, year, month):
     dfk = load_kpi_tracker(sheet="Ref Tables")
-    try:
-        ppa = dfk.at[site, f"{year}-{month:02d}"]
-    except:
-        ppa = None
-    return ppa
+    if site not in dfk.index:
+        return 0
+
+    last_period = list(sorted(dfk.columns))[-1]
+    latest_date = pd.Timestamp(f"{last_period}-01")
+
+    ref_date = pd.Timestamp(year, month, 1)
+    if ref_date > latest_date:
+        ref_date = latest_date
+
+    ref_col = ref_date.strftime("%Y-%m")
+    return dfk.at[site, ref_col]
 
 
 # function to load kpi tracker data

@@ -98,13 +98,29 @@ def get_daylight_timestamps(
     name: str = "",
     region: str = "",
     freq="1min",
+    limits: tuple = ("dawn", "dusk"),
 ):
+    """Build a list of daylight timestamps at ``freq`` between ``start_date`` and ``end_date``.
+
+    ``limits`` selects which sun-event keys bound each day's window — ``("dawn", "dusk")``
+    (civil twilight, default) or ``("sunrise", "sunset")`` (tighter, geometric horizon).
+    For ``freq`` larger than 1 minute the per-day bounds are floored/ceiled to the freq
+    grid so the returned timestamps land on grid.
+    """
+    if limits not in (("dawn", "dusk"), ("sunrise", "sunset")):
+        raise ValueError("limits must be ('dawn', 'dusk') or ('sunrise', 'sunset')")
     location_kwargs = dict(tz=tz, lat=lat, lon=lon, name=name, region=region)
+    snap_to_grid = pd.Timedelta(freq) > pd.Timedelta(minutes=1)
     timestamp_list = []
-    for dict_ in get_sun_times(start_date, end_date, **location_kwargs):
-        daylight_range = pd.date_range(dict_["dawn"], dict_["dusk"], freq=freq, inclusive="left")
+    for date in pd.date_range(start_date, end_date):
+        sun_times = get_sun(date, **location_kwargs)
+        start_, end_ = sun_times[limits[0]], sun_times[limits[1]]
+        if snap_to_grid:
+            start_ = start_.floor(freq)
+            end_ = end_.ceil(freq)
+        daylight_range = pd.date_range(start_, end_, freq=freq, inclusive="left")
         timestamp_list.extend(list(daylight_range))
-    return list(filter(lambda t: t < end_date, timestamp_list))
+    return list(filter(lambda t: t < pd.Timestamp(end_date), timestamp_list))
 
 
 def comparison_figure(

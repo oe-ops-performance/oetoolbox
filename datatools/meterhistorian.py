@@ -7,12 +7,13 @@ from pathlib import Path
 import shutil
 
 from ..datatools import meter_transforms as transforms
-from ..reporting.tools import ALL_SOLAR_SITES, ALL_WIND_SITES
-from ..utils import oepaths
+from ..utils import oemeta, oepaths
 from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.helpers import print_list, quiet_print_function
 from ..utils.meter_paths import get_legacy_meter_filepaths
 
+ALL_SOLAR_SITES = oemeta.PI_SITES_BY_FLEET["solar"]
+ALL_WIND_SITES = oemeta.PI_SITES_BY_FLEET["wind"]
 
 UTILITY_DATA_SOURCE_DIRS = {
     "solar": Path(oepaths.UTILITY_METER_DIR, "Solar"),
@@ -77,14 +78,13 @@ def load_meter_historian(year=None, month=None, dropna=True):
         end = start + pd.DateOffset(months=1)
         return pd.DataFrame(index=pd.date_range(start, end, freq="h", inclusive="left"))
 
-    df = _validate_datetime_index(df)
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
     if dropna:
         df = df.dropna(axis=1, how="all").copy()
 
-    convert_cols = [c for c in df.columns if c not in df.select_dtypes("number").columns]
-    for c in convert_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = _validate_datetime_index(df)
 
     return df
 

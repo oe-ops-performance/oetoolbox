@@ -378,11 +378,11 @@ class DCHealthChecks:
                         df_met=df, df_ext=self.data["dtn"], site=self.site
                     )
 
-            if key == "combiners":
-                df = df.rename(columns=self.meta.rename_cols)
             if df is None:
                 qprint(f"Error for {key=}.")
                 continue
+            if key == "combiners":
+                df = df.rename(columns=self.meta.rename_cols)
             self._assign_or_validate_date_range(df.index)
             self.data.update({key: df})
 

@@ -1,4 +1,5 @@
 import calendar
+from functools import lru_cache
 import openpyxl
 from openpyxl.utils.dataframe import dataframe_to_rows
 import numpy as np
@@ -7,13 +8,9 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from types import SimpleNamespace
 
-from ..utils import oepaths
+from ..utils import oepaths, oemeta
 from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.helpers import with_retries, quiet_print_function
-
-## function to load most recently-created file in fpath list
-get_file = lambda fp_list: max((fp.stat().st_ctime, fp) for fp in fp_list)[1] if fp_list else None
-
 
 REPORT_TEMPLATE_PATH = Path(
     oepaths.solar, "Data", "Comanche", "Templates", "Curtailment_Report_TEMPLATE.xlsx"
@@ -47,10 +44,11 @@ class ComancheCurtailment:
         self._load_data_from_files()
         self._query_sql_data()
 
+    @lru_cache(maxsize=128)
     def _load_data_from_files(self):
         """Loads data from PI query and PVLib files in FlashReport folder.
         -> self.data["poa"] - columns: ["POA" or "POA_DTN"]
-        -> self.data["pi"] - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment"]
+        -> self.data["pi"] - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment_kw"]
         -> updates self.source_files
         """
 
@@ -60,6 +58,11 @@ class ComancheCurtailment:
                 raise ValueError(f"Missing required file: {pattern}")
             self.source_files.append(fpath.name)
             df = pd.read_csv(fpath, index_col=0, parse_dates=True)
+            if not isinstance(df.index, pd.DatetimeIndex):
+                # this can happen if .csv already has tz info & an error prevents parsing (e.g. dst)
+                format_ = "%Y-%m-%d %H:%M:%S%z"
+                tz = "US/Mountain"  # hardcoded for Comanche
+                df.index = pd.to_datetime(df.index, format=format_, utc=True).tz_convert(tz)
             if df.index.tzinfo is not None:
                 df = remove_tzinfo_and_standardize_index(df)
             return df
@@ -79,9 +82,9 @@ class ComancheCurtailment:
 
         # calculate pvlib inverter sum
         pvlib_inv_sum = df_pvl.filter(like="Possible_Power").sum(axis=1).div(1e3)  # kW to MW
-        pvlib_inv_sum = pvlib_inv_sum.clip(upper=120.0)  # limit to site capacity
         if self.scaling_factor != 1:
             pvlib_inv_sum = pvlib_inv_sum.mul(self.scaling_factor)
+        pvlib_inv_sum = pvlib_inv_sum.clip(upper=120.0)  # limit to site capacity
 
         # create df for data sourced from pi
         df = pd.Series(pvlib_inv_sum, name="possible").to_frame()
@@ -96,22 +99,25 @@ class ComancheCurtailment:
         if sp_col not in df_ppc.columns:
             raise ValueError(f"Column '{sp_col}' not found in PPC dataset.")
         df[sp_col] = df_ppc[sp_col].copy()
+        if df[sp_col].max() == 0.12:
+            df[sp_col] = df[sp_col].mul(1e3)
 
         # create column for curtailed kW
         is_curtailed = (
             df[sp_col].lt(120.0) & df[sp_col].lt(df["possible"]) & df["possible"].gt(df["meter"])
         )
         # NOTE: this is in kW; converted to kWh in subsequent steps
-        df["curtailment"] = np.where(  # poss/meter are in MW
+        df["curtailment_kw"] = np.where(  # poss/meter are in MW
             is_curtailed, df["possible"].sub(df["meter"]).mul(1e3), 0.0
         )
 
-        # assign pi data - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment"]
+        # assign pi data - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment_kw"]
         self.data["pi"] = df.copy()
 
+    @lru_cache(maxsize=128)
     def _query_sql_data(self):
         """Queries interval data from SQL.
-        -> self.data["sql"] - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment"]
+        -> self.data["sql"] - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment_kw"]
         """
         df = comanche_reporting_timeseries(self.year, self.month)
         df = df.rename(
@@ -119,7 +125,7 @@ class ComancheCurtailment:
                 "Expected_KW": "possible",
                 "Meter_KW": "meter",
                 "Power_SP_KW": "xcel_MW_setpoint",
-                "Curtailed_KW": "curtailment",
+                "Curtailed_KW": "curtailment_kw",
             }
         )
         mw_cols = ["possible", "meter", "xcel_MW_setpoint"]
@@ -133,16 +139,16 @@ class ComancheCurtailment:
         df["curt_rate"] = 0.0625  # units: $/kWh
 
         # convert curtailment data from power (kW) to energy (kWh)
-        df["curtailment"] = df["curtailment"].div(60)  # minute-level data
+        df["curtailment_kwh"] = df["curtailment_kw"].div(60)  # minute-level data
 
-        df["lost_revenue"] = df["curtailment"].mul(df["curt_rate"])
-        df["n_curtailments"] = np.where(df["curtailment"].gt(0), 1, 0)  # for summary table
+        df["lost_revenue"] = df["curtailment_kwh"].mul(df["curt_rate"])
+        df["n_curtailments"] = np.where(df["curtailment_kwh"].gt(0), 1, 0)  # for summary table
         self.report_data[source]["interval"] = df.copy()
 
     def _generate_daily_summary_table(self, source):
         # get report interval data
         df = self.report_data[source]["interval"].copy()
-        summary_cols = ["curtailment", "n_curtailments", "lost_revenue"]
+        summary_cols = ["curtailment_kwh", "n_curtailments", "lost_revenue"]
         df = df[summary_cols].rename(columns={"n_curtailments": "curt_hours"})
         df = df.groupby(df.index.day).sum()
         df["curt_hours"] = df["curt_hours"].div(60)
@@ -170,8 +176,8 @@ class ComancheCurtailment:
     def compare_totals(self):
         print(f"Total curtailment losses:")
         for source, dict_ in self.report_data.items():
-            lost_mw = dict_["interval"]["curtailment"].sum() / 1e3  # curtailment is in kW
-            print(f"   {source.rjust(3)} -> {lost_mw:.2f}")
+            lost_mwh = dict_["interval"]["curtailment_kwh"].sum() / 1e3
+            print(f"   {source.rjust(3)} -> {lost_mwh:.2f}")
         return
 
     def generate_report(self, source, q=True, local=False):
@@ -180,13 +186,13 @@ class ComancheCurtailment:
         dfs = self.report_data[source]["summary"].copy()
 
         # resample to 5-minute interval data, reset index for dataframe_to_rows function
-        sum_cols = ["curtailment", "lost_revenue", "n_curtailments"]
+        sum_cols = ["curtailment_kwh", "lost_revenue", "n_curtailments"]
         df = (
             df.resample("5min")
             .agg({c: "sum" if c in sum_cols else "mean" for c in df.columns})
             .copy()
         )
-        df = df.reset_index(drop=False)
+        df = df.drop(columns=["curtailment_kw"]).reset_index(drop=False)
         dfs = dfs.reset_index(drop=False)
 
         # open Excel template workbook
@@ -195,7 +201,7 @@ class ComancheCurtailment:
         ws = wb["Curtailment_ONW"]
 
         # write main data table using interval dataframe
-        # cols. A-I:  [Timestamp, poa,pvlib,meter, xcel_sp, curtailment, rate, lost_rev, n_curt]
+        # cols. A-I: [Timestamp, poa,pvlib,meter, xcel_sp, curtailment_kwh, rate, lost_rev, n_curt]
         rng1_formats = [FMT.datetime] + [FMT.z4] * 3 + [FMT.z2, FMT.z4, FMT.z4, FMT.rev, FMT.int]
         for r, row in enumerate(dataframe_to_rows(df, index=False, header=False)):
             for c, val in enumerate(row):
@@ -203,7 +209,7 @@ class ComancheCurtailment:
                 ws.cell(r + 2, c + 1).number_format = rng1_formats[c]
 
         # SUMMARY TABLE (from dfs)
-        # cols. L-O: [Timestamp, curtailment, curt_hrs, lost_rev]
+        # cols. L-O: [Timestamp, curtailment_kwh, curt_hrs, lost_rev]
         rng2_formats = [FMT.date, FMT.z2, FMT.z2, FMT.rev]
         rng2_offset = 12  # starts at col idx 12
         for r, row in enumerate(dataframe_to_rows(dfs, index=False, header=False)):
@@ -213,7 +219,7 @@ class ComancheCurtailment:
                 cell.number_format = rng2_formats[c]
 
         totals_row = 33  # hard-coded (to accommodate months with diff # of days)
-        totals_cols = ["curtailment", "curt_hours", "lost_revenue"]
+        totals_cols = ["curtailment_kwh", "curt_hours", "lost_revenue"]
         totals_formats = [FMT.rev, FMT.z2, FMT.rev]
         for c, col in enumerate(totals_cols):
             col_idx = c + rng2_offset + 1
@@ -415,12 +421,12 @@ def load_external_curtailment_totals(site: str, year: int, month: int) -> dict:
         try:
             output = get_comanche_curtailment(year, month, return_fpath=True)
         except:
-            output = {}
+            return {}
     elif site in ("Maplewood 1", "Maplewood 2"):
         try:
             output = get_maplewood_curtailment(site, year, month)
         except:
-            output = {}
+            return {}
     else:
         return {}
 
@@ -431,3 +437,76 @@ def load_external_curtailment_totals(site: str, year: int, month: int) -> dict:
         del output["data"]
 
     return output
+
+
+def get_caiso_filepath(year, month):
+    """Returns the filepath to the CAISO file for given year/month"""
+    # find caiso file (check frpath & parent)
+    frpath = oepaths.frpath(year, month, ext="Solar")
+    ympath = oepaths.frpath(year, month)
+    glob_str = "*CAISO*.xlsx"
+    caiso_fpaths = list(frpath.glob(glob_str))
+    if not caiso_fpaths:
+        caiso_fpaths = list(ympath.glob(glob_str))
+    return oepaths.latest_file(caiso_fpaths)
+
+
+@lru_cache(maxsize=128)
+def _caiso_sheets(caiso_fpath):
+    return list(pd.read_excel(caiso_fpath, sheet_name=None, nrows=0).keys())
+
+
+def _get_caiso_sheetname(site, caiso_fpath):
+    """Returns the sheetname in the CAISO file corresponding to the given site"""
+    all_sheets = _caiso_sheets(caiso_fpath)
+    site_keyword = sorted(site.replace("-", " ").split(), key=len)[-1]  # longest word
+    matching_sheets = [s for s in all_sheets if site_keyword in s]
+    if len(matching_sheets) != 1:
+        return None
+    return matching_sheets[0]
+
+
+@lru_cache(maxsize=128)
+def load_caiso_data(site, year, month, formatted=True, return_fpath=False):
+    caiso_fpath = get_caiso_filepath(year, month)
+    if not caiso_fpath:
+        return
+    sheet_name = _get_caiso_sheetname(site, caiso_fpath)
+    if sheet_name is None:
+        return
+    df_caiso = pd.read_excel(caiso_fpath, sheet_name=sheet_name, engine="calamine")
+    index_col = "Interval Start Time"
+    if index_col not in df_caiso.columns:
+        return
+    if formatted is True:
+        site_capacity = oemeta.data["SystemSize"]["MWAC"].get(site)
+        df_caiso = _format_caiso_data(df_caiso, site_capacity)
+    if return_fpath is True:
+        return df_caiso, caiso_fpath
+    return df_caiso
+
+
+def _format_caiso_data(df_caiso, site_capacity):
+    if not isinstance(df_caiso, pd.DataFrame):
+        return
+    df = df_caiso.copy()
+    index_col = "Interval Start Time"
+    if not pd.api.types.is_datetime64_any_dtype(df[index_col]):
+        df[index_col] = pd.to_datetime(df[index_col])
+
+    df = df.set_index(index_col)
+    df = df[["DOT", "SUPP"]]
+
+    year, month = df.index[0].year, df.index[0].month
+    start = pd.Timestamp(year, month, 1)
+    end = start + pd.DateOffset(months=1)
+    expected_index = pd.date_range(start, end, freq="5min")[:-1]
+    df = df[(df.index >= start) & (df.index < end)]
+    if df.index.duplicated().any():
+        df = df[~df.index.duplicated(keep="first")].copy()
+    if df.shape[0] != len(expected_index):
+        df = df.reindex(expected_index)
+
+    df["SUPP"] = df["SUPP"].fillna(0)
+    df["CAISO_MW_Setpoint"] = df["DOT"].mask(df["SUPP"] == 0, site_capacity)
+    return df

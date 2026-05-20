@@ -355,8 +355,13 @@ def add_solar_metadata_to_dtn_output(df_dtn: pd.DataFrame, site: str):
     lat, lon = SolarSite(site).coordinates
     solar_position = get_solarposition(datetime_index, lat, lon)
 
+    # add clearsky data
+    location = get_site_location(site)
+    clearsky = location.get_clearsky(datetime_index, solar_position=solar_position)
+    clearsky.columns = [f"{c}_clearsky" for c in clearsky.columns]
+
     # join dtn and solar position, then add other irradiance components
-    df = df_dtn.join(solar_position)
+    df = df_dtn.join(solar_position).join(clearsky)
     df = _add_irradiance_components(df)
 
     # transposition to get poa_global from dtn_ghi

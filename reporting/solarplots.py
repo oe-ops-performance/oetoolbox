@@ -6,17 +6,15 @@ import plotly
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from ..utils import oepaths
-from ..datatools.meterhistorian import load_meter_data, load_meter_historian
-from .tools import (
-    load_monthly_query_files,
+from .functions import (
     get_flashreport_summary_table,
-    solar_fr_fpath_dict,
-    get_flashreport_kpis,
+    get_kpis_from_flashreport,
     get_kpis_from_tracker,
     get_solar_budget_values,
 )
-
+from ..utils import oepaths
+from ..utils.assets import SolarSite
+from ..datatools.meterhistorian import load_meter_data, load_meter_historian
 
 config_ = {
     "displaylogo": False,
@@ -34,10 +32,8 @@ config_ = {
 
 def inv_pvlib_subplots(site, year=None, month=None, dfinv=None, dfpvl=None, fig_height=None):
     if (year is not None) and (month is not None):
-        qfile_types = ["Inverters", "PVLib"]
-        df_dict = load_monthly_query_files(
-            site, year, month, types_=qfile_types, separate_dfs=True, q=True
-        )
+        qfile_types = ["Inverters", "pvlib"]
+        df_dict = SolarSite(site).load_latest_reporting_files(year, month)
         if not all(k in df_dict for k in qfile_types):
             print(
                 f"Missing the following file(s): {[k for k in qfile_types if k not in df_dict]}\n>> exiting.."
@@ -170,26 +166,43 @@ def monthly_summary_subplots(
 
     qfile_types = ["Inverters", "PVLib", "Meter"]
 
-    ## get flashreport-related files
-    output = load_monthly_query_files(
-        site,
-        year,
-        month,
-        types_=qfile_types,
-        separate_dfs=True,
-        q=True,
-        return_fpaths=return_df_and_fpaths,
-    )
-    if output is None:
-        print("error: no data")
-        return
+    solarsite = SolarSite(site)
 
-    df_dict = output if not return_df_and_fpaths else output[0]
-    if not all(k in df_dict for k in qfile_types):
-        print(
-            f"Missing the following file(s): {[k for k in qfile_types if k not in df_dict]}\n>> exiting.."
-        )
-        return
+    def _get_fpath(grp):
+        if grp in ("Inverters", "Meter"):
+            fpaths = solarsite.get_data_filepaths(year, month, asset_group=grp)
+        elif grp == "PVLib":
+            fpaths = list(solarsite.flashreport_folder(year, month).glob("PVLib_InvAC*.csv"))
+        else:
+            raise KeyError(f"Invalid data group: {grp}")
+        fp = oepaths.latest_file(fpaths)
+        if fp is None:
+            raise ValueError(f"No data found for {grp=}. Exiting..")
+        return fp
+
+    fpath_dict = {grp: _get_fpath(grp) for grp in qfile_types}
+
+    def _load_data(grp):
+        df = solarsite._load_file(fpath_dict[grp], with_tz=False)
+        dropcols = [c for c in df.columns if "processed" in c.casefold()]
+        df = df.drop(columns=dropcols)
+        if grp == "Inverters":
+            df = df.filter(like="ActivePower").copy()
+            df["Actual_MW"] = df.sum(axis=1).div(1000)
+        elif grp == "PVLib":
+            pvl_inv_cols = list(df.filter(like="Possible_Power").columns)
+            poacol = "POA" if "POA" in df.columns else "POA_DTN"
+            sensor_cols = [poacol]
+            if "module_temperature" in df.columns:
+                sensor_cols.append("module_temperature")
+            keepcols = sensor_cols + pvl_inv_cols
+            df = df[keepcols]
+            df["Possible_MW"] = df[pvl_inv_cols].sum(axis=1).div(1000).copy()
+        elif grp == "Meter":
+            df = df.rename(columns={df.columns[0]: "PI_Meter_MW"})
+        return df
+
+    df_dict = {grp: _load_data(grp) for grp in qfile_types}
 
     dfi, dfp, dfm = map(lambda k: df_dict[k], qfile_types)
 
@@ -261,7 +274,7 @@ def monthly_summary_subplots(
     # load kpis from flashreport for current year/month & merge with budget values
     frfpaths = list(oepaths.frpath(year, month, ext="solar", site=site).glob("*FlashReport*.xlsx"))
     if len(frfpaths) > 0:
-        dfkpi = get_flashreport_kpis(site, year, month, q=True)
+        dfkpi = get_kpis_from_flashreport(site, year, month)
         dfkpi = dfkpi.merge(dfb, how="left", on="Project").set_index("Project")
         dfkpi = dfkpi.apply(pd.to_numeric).fillna(0)
         if dfb.empty or dfkpi.filter(like="Budget").isna().all().any():
@@ -730,10 +743,7 @@ def fr_historical_summary_plot(site, yearmonthlist, savehtml=False, q=True):
         qprint("getting missing values from flashreports..")
     for date_ in dates_with_missing_vals:
         year, month = date_.year, date_.month
-        dff = get_flashreport_kpis(site, year, month, q=False)
-        if dff is None:
-            qprint("")
-            continue
+        dff = get_kpis_from_flashreport(site, year, month)
 
         ## find associated columns with missing values
         dfsT = dfs[dfs.Date.eq(date_)].T.copy()
@@ -752,9 +762,10 @@ def fr_historical_summary_plot(site, yearmonthlist, savehtml=False, q=True):
     qprint("done!")
 
     ## get pi meter data
+    solarsite = SolarSite(site)
     pi_meter_vals = []
     for y, m in yearmonthlist:
-        dfpi = load_monthly_query_files(site, y, m, types_=["Meter"], separate_dfs=False, q=True)
+        dfpi = solarsite.load_data_file(year, month, file_type="Meter")
         mcol = dfpi.columns[0]
         pi_total = dfpi.resample("h").mean()[mcol].sum()
         pi_meter_vals.append(pi_total)
@@ -822,10 +833,13 @@ def fr_historical_summary_plot(site, yearmonthlist, savehtml=False, q=True):
 
 ## get df for meter comparison plot "meter_time_series_compare" (below)
 def get_site_combined_meter_df(site, year, month, df_util=None):
-    dfm = load_monthly_query_files(site, year, month, types_=["Meter", "Inverters"], q=False)
-    keepcols_ = {"PI_Meter_MW": "PI_Meter", "Actual_MW": "Inverter_Sum"}
-    df = dfm[[c for c in dfm.columns if c in keepcols_]].copy()
-    df = df.rename(columns={c: keepcols_[c] for c in df.columns})
+    df = SolarSite(site).load_data_file(year, month, file_type=["Inverters", "Meter"])
+    *inv_cols, meter_col = df.columns
+    df = (
+        df[[meter_col]]
+        .rename(columns={meter_col: "PI_Meter"})
+        .join(df[inv_cols].sum(axis=1).div(1e3).to_frame(name="Inverter_Sum"))
+    )
     df = df.resample("h").mean()
     if isinstance(df_util, str):
         if df_util == "skip":
@@ -962,13 +976,13 @@ def meter_comparison_subplots(
 ):
 
     ## check requirements for sites in list
-    frfpath_dict = solar_fr_fpath_dict(year, month)
-    fr_sites = [s for s in sitelist if s in frfpath_dict]
-    c1 = lambda site: any("PIQuery_Inverters" in fp.name for fp in frfpath_dict[site])
-    c2 = lambda site: any("PIQuery_Meter" in fp.name for fp in frfpath_dict[site])
-    isvalid_ = lambda site: (c1(site) and c2(site))
-    valid_sites = [s for s in fr_sites if isvalid_(s)]
-    if not valid_sites:
+    data_exists = (
+        lambda s, grp: SolarSite(s).get_flashreport_status(year, month)["query"].get(grp, False)
+    )
+    has_reqs = lambda s: data_exists(s, "Inverters") and data_exists(s, "Meter")
+    sitelist = list(filter(has_reqs, sitelist))
+
+    if not sitelist:
         print("None of the specified sites have the required files for plotting.\nExiting..")
         return
 
@@ -980,16 +994,17 @@ def meter_comparison_subplots(
             dfum = df_util.copy()
         dfu = dfum.dropna(axis=1, how="all").copy()
     else:
-        dfu = load_meter_data(year, month, sitelist=valid_sites, q=q)
+        dfu = load_meter_data(year, month, sitelist=sitelist, q=q)
 
     queryfile_dict = {}
-    for site in valid_sites:
-        dfm = load_monthly_query_files(site, year, month, types_=["Meter", "Inverters"], q=q)
-        if not q:
-            print("")
-        keepcols_ = {"PI_Meter_MW": "PI_Meter", "Actual_MW": "Inverter_Sum"}
-        df_ = dfm[[c for c in dfm.columns if c in keepcols_]].copy()
-        df_ = df_.rename(columns={c: keepcols_[c] for c in df_.columns})
+    for site in sitelist:
+        dfm = SolarSite(site).load_data_file(year, month, file_type=["Inverters", "Meter"])
+        *inv_cols, meter_col = dfm.columns
+        df_ = (
+            dfm[[meter_col]]
+            .rename(columns={meter_col: "PI_Meter"})
+            .join(dfm[inv_cols].sum(axis=1).div(1e3).to_frame(name="Inverter_Sum"))
+        )
         df_ = df_.resample("h").mean()
         if site in dfu.columns:
             df_["Utility"] = dfu[site].copy()
@@ -999,13 +1014,13 @@ def meter_comparison_subplots(
     ## plot
     title_ = f"<b>Meter Data Comparison - {calendar.month_name[month]} {year}</b>"
 
-    n_rows = len(valid_sites)
+    n_rows = len(sitelist)
 
     fig = make_subplots(
         rows=n_rows,
         cols=1,
         vertical_spacing=0.25 / n_rows,  # default 0.3/n_rows
-        subplot_titles=valid_sites,
+        subplot_titles=sitelist,
     )
 
     htemplate = (
@@ -1130,10 +1145,8 @@ def flashreport_inv_totals_subplots(site, year, month, q=True):
 
 
 def flashreport_inv_daily_gen_subplots(site, year, month, q=True):
-    df_dict = load_monthly_query_files(
-        site, year, month, types_=["Inverters", "PVLib"], separate_dfs=True, q=q
-    )
-    if not all(k in df_dict for k in ["Inverters", "PVLib"]):
+    df_dict = SolarSite(site).load_latest_reporting_files(year, month)
+    if not all(k in df_dict for k in ["Inverters", "pvlib"]):
         print("one or more files missing.\nexiting..")
         return
 
@@ -1143,7 +1156,7 @@ def flashreport_inv_daily_gen_subplots(site, year, month, q=True):
     dfi = dfi_.drop(columns=["Actual_MW"]).copy()
     dfi = dfi.rename_axis("Date").reset_index(drop=False)
 
-    df_pvl = df_dict.get("PVLib")
+    df_pvl = df_dict.get("pvlib")
     pvlcols = [c for c in df_pvl if "Possible_Power" in c]
     dfp_ = df_pvl[pvlcols].resample("h").mean().resample("D").sum().copy()
     dfp = dfp_.rename_axis("Date").reset_index(drop=False).copy()
