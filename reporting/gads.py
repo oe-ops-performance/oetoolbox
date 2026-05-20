@@ -3,14 +3,14 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from ..utils import oemeta, oepaths
+from ..utils import config, oemeta, oepaths
 from ..utils.assets import PISite
 from ..utils.helpers import quiet_print_function
 from ..utils.pi import PIDataset
 from ..utils.solar import SolarDataset
 
+GADS_DIR = config.OPS_PERFORMANCE_DIR / "Compliance" / "GADS"
 
-GADS_DIR = Path(oepaths.operations, "Compliance", "GADS")
 RENEWABLE_AF_PATH = "\\\\CORP-PISQLAF\\Onward Energy\\Renewable Fleet"
 RENEWABLE_SITES = {
     "solar": list(oemeta.data["AF_Solar_V3"].keys()),
