@@ -90,21 +90,6 @@ DEFAULT_QUERY_PARAMETERS = {
 QUERY_ARGS = {method: list(params.keys()) for method, params in DEFAULT_QUERY_PARAMETERS.items()}
 
 
-def validate_query_item_list(item_list: list):
-    """Verifies that all items in list are either attribute paths or pipoints (not a mix)
-    -> returns item_type (attribute or pipoint)
-    """
-    if not item_list:
-        raise ValueError("No query items/tags specified.")
-    all_attpaths = all(item.startswith(PI_DATABASE_PATH) for item in item_list)
-    all_pipoints = not any(PI_DATABASE_PATH in item for item in item_list)
-    if not (all_attpaths or all_pipoints):
-        raise ValueError(
-            "All items must be of the same type (i.e. all attribute paths, or all pipoints)"
-        )
-    return "attribute" if all_attpaths else "pipoint"
-
-
 class PIDataset(Dataset):
     """A dataset loaded from PI containing time series data for specified attributes/pipoints.
     Can also initialize from a PI site to leverage metadata/methods. Inherits from Dataset.
@@ -187,26 +172,37 @@ class PIDataset(Dataset):
         if data_format not in ["long", "wide"]:
             raise KeyError("Invalid data format.")
 
-        # force data format to long if querying recorded values
-        if method == "recorded_values" and data_format == "wide":
-            self.data_format = "long"
-            print(
-                "Note: specified 'wide' format, overriding to 'long' due to "
-                "the nature of recorded values (i.e. irregular timestamps)."
-            )
+        if method == "recorded_values" and data_format == "wide" and freq is None:
+            raise ValueError("Must provide frequency for resampling recorded values.")
 
         # database related
         self.piserver = PIServers().DefaultPIServer
         self.afserver = PISystems().DefaultPISystem
         self.database = self.afserver.Databases.get_Item("Onward Energy")
+        self.db_path = self.database.GetPath()
 
         # validate specified query items/tags
-        self.item_type = validate_query_item_list(original_item_list)  # confirms all same type
+        self._validate_query_item_list(original_item_list)  # assigns self.item_type
         self.item_list = original_item_list  # init
         self.invalid_items = []  # init
 
         # get af data object for specified query items (includes validation)
         self.af_data_object = self._create_data_object(raise_not_found=raise_not_found)
+
+    def _validate_query_item_list(self, original_item_list) -> None:
+        """Verifies that all items in list are either attribute paths or pipoints (not a mix)
+        -> assigns self.item_type (attribute or pipoint)
+        """
+        if not original_item_list:
+            raise ValueError("No query items/tags specified.")
+        all_attpaths = all(item.startswith(self.db_path) for item in original_item_list)
+        all_pipoints = not any(self.db_path in item for item in original_item_list)
+        if not (all_attpaths or all_pipoints):
+            raise ValueError(
+                "All items must be of the same type (i.e. all attribute paths, or all pipoints)"
+            )
+        self.item_type = "attribute" if all_attpaths else "pipoint"
+        return
 
     @property
     def expected_index(self):
@@ -429,12 +425,23 @@ class PIDataset(Dataset):
             df_ = self._format_pi_data(df_)
             df_list.append(df_)
 
-        if self.data_format == "wide":
-            df_list.insert(0, pd.DataFrame(columns=self.expected_columns()))  # ensures all cols
         df = pd.concat(df_list, axis=0, ignore_index=False)
+
         if self.method == "summaries":
             if not all(x in df.index for x in self.expected_index):  # validate index
                 df = df.reindex(self.expected_index)
+        elif self.freq is not None:
+            expected_index = pd.date_range(
+                self.start_date,
+                self.end_date,
+                freq=self.freq.replace("m", "min"),
+                tz=self.tz,
+                inclusive="left",
+            )
+            if df.index.duplicated().any():
+                df = df.loc[~df.index.duplicated(keep="first")]
+            if len(expected_index) != len(df.index):
+                df = df.reindex(expected_index)  # removes extra timestamp at end (from resample)
 
         df = df.rename_axis("Timestamp")
         self.data = df.copy()
@@ -467,18 +474,43 @@ class PIDataset(Dataset):
         df = df.tz_convert(tz=self.site.timezone)
         if self.tz is None:
             df = df.tz_localize(None)
+
         if self.data_format == "wide":
+            if self.method == "recorded_values":
+                # group/resample/format recorded values data (long-format)
+                pd_freq = self.freq.replace("m", "min")
+                group_cols = self.id_columns + [
+                    "Attribute" if self.item_type == "attribute" else "PIPoint"
+                ]
+
+                df = df.groupby(group_cols).resample(pd_freq).mean()
+                df = df.unstack(group_cols)
+                df.columns = df.columns.droplevel()  # drops original "Value" col name
+
+                # drop group ID (all same group)
+                if "Group_ID" in group_cols:
+                    df.columns = df.columns.droplevel(["Group_ID"])
+
+                # combine multi-index to single level (if not already)
+                if type(df.columns) is pd.MultiIndex:
+                    # note: swaplevel defaults to the two inner-most levels
+                    df.columns = df.columns.swaplevel().map("_".join)  # att_asset
+                ordered_cols = [c for c in self.expected_columns() if c in df.columns]
+                df = df[ordered_cols]
+
+            # ensure all columns present
+            for i, col in enumerate(self.expected_columns()):
+                if col not in df.columns:
+                    df.insert(i, col, np.nan)
+
+            # validate datetime index
             start, end = df.index.min(), df.index.max()
             expected_index = pd.date_range(start, end, freq=self.freq.replace("m", "min"))
             if df.index.duplicated().any():
                 df = df.loc[~df.index.duplicated(keep="first")]
             if df.shape[0] != expected_index.shape[0]:
                 df = df.reindex(expected_index)
-            # missing_cols = [c for c in self.expected_columns() if c not in df.columns]
-            # if missing_cols:
-            #     for col in missing_cols:
-            #         df[col] = np.nan
-            #     df = df[self.expected_columns()].copy()  # reorder
+
         df = df.rename_axis("Timestamp")
         return df
 
@@ -544,8 +576,9 @@ class PIDataset(Dataset):
         """Returns a list of necessary ID columns for use with long-format data
         -> note: currently only supports attribute paths
         """
-        if self.data_format == "wide":
-            return []  # only long format
+        if self.data_format == "wide":  # primarily for long format
+            if self.method == "summaries":  # exception for recvals b/c original output is long
+                return []
         if self.item_type == "pipoint":
             return []  # does not currently support inferred assets from pipoints
         n_elements_max = self.max_attribute_path_level
@@ -633,8 +666,8 @@ class PIDataset(Dataset):
             df_list.append(df_)
         if not df_list:
             raise ValueError("Error retrieving data.")
-        # return self._concatenate_data(df_list)
-        return pd.concat(df_list, axis=1 if self.data_format == "wide" else 0)
+        axis = 1 if self.data_format == "wide" and self.method == "summaries" else 0
+        return pd.concat(df_list, axis=axis)
 
     def _retrieve_data(self, output, item_name: str, item: str):
         """Iterates over the AFValues collection and returns a dataframe with the associated data
@@ -668,7 +701,7 @@ class PIDataset(Dataset):
         if self._check_for_bad_data(values, tstamps, flags):
             return pd.DataFrame()
 
-        if self.data_format == "wide":
+        if self.data_format == "wide" and self.method == "summaries":
             # item_name is either pipoint, or column name derived from attribute path
             if self.item_type == "pipoint":
                 item_name_ = af_values.PIPoint.Name
@@ -696,17 +729,6 @@ class PIDataset(Dataset):
         for element, id_col in zip(self._get_item_elements(item), self.id_columns):
             df_[id_col] = element
         return df_
-
-    def _concatenate_data(self, df_list: list):
-        if self.data_format == "wide":
-            df = pd.concat(df_list, axis=1)
-            # confirm all columns exist in output
-            # for i, item_name in enumerate(self.item_names):
-            #     if item_name not in df.columns:
-            #         df.insert(i, item_name, np.nan)
-        else:  # long format  TODO
-            df = pd.concat(df_list, axis=0)
-        return df
 
     def _validate_query_kwargs(self, kwargs):
         """Returns dictionary of keys/values that exist in AFSDK namespace."""
