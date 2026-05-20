@@ -1,6 +1,14 @@
 import datetime as dt
 from pathlib import Path
 
+from .config import (
+    USER_ONEDRIVE_PATH,
+    USER_ONWARD_PATH,
+    INTRALINKS_PATH,
+    COMMERCIAL_DIR,
+    OPS_PERFORMANCE_DIR,
+)
+
 
 # define functions for getting date created & optional string formatting
 def date_created(filepath, as_string=False):
@@ -28,7 +36,7 @@ shared_fp = max(
     (fp.stat().st_mtime, fp) for fp in onward_fp.iterdir() if fp.name.startswith("Shared")
 )[1]
 intra_fp = shared_fp if "Intralinks" in shared_fp.name else Path(shared_fp, "Intralinks")
-internal_documents = Path(intra_fp, "Internal Documents")
+internal_documents = Path(INTRALINKS_PATH, "Internal Documents")
 
 # frequently-referenced Operations directories
 operations = Path(internal_documents, "Operations")
@@ -40,7 +48,7 @@ references = Path(python_projects, "References")
 released = Path(python_projects, "Released")
 
 # utility meter generation directories
-commercial = Path(internal_documents, "Commercial")
+commercial = COMMERCIAL_DIR / "Commercial"
 standard_meter_gen = Path(commercial, "Standardized Meter Generation")
 varsity_metergen = Path(standard_meter_gen, "Varsity Generation DataBase", "Monthly Generation")
 
