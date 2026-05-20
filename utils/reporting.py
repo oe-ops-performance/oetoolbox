@@ -1,4 +1,5 @@
 import datetime as dt
+import calendar
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -12,14 +13,19 @@ from .datetime import (
     remove_tzinfo_and_standardize_index,
 )
 from .helpers import quiet_print_function
-from .oemeta import PI_SITES_BY_FLEET
-from .oepaths import date_created, latest_file, sorted_filepaths, validated_savepath
+from . import oemeta
+from .oepaths import date_created, flashreports, latest_file, sorted_filepaths, validated_savepath
 from .solar import SolarDataset
 from ..dataquery.external import query_fracsun, get_fracsun_sites
 from ..datatools.backfill import process_and_backfill_meteo_data, meteo_backfill_subplots
 from ..datatools.pvlib import run_flashreport_pvlib_model, run_pvlib_model
 from ..datatools.qcutils import run_auto_qc, qc_compare_fig
-from ..datatools.meterhistorian import add_pi_data_files_to_server_folder, load_meter_historian
+from ..datatools.meterhistorian import (
+    add_pi_data_files_to_server_folder,
+    load_meter_historian,
+    load_utility_meter_data,
+    VARSITY_STLMTUI_SITE_IDS,
+)
 from ..reporting.flashreports import generate_monthlyFlashReport
 from ..reporting.insurance_bi import (
     calculate_insurance_bi_adjustment,
@@ -36,7 +42,7 @@ from ..reporting.kpis import (
 )
 from ..reporting.solarplots import monthly_summary_subplots
 
-SOLAR_SITES = PI_SITES_BY_FLEET["solar"]
+SOLAR_SITES = oemeta.PI_SITES_BY_FLEET["solar"]
 
 
 def most_recent_reporting_period() -> tuple[int]:
@@ -229,6 +235,9 @@ class FlashReportGenerator:
         for group in self.query_groups:
             grp = group.replace(" ", "")
             fpath_dict[group] = [fp for fp in self.flashreport_fpaths["query"] if grp in fp.name]
+        site_query_fpaths = [fp for fp in self.flashreport_fpaths["query"] if "_Site_" in fp.name]
+        if site_query_fpaths:
+            fpath_dict["Site"] = site_query_fpaths
         return fpath_dict
 
     @property
@@ -257,17 +266,23 @@ class FlashReportGenerator:
         return output
 
     def quick_load_latest_data(
-        self, groups=[], with_tz=False, include_fpaths=False
+        self, groups=[], with_tz=False, include_fpaths=False, formatkeys=True, q=True
     ) -> dict[str, pd.DataFrame]:
         """if include fpaths, adds key 'source_files' to output dict with list[Path] as value"""
+        qprint = quiet_print_function(q=q)
         data, source_fpaths = {}, []
-        DEFAULT_GROUPS = ["Inverters", "Met Stations", "Meter", "Modules", "pvlib"]
+        DEFAULT_PI_GROUPS = [
+            "Inverters",
+            "Combiners",
+            "Met Stations",
+            "Meter",
+            "Modules",
+            "Site",
+        ]
         if not groups:
-            groups = DEFAULT_GROUPS
-        groups = [g for g in DEFAULT_GROUPS if g in groups]
-        for asset_group in ["Inverters", "Met Stations", "Meter", "Modules"]:
-            if asset_group not in groups:
-                continue
+            groups = DEFAULT_PI_GROUPS
+        groups = [g for g in DEFAULT_PI_GROUPS if g in groups]
+        for asset_group in groups:
             df, fpath = self.load_query_file(
                 asset_group=asset_group, version="all", with_tz=with_tz, return_fpath=True
             )
@@ -275,13 +290,70 @@ class FlashReportGenerator:
                 data[asset_group] = df.copy()
                 source_fpaths.append(fpath)
 
+        # load pvlib file if exists
         pvl_fpath = self.latest_filepaths.get("pvlib", None)
-        if pvl_fpath is not None and "pvlib" in groups:
+        if pvl_fpath is not None:
             data["pvlib"] = self.site._load_file(filepath=pvl_fpath, with_tz=with_tz)
             source_fpaths.append(pvl_fpath)
 
-        if len(source_fpaths) > 0 and include_fpaths:
-            data["source_files"] = source_fpaths
+        # load pvlib_cmb file if exists
+        pvl_cmb_fpath = latest_file(list(self.folder.glob("PVLib_Combiners_*.csv")))
+        if pvl_cmb_fpath is not None:
+            data["pvlib_cmb"] = self.site._load_file(filepath=pvl_cmb_fpath, with_tz=with_tz)
+            source_fpaths.append(pvl_cmb_fpath)
+
+        # load dtn data from file
+        dtn_dataset = SolarDataset.get_supporting_data(*self.args, return_dataframe=False, q=True)
+        data["dtn"] = dtn_dataset.data
+        source_fpaths.extend([Path(fp) for fp in dtn_dataset.source_files])
+
+        # load fracsun soiling data
+        df = SolarDataset.from_fracsun(*self.args, keep_tz=with_tz, q=True)
+        if df is not None:
+            data["soiling"] = df.copy()
+
+        # load external curtailment data from CAISO file (if applicable)
+        if self.site.name in VARSITY_STLMTUI_SITE_IDS:
+            output = SolarDataset.from_caiso_file(
+                *self.args, keep_tz=with_tz, freq="1min", return_fpath=True
+            )
+            if output is not None:
+                df, fpath = output
+                source_fpaths.append(fpath)
+                if "Site" in data.keys():
+                    if all(data["Site"].index == df.index):
+                        qprint(
+                            "Overwriting OE.CurtailmentStatus and OE.SiteSetpoint data with CAISO data."
+                        )
+                        df.index = data["Site"].index
+                        data["Site"]["OE.CurtailmentStatus"] = df["CurtailmentStatus"]
+                        data["Site"]["OE.SiteSetpoint"] = df["CAISO_MW_Setpoint"]
+                    else:
+                        qprint("Warning: index mismatch between CAISO data and 'Site' PI dataset.")
+                else:
+                    qprint("Using CAISO data for OE.CurtailmentStatus and OE.SiteSetpoint data.")
+                    data["Site"] = df[["CurtailmentStatus", "CAISO_MW_Setpoint"]]
+                    data["Site"].columns = ["OE.CurtailmentStatus", "OE.SiteSetpoint"]
+            else:
+                qprint("Warning: No CAISO file found.")
+
+        if formatkeys is True:
+            data = {key.replace(" ", "_").lower(): val for key, val in data.items()}
+
+        if with_tz is True:
+            ref_tz = list(data.values())[0].index.tzinfo
+            data = {
+                key: df if df.index.tzinfo == ref_tz else df.tz_convert(ref_tz)
+                for key, df in data.items()
+            }
+            qprint("Standardized timezones across all dfs (i.e. generic utc-offset vs. named tz)")
+
+        if len(source_fpaths) > 0:
+            if include_fpaths:
+                data["source_files"] = source_fpaths
+            qprint(f"Loaded the following files:")
+            for fp in source_fpaths:
+                qprint(f" -> {fp.name}")
 
         return data
 
@@ -580,7 +652,7 @@ class FlashReportGenerator:
         output = process_and_backfill_meteo_data(
             filepath=clean_fp, site=self.site.name, n_clearsky=5, r2_diff=r2_diff, q=q
         )
-        if output is None:
+        if output is None or isinstance(output, pd.DataFrame):
             qprint(f"Error in backfill script (no output).\n--- END BACKFILL ---\n")
             return
         df_processed, changes_dict = output
@@ -661,7 +733,7 @@ class FlashReportGenerator:
         if processed_fpath is None:
             # using latest processed met file
             df_dtn = None  # init
-            if expected_poa_source == "dtn":
+            if expected_poa_source == "dtn" or force_dtn is True:
                 df_dtn = SolarDataset.get_supporting_data(*self.args, q=q)
             df_pvlib = run_flashreport_pvlib_model(
                 *self.args, localized=keep_tz, force_dtn=force_dtn, df_dtn=df_dtn, q=q
@@ -713,7 +785,7 @@ class FlashReportGenerator:
         return status
 
     def create_monthly_report(
-        self, local=False, return_source_filepaths=True, q=True
+        self, local=False, return_source_filepaths=True, q=True, force_dtn=False
     ) -> Union[None, Path]:
         """Generates and saves new monthly FlashReport file."""
         qprint = quiet_print_function(q=q)
@@ -732,6 +804,7 @@ class FlashReportGenerator:
             local=local,
             df_util=self.df_util,
             return_df_and_log_info=return_source_filepaths,
+            force_dtn=force_dtn,
         )
 
         if output is None:
@@ -1175,64 +1248,6 @@ class FlashReportGenerator:
             return output_data, data_dict.get("source_files", [])
         return output_data
 
-    # TODO: refactor the below function (from SolarSite)
-    # def calculate_monthly_variance_kpis(self, year: int, month: int, meter_total: float = None):
-    #     """Calculates monthly variance KPIs for generation, resource, and availability.
-
-    #     >> data requirements / sources
-    #         - total generation (from historian, or PI meter file) <- use meter_total arg to bypass
-    #         - budget generation (from kpi tracker file)
-    #         - insolation (from PROCESSED met station file, or DTN transposition)
-    #         - curtailment (Comanche only - from curtailment report file)
-
-    #     Parameters
-    #     ----------
-    #     year : int
-    #     month : int
-    #     meter_total : float, optional
-    #         When provided, skips loading of historian file or PI data (for use in loop)
-
-    #     Returns
-    #     -------
-    #     A dictionary with the following format:
-    #         variance_dict = {
-    #             "generation": {"value": variance_val, "%": variance_pct},
-    #             "resource": {"value": variance_val, "%": variance_pct},
-    #             "availability": {"%": variance_pct},
-    #         }
-    #     """
-    #     report_status = self.get_flashreport_status(year, month)
-
-    #     start = pd.Timestamp(year, month, 1)
-    #     end = start + pd.DateOffset(months=1)
-    #     start_date, end_date = map(lambda t: t.strftime("%Y-%m-%d"), [start, end])
-
-    #     # get meter generation
-    #     if meter_total is None:
-    #         df_hist = load_meter_historian(year=year, month=month)
-    #         if self.name in df_hist.columns:
-    #             meter_total = df_hist[self.name].sum()
-    #         elif report_status["qc"].get("Meter"):
-    #             kwargs = dict(asset_group="Meter", start_date=start_date, end_date=end_date)
-    #             dataset = SolarDataset.from_existing_query_files(self.name, **kwargs)
-    #             meter_total = dataset.data.iloc[:, 0].sum() / 60  # minute-level data
-    #         else:
-    #             meter_total = 0.0
-
-    #     # get budget generation
-    #     budget_dict = self.get_budget_values(year, month)
-
-    #     # get insolation
-    #     if report_status["backfill"].get("Met Stations"):
-    #         kwargs2 = dict(asset_group="Met Stations", start_date=start_date, end_date=end_date)
-    #         dataset = SolarDataset.from_existing_query_files(self.name, **kwargs2)
-    #         poacol = "POA" if "POA" in dataset.data.columns else "POA_DTN"
-    #         insolation_total = dataset.data[poacol].sum() / 60  # minute-level data
-    #     else:
-    #         # TODO: add function to get transposed poa from dtn
-    #         pass
-    #     return
-
 
 def _validated_sitelist(sitelist: list[str] = []) -> list[str]:
     """Returns list of valid solar sites. If not provided, returns all solar sites."""
@@ -1242,3 +1257,124 @@ def _validated_sitelist(sitelist: list[str] = []) -> list[str]:
             raise ValueError("No valid solar sites found in specified sitelist.")
         return sitelist
     return SOLAR_SITES
+
+
+KPIS_AND_NOTES_FILEPATH = Path(flashreports, "_kpis_and_notes_.xlsx")
+
+
+class MonthlySolarReporting:
+    """A container class to hold multiple instances of FlashReportGenerator"""
+
+    def __init__(self, year: int, month: int, df_util: pd.DataFrame = None, q: bool = True):
+        self.year = year
+        self.month = month
+        self.q = q
+        self._validate_df_util_input(df_util)
+        self.report_generators = {}  # init - used to hold instances of FlashReportGenerator
+        self.cached_data = {}  # init
+        self.kpis = {"notes": None, "tracker": {}}  # init
+
+    def _validate_df_util_input(self, df_util):
+        if df_util is None:
+            df_util = load_utility_meter_data(
+                year=self.year, month=self.month, fleet="solar", q=self.q
+            )
+        elif not isinstance(df_util, pd.DataFrame):
+            raise ValueError("Argument 'df_util' must be a DataFrame.")
+        self.df_util = df_util
+
+    def get_generator(self, site: str):
+        gen = self.report_generators.get(site, None)
+        if isinstance(gen, FlashReportGenerator):
+            return gen
+        gen = FlashReportGenerator(
+            site=site, year=self.year, month=self.month, df_util=self.df_util
+        )
+        self.report_generators.update({site: gen})
+        return gen
+
+    def quick_load(self, site: str, update: bool = False) -> dict:
+
+        data = self.cached_data.get(site, None)
+        if data is not None:
+            if update is False:
+                if self.q is False:
+                    print(f"Retrieved data from cache for {site = }.")
+                return data
+            if self.q is False:
+                print(f"Note: found cached data for {site=}; re-loading ({update=})")
+
+        gen = self.get_generator(site)
+        data = gen.quick_load_latest_data(formatkeys=True, with_tz=True, q=self.q)
+        for key in ("inverters", "pvlib", "pvlib_cmb", "meter"):
+            if key in data.keys():
+                data[key] = data[key].clip(lower=0.0)
+
+        self.cached_data.update({site: data})
+        return data
+
+    def _get_kpis_from_notes_file(self) -> pd.DataFrame:
+        if self.kpis["notes"] is not None:
+            return self.kpis["notes"]
+        sheet_name = f"{calendar.month_name[self.month]}_{self.year}"
+        df = pd.read_excel(KPIS_AND_NOTES_FILEPATH, engine="calamine", sheet_name=sheet_name)
+        hdr_idx = df[df.isin([sheet_name]).any(axis=1)].index[0]
+        df.columns = df.iloc[hdr_idx, :].values
+        end_idx = df.columns.get_loc("Inverter Uptime Availability (%)") + 1
+        keep_idx_list = list(range(end_idx)) + [df.columns.get_loc("Energetic Availability (%)")]
+        df = df[df[sheet_name].isin(SOLAR_SITES)].iloc[:, keep_idx_list].copy()
+        df = df.rename(columns={sheet_name: "Project"}).set_index("Project")
+        self.kpis.update({"notes": df.copy()})
+        return df
+
+    # for previous energetic availability
+    def _get_kpis_from_tracker(self, year, month) -> pd.DataFrame:
+        key = f"{year}_{month:02d}"
+        if key in self.kpis["tracker"].keys():
+            return self.kpis["tracker"][key]
+        df_list = []
+        for site in SOLAR_SITES:
+            df = SolarSite(site).get_monthly_kpis(year, month, source="tracker")
+            df_list.append(df)
+        df = pd.concat(df_list, ignore_index=True)
+        df = df.set_index("Project")
+        self.kpis["tracker"].update({key: df.copy()})
+        return df
+
+    def _get_kpi_analysis_data(self, n_prev=1) -> dict:
+        getkey = lambda y, m: f"{y}_{m:02d}"
+        latest_period = (self.year, self.month)
+        kpi_data = {getkey(*latest_period): self._get_kpis_from_notes_file()}
+        for i in range(1, n_prev + 1):
+            prev_ts = pd.Timestamp(*latest_period, 1) - pd.DateOffset(months=i)
+            prev_period = (prev_ts.year, prev_ts.month)
+            kpi_data[getkey(*prev_period)] = self._get_kpis_from_tracker(*prev_period)
+        return kpi_data
+
+    def get_kpis(self, n_prev_periods: int = 1, with_meta: bool = False) -> pd.DataFrame:
+        data = self._get_kpi_analysis_data(n_prev=n_prev_periods)
+        kpikeys = sorted(data.keys(), key=lambda x: (int(x.split("_")[0]), int(x.split("_")[1])))
+
+        latest_key = kpikeys[-1]
+        prev_key = kpikeys[-2]
+
+        avail_col = "Energetic Availability (%)"
+        latest_avail_col = f"avail_{latest_key}"
+        df_list = []
+        for key in kpikeys:
+            new_avail_col = f"avail_{key}"
+            df_list.append(data[key][[avail_col]].rename(columns={avail_col: new_avail_col}).copy())
+        df = pd.concat(df_list, axis=1)
+
+        prev_avail_col = f"avail_{prev_key}"
+        df["avail_delta_MoM"] = df[latest_avail_col].sub(df[prev_avail_col]).div(df[prev_avail_col])
+
+        availcols = [f"avail_{key}" for key in kpikeys]
+        df = df[[*availcols, "avail_delta_MoM"]]
+
+        if with_meta is True:
+            capacity_mapping = {s: oemeta.data["SystemSize"]["MWAC"].get(s, 0) for s in SOLAR_SITES}
+            df.insert(0, "ac_capacity", df.index.map(capacity_mapping))
+
+        df = df.rename_axis("Site")
+        return df
