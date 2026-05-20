@@ -19,7 +19,6 @@ import xlwings as xw
 
 from ..reporting.xlformatting import formatting_props
 
-
 # using "simple namespace" for dot notation reference to dict items
 cc = SimpleNamespace(**formatting_props["colors"])
 f = SimpleNamespace(**formatting_props["fill"])
@@ -385,14 +384,19 @@ def create_monthly_report(
     eqn_dcHealth = f"={cInv}9-{cInv}8-{cInv}7-{cInv}6"
     eqn_availTotal = f"=IF({cInv}8>0,({cInv}8+{cInv}7)/({cInv}8+{cInv}7+{cInv}6),0)"
     eqn_downtime = f"=SUM({cMWhLost}{rStart}:{cMWhLost}{rEnd})/1000"
-    eqn_curtTotal = (
-        f'=(SUMIFS({cPVLadj}{rStart}:{cPVLadj}{rEnd},${cPOA.ltr}${rStart}:${cPOA.ltr}${rEnd},">="&{irrThreshold_cell},'
-        f'${cCrLoss.ltr}${rStart}:${cCrLoss.ltr}${rEnd},">0")'
-        f'-(SUMIFS({cInv}{rStart}:{cInv}{rEnd},${cPOA.ltr}${rStart}:${cPOA.ltr}${rEnd},">="&{irrThreshold_cell},'
-        f'${cCrLoss.ltr}${rStart}:${cCrLoss.ltr}${rEnd},">0",${cFlag.ltr}${rStart}:${cFlag.ltr}${rEnd},1)'
-        f'+(SUMIFS(${cMtr.ltr}${rStart}:${cMtr.ltr}${rEnd},${cCrLoss.ltr}${rStart}:${cCrLoss.ltr}${rEnd},">0",'
-        f'${cFlag.ltr}${rStart}:${cFlag.ltr}${rEnd},"<>1")*1000/{numInv_cell})))/1000'
-    )
+
+    if sitename == "Comanche" and has_ext_curt:
+        eqn_curtTotal = f"=$C$7/${cInv}$1"
+    else:
+        eqn_curtTotal = (
+            f'=(SUMIFS({cPVLadj}{rStart}:{cPVLadj}{rEnd},${cPOA.ltr}${rStart}:${cPOA.ltr}${rEnd},">="&{irrThreshold_cell},'
+            f'${cCrLoss.ltr}${rStart}:${cCrLoss.ltr}${rEnd},">0")'
+            f'-(SUMIFS({cInv}{rStart}:{cInv}{rEnd},${cPOA.ltr}${rStart}:${cPOA.ltr}${rEnd},">="&{irrThreshold_cell},'
+            f'${cCrLoss.ltr}${rStart}:${cCrLoss.ltr}${rEnd},">0",${cFlag.ltr}${rStart}:${cFlag.ltr}${rEnd},1)'
+            f'+(SUMIFS(${cMtr.ltr}${rStart}:${cMtr.ltr}${rEnd},${cCrLoss.ltr}${rStart}:${cCrLoss.ltr}${rEnd},">0",'
+            f'${cFlag.ltr}${rStart}:${cFlag.ltr}${rEnd},"<>1")*1000/{numInv_cell})))/1000'
+        )
+
     eqn_invActual = (
         f"=(SUM({cInv}{rStart}:{cInv}{rEnd})/1000)"
         f"+(((SUMIFS(${cMtr.ltr}${rStart}:${cMtr.ltr}${rEnd},${cFlag.ltr}${rStart}:${cFlag.ltr}${rEnd},0))/0.98)"
