@@ -12,7 +12,6 @@ from pathlib import Path
 
 from ..utils import oepaths, oemeta
 from ..datatools.meterhistorian import load_meter_historian
-from ..dataquery import pireference as ref
 from ..dataquery.external import query_DTN
 
 ALL_PI_SITES = {

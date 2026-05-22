@@ -80,6 +80,7 @@ def load_meter_historian(year=None, month=None, dropna=True):
 
     for c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[c] = df[c].clip(lower=0.0)
 
     if dropna:
         df = df.dropna(axis=1, how="all").copy()
