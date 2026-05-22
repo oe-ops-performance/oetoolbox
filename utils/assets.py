@@ -239,6 +239,11 @@ class PISite:
         return element_dict.get(f"{element}_Attributes")
 
 
+# variable for the dividing longitude that determines West/East region
+# approx. between Comanche (closest-to-center West) and Maplewood 1 (closest-to-center East)
+REGION_SPLIT_LONGITUDE = -103.40  # Comanche: -102.2424, Maplewood 1: -104.5654
+
+
 class SolarSite(PISite):
     """Class for solar sites existing in the PI AF structure. Inherits from PISite."""
 
@@ -248,6 +253,10 @@ class SolarSite(PISite):
             raise ValueError(f"site = {name} has not been integrated into PI")
         elif self.fleet != "solar":
             raise Exception  # TODO
+
+    @property
+    def region(self) -> str:
+        return "West" if self.coordinates[1] < REGION_SPLIT_LONGITUDE else "East"
 
     @property
     def design_database(self) -> dict:
