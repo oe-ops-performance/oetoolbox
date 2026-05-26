@@ -4,17 +4,12 @@ import datetime as dt
 from pathlib import Path
 
 from ..utils.assets import SolarSite
+from ..utils.config import SOLAR_OPERATIONS_DIR
 from ..utils.oemeta import PI_SITES_BY_FLEET
-from ..utils.oepaths import latest_file, shared_fp
 
-
-SOLAR_OPERATIONS_DIR = latest_file(shared_fp.parent.glob("*Solar*Operations*"))
-path_parts = ["SitePages", "Managers-ONLY"]
-if "Site Assets" not in SOLAR_OPERATIONS_DIR.name:
-    path_parts.insert(0, "Site Assets")
-REFERENCE_DIR = Path(SOLAR_OPERATIONS_DIR, *path_parts)
-
-SOLAR_PERFORMANCE_REPORT_FILEPATH = Path(REFERENCE_DIR, "Weekly-Solar-Performance-Report_2026.xlsx")
+SOLAR_PERFORMANCE_REPORT_FILEPATH = Path(
+    SOLAR_OPERATIONS_DIR, "SitePages", "Managers-ONLY", "Weekly-Solar-Performance-Report_2026.xlsx"
+)
 
 
 def load_performance_report_data():

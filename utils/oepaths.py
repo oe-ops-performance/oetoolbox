@@ -38,14 +38,16 @@ shared_fp = max(
 intra_fp = shared_fp if "Intralinks" in shared_fp.name else Path(shared_fp, "Intralinks")
 internal_documents = Path(INTRALINKS_PATH, "Internal Documents")
 
-# frequently-referenced Operations directories
-operations = Path(internal_documents, "Operations")
+operations_legacy = internal_documents / "Operations"
+
+# frequently-referenced directories
+operations = OPS_PERFORMANCE_DIR
 solar = Path(operations, "Solar")
 flashreports = Path(operations, "FlashReports")
-python_projects = Path(operations, "PerformanceToolkit", "Python Projects")
+python_projects = OPS_PERFORMANCE_DIR / "python"
 development = Path(python_projects, "Development")
 references = Path(python_projects, "References")
-released = Path(python_projects, "Released")
+# released = Path(python_projects, "Released")
 
 # utility meter generation directories
 commercial = COMMERCIAL_DIR / "Commercial"
@@ -58,8 +60,7 @@ UTILITY_METER_DIR = Path("\\\\corp-cdaas\\Meter_Data_Historian")
 meter_generation_historian = Path(
     UTILITY_METER_DIR, "Master_Version", "Meter_Generation_Historian.xlsm"
 )
-kpi_tracker = Path(solar, "z_Monthly KPI Tracker.xlsx")
-kpi_tracker_rev1 = Path(solar, "z_Monthly KPI Tracker_Rev2.xlsx")
+kpi_tracker_rev1 = operations_legacy / "Solar" / "z_Monthly KPI Tracker_Rev2.xlsx"
 kpi_notes_file = Path(flashreports, "_kpis_and_notes_.xlsx")
 
 

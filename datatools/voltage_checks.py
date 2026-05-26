@@ -5,33 +5,92 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ..utils.pi import PIDataset
-from ..dataquery.pitools import pipoint_list, query_pi_recordedvalues
 
-VOLTAGE_BAND = 4  # kV
+ERCOT_VOLTAGE_BAND = 4  # kV
 
-VOLTAGE_PIPOINT_DICT = {
-    "Route 66": [f"RT66.RTAC.Tenska_ERCOT_VOLT_{x}" for x in ("Target", "POI")],
-    "South Plains II": [f"SP2.RTAC.Tenaska_ERCOT_VOLT_{x}" for x in ("Target", "POI")],
+VOLTAGE_TARGET_PIPOINTS = {  # ERCOT sites
+    "Route 66": "RT66.RTAC.Tenska_ERCOT_VOLT_Target",
+    "South Plains II": "SP2.RTAC.Tenaska_ERCOT_VOLT_Target",
+    "Maplewood 1": "MPLWD.MWSP_QRA.PO.VSP_kV",  # same both MW1/2
+    "Maplewood 2": "MPLWD.MWSP_QRA.PO.VSP_kV",  # same both MW1/2
 }
 
-VOLTAGE_PIPOINTS = {
-    "Route 66": {
-        "target": "RT66.RTAC.Tenska_ERCOT_VOLT_Target",
-        "poi": "RT66.RTAC.Tenska_ERCOT_VOLT_POI",
-    },
-    "South Plains II": {
-        "target": "SP2.RTAC.Tenaska_ERCOT_VOLT_Target",
-        "poi": "SP2.RTAC.Tenaska_ERCOT_VOLT_POI",
-    },
-    "Maplewood 1": {
-        "target": "MPLWD.MWSP_QRA.PO.VSP_kV",  # same both MW1/2
-        "poi": "MPLWD.MWSP_MTR001.PO.VllAvg_kV",  # substation, not poi
-    },
-    "Maplewood 2": {
-        "target": "MPLWD.MWSP_QRA.PO.VSP_kV",  # same both MW1/2
-        "poi": "MPLWD.MWSP_MTR002.PO.VllAvg_kV",  # substation, not poi
-    },
+VOLTAGE_POI_PIPOINTS = {
+    "Adams East": "ADMES.AES1_PPC1_SL.AES1_PPC1.Plant.Der.VPOI_kV",
+    "AZ1": "ARZO1.Sub_1.PPC_1_HSM.AGC.Average kV L-L",
+    "Camelot": "CMLOT.CAM_RIG_VLL_AVG",
+    "Columbia II": "COLM2.C2_RIG_VLL_AVG",
+    "FL4": "TALLA.Sub_1.PPC_1_HSM.AGC.Average kV L-L",
+    # "GA3": "",
+    "Grand View West": "GRDVW.meters.DNP.owner.VOLTSAVG_L_L",
+    "Hancock": "HAN.RTAC.735_T2_HIGH_VOLT_3PH_AVG",
+    # "Imperial Valley": "",
+    "Kansas": "KNSAS.KNS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
+    "Kent South": "KENTS.KSS1_S001_SL.KSS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
+    "Maplewood 1": "MPLWD.MWSP_MTR001.PO.VllAvg_kV",  # substation, not poi
+    "Maplewood 2": "MPLWD.MWSP_MTR002.PO.VllAvg_kV",  # substation, not poi
+    "Maricopa West": "MARWE.CAISO Main Meter Bus Voltage-Avg",
+    "MS3": "SUMS3.MS3.PLC1.0S_REG01.V",
+    # "Mulberry": "",
+    "Old River One": "OLRVO.ORS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
+    "Route 66": "RT66.RTAC.Tenska_ERCOT_VOLT_POI",
+    # "Selmer": "",
+    "South Plains II": "SP2.RTAC.Tenaska_ERCOT_VOLT_POI",
+    "West Antelope": "TCAAW.Antelope West DNP Client.DNP Client.CAISO Meter kVLL-Avg",
 }
+
+STATIC_VOLTAGES = {  # [target, high, low]
+    "Adams East": [71.0, 71.71, 70.29],
+    "AZ1": [117.0, 120.8, 109.3],
+    "Camelot": [np.nan, np.nan, np.nan],
+    "Columbia II": [np.nan, np.nan, np.nan],
+    "FL4": [230.0, 241.5, 218.5],
+    "Grand View West": [143.0, 144.9, 138.0],
+    "Hancock": [120.0, 122.0, 118.0],
+    "Imperial Valley": [np.nan, np.nan, np.nan],
+    "Kent South": [72.0, 72.72, 71.28],
+    "Maricopa West": [71.0, 71.71, 70.29],
+    "MS3": [69.0, 71.0, 69.0],
+    "Old River One": [71.0, 71.71, 70.29],
+    "West Antelope": [66.0, 69.3, 66.0],
+}
+
+VOLTAGE_SITES = [
+    s for s in VOLTAGE_POI_PIPOINTS if not any(pd.isna(x) for x in STATIC_VOLTAGES.get(s, []))
+]
+
+
+class VoltageMetadata:
+    def __init__(self, site: str):
+
+        self.poi_pipt = VOLTAGE_POI_PIPOINTS.get(site, None)
+        if self.poi_pipt is None:
+            raise KeyError(f"No voltage POI pipoint(s) defined for {site=}.")
+
+        self.static_target = None  # init
+        self.upper_limit = None  # init
+        self.lower_limit = None  # init
+        self.upper_band = ERCOT_VOLTAGE_BAND
+        self.lower_band = ERCOT_VOLTAGE_BAND
+
+        self.target_pipt = VOLTAGE_TARGET_PIPOINTS.get(site, None)
+        if self.target_pipt is None:
+            voltages_ = STATIC_VOLTAGES.get(site, None)
+            if voltages_ is None:
+                raise KeyError(f"Incomplete voltage metadata found for {site=}.")
+            target, high, low = voltages_
+            self.static_target = target
+            self.upper_limit = high
+            self.lower_limit = low
+            self.upper_band = high - target
+            self.lower_band = target - low
+
+        self.rename_cols = {
+            pt: f"volt_{lbl}"
+            for pt, lbl in zip([self.poi_pipt, self.target_pipt], ["poi", "target"])
+            if pt is not None
+        }
+        self.pipoint_names = [*self.rename_cols]
 
 
 def _validate_filename(filepath):
@@ -52,16 +111,12 @@ def _validate_filename(filepath):
 class VoltageAnalysis:
     """Class to perform voltage analysis for specified sites and time periods."""
 
-    def __init__(self, site, year, month, threshold=VOLTAGE_BAND):
-        if site not in VOLTAGE_PIPOINTS.keys():
-            raise ValueError(f"Invalid site specified: {site}")
-        self.site = site
-        self.year = year
-        self.month = month
-        self.threshold = threshold
+    def __init__(self, site: str, year: int, month: int):
+        self.meta = VoltageMetadata(site=site)
+        self.static = self.meta.static_target is not None
 
-        self._assign_dates()
-        self._assign_pipoints()
+        self.site = site
+        self._assign_dates(year=year, month=month)
 
         self.df_raw = None
         self.df = None
@@ -69,24 +124,14 @@ class VoltageAnalysis:
         self.df_events = None
         self.excursion_plot = None
 
-    def _assign_dates(self):
-        self.start = pd.Timestamp(year=self.year, month=self.month, day=1)
+    def _assign_dates(self, year, month) -> None:
+        self.start = pd.Timestamp(year=year, month=month, day=1)
         self.end = self.start + pd.DateOffset(months=1)
         self.start_date, self.end_date = map(
             lambda t: t.strftime("%Y-%m-%d"), [self.start, self.end]
         )
 
-    def _assign_pipoints(self):
-        pipoint_dict = VOLTAGE_PIPOINTS.get(self.site)
-        self.target_pipt = pipoint_dict["target"]
-        self.poi_pipt = pipoint_dict["poi"]
-        self.rename_cols = {
-            self.target_pipt: "volt_target",
-            self.poi_pipt: "volt_poi",
-        }
-
-    def _load_analysis_data_from_file(self, filepath):
-        # assigns self.df
+    def _load_analysis_data_from_file(self, filepath) -> None:
         self.df = pd.read_excel(filepath, engine="calamine", sheet_name="Data", index_col=0)
         # self.df_events = pd.read_excel(filepath, engine="calamine", sheet_name="Events")
 
@@ -94,56 +139,78 @@ class VoltageAnalysis:
     def from_existing_file(cls, filepath):
         site, year, month = _validate_filename(filepath)
         instance = cls(site, year, month)
-        instance._load_analysis_data_from_file(filepath)
+        instance._load_analysis_data_from_file(filepath)  # assigns self.df
         instance.identify_events()
         instance.generate_excursion_plot()
         return instance
 
-    def query_data(self, q=True):
+    def query_data(self, q=True) -> None:
         if self.df is not None:
             print("Found existing data; delete/archive file to re-query and save new files.")
             return
         dataset = PIDataset.from_pipoints(
             site_name=self.site,
-            pipoint_names=[self.target_pipt, self.poi_pipt],
+            pipoint_names=self.meta.pipoint_names,
             start_date=self.start_date,
             end_date=self.end_date,
             method="recorded_values",
+            data_format="long",
+            freq=None,
             keep_tzinfo=True,
             q=q,
         )
-        df = dataset.data.copy()
-        df["PIPoint"] = df["PIPoint"].astype(str)
+        self.df_raw = self._pivot_recvals_to_wide_format(df=dataset.data)
+        self._format_raw_data()  # assigns self.df
 
-        df_poi = df.loc[df["PIPoint"].eq(self.poi_pipt)].copy()
-        df_poi = df_poi[~df_poi.index.duplicated(keep="first")].copy()
+    def _pivot_recvals_to_wide_format(self, df) -> pd.DataFrame:
+        # long-format df as input
+        df_list = []
+        for pipt in df["PIPoint"].unique():
+            df_list.append(
+                df.loc[df["PIPoint"].eq(pipt), ["Value"]]
+                .rename(columns={"Value": pipt})
+                .reset_index(drop=False)
+                .drop_duplicates(subset=["Timestamp"], keep="first")
+                .set_index("Timestamp")
+                .resample("1s")
+                .ffill()
+            )
+        return pd.concat(df_list, axis=1)
 
-        df_target = df.loc[df["PIPoint"].eq(self.target_pipt)].copy()
-        df_target = df_target[~df_target.index.duplicated(keep="first")].copy()
-        df_target = df_target.resample("1s").ffill()
+    def _format_raw_data(self) -> None:
+        df = self.df_raw.rename(columns=self.meta.rename_cols).copy()
 
-        dfp = df_poi[["Value"]].rename(columns={"Value": self.poi_pipt}).copy()
-        dft = df_target[["Value"]].rename(columns={"Value": self.target_pipt}).copy()
+        if self.site in ("Route 66", "South Plains II", "Camelot", "Columbia II"):
+            # known sites where measured poi voltage is off by factor of 10
+            for col in df.columns:
+                if df[col].max() > 1e3:
+                    df[col] = df[col].div(10)
 
-        df_raw = dfp.join(dft, how="left")
-        df_raw = df_raw[~df_raw.index.duplicated()].copy()
-        self.df_raw = df_raw
-        self.df = self._format_data(df_raw)
+        if self.static is True:
+            df["volt_target"] = self.meta.static_target
 
-    def _format_data(self, df_raw):
-        df = df_raw.rename(columns=self.rename_cols).copy()
-        for col in ["volt_poi", "volt_target"]:
-            if df[col].max() > 1e3:
-                df[col] = df[col].div(10)
+        if "volt_target" not in df.columns:
+            raise ValueError("Could not find 'volt_target' column in data.")
+
         df["delta"] = df["volt_poi"].sub(df["volt_target"])
-        return df
+        self.df = df
+
+    def excursion_condition(self) -> pd.Series:
+        df = self.df.copy()
+        if not self.static:
+            is_excursion = df["delta"].abs().gt(ERCOT_VOLTAGE_BAND)
+        else:
+            above_limit = df["delta"].gt(0.0) & df["volt_poi"].gt(self.meta.upper_limit)
+            below_limit = df["delta"].lt(0.0) & df["volt_poi"].lt(self.meta.lower_limit)
+            is_excursion = above_limit | below_limit
+        return is_excursion
 
     def identify_events(self):
         if self.df is None:
             raise ValueError("Data must be queried before identifying events.")
         # resample recorded values and forward fill to ensure all timestamps are present for event detection
         df = self.df.resample("1s").ffill().copy()
-        condition = df["delta"].abs().gt(self.threshold)
+        condition = self.excursion_condition()
         breaks = (~condition).cumsum()
         self.event_list = [group for _, group in df[condition].groupby(breaks)]
         self.df_events = self._create_excursion_event_table(self.event_list)
@@ -152,8 +219,10 @@ class VoltageAnalysis:
         columns = [
             "Start Time",
             "Start Setpoint (kV)",
+            "Start POI (kV)",
             "End Time",
             "End Setpoint (kV)",
+            "End POI (kV)",
             "Duration (mins)",
             "Max Delta (kV)",
             "Min Delta (kV)",
@@ -162,15 +231,24 @@ class VoltageAnalysis:
         for df in event_df_list:
             start, end = df.index[0], df.index[-1]
             start_sp = df.at[start, "volt_target"]
+            start_poi = df.at[start, "volt_poi"]
             end_sp = df.at[end, "volt_target"]
+            end_poi = df.at[end, "volt_poi"]
             duration = (end - start).total_seconds() / 60
             max_delta = df.loc[df["delta"].abs().eq(df["delta"].abs().max()), "delta"].mode()[0]
             min_delta = df.loc[df["delta"].abs().eq(df["delta"].abs().min()), "delta"].mode()[0]
-            data.append([start, start_sp, end, end_sp, duration, max_delta, min_delta])
+            data.append(
+                [start, start_sp, start_poi, end, end_sp, end_poi, duration, max_delta, min_delta]
+            )
         return pd.DataFrame(data, columns=columns)
 
     def _build_subplot_figure(
-        self, df: pd.DataFrame, events_to_shade: list, title: str, height: int = 500
+        self,
+        df: pd.DataFrame,
+        events_to_shade: list,
+        title: str,
+        height: int = 500,
+        plot_freq: bool = None,
     ) -> go.Figure:
         fig = make_subplots(
             rows=2,
@@ -198,7 +276,7 @@ class VoltageAnalysis:
             row=2,
             col=1,
         )
-        for val in (self.threshold, -self.threshold):
+        for val in (self.meta.upper_band, -self.meta.upper_band):
             fig.add_hline(
                 y=val,
                 line=dict(color="black", width=1, dash="dash"),
@@ -206,10 +284,16 @@ class VoltageAnalysis:
                 col=1,
             )
 
+        shapes = []
         for dfg in events_to_shade:
+            x0 = dfg.index.min()
+            x1 = dfg.index.max()
+            if plot_freq is not None:
+                x0 = x0.floor(plot_freq)
+                x1 = x1.ceil(plot_freq)
             fig.add_vrect(
-                x0=dfg.index.min(),
-                x1=dfg.index.max(),
+                x0=x0,
+                x1=x1,
                 fillcolor="lightsalmon",
                 opacity=0.4,
                 layer="below",
@@ -254,11 +338,15 @@ class VoltageAnalysis:
 
         return fig
 
-    def generate_excursion_plot(self) -> go.Figure:
+    def generate_excursion_plot(self, plot_freq=None) -> go.Figure:
         if self.df is None or self.event_list is None:
             raise ValueError("Data must be queried and events identified first.")
 
-        df = self.df.copy()
+        if plot_freq is None:
+            df = self.df.copy()
+        else:
+            df = self.df.resample(plot_freq).max()
+
         events_to_shade = [
             dfg
             for dfg in self.event_list
@@ -267,7 +355,7 @@ class VoltageAnalysis:
         ]
 
         title = f"{self.site} - Voltage Profile - {df.index[0].strftime('%b-%Y')}"
-        fig = self._build_subplot_figure(df, events_to_shade, title)
+        fig = self._build_subplot_figure(df, events_to_shade, title, plot_freq=plot_freq)
         self.excursion_plot = fig
         return fig
 
@@ -294,10 +382,10 @@ class VoltageAnalysis:
         )
         return self._build_subplot_figure(df, [event], title, height=height)
 
-    def run_analysis(self, q=True):
+    def run_analysis(self, plot_freq=None, q=True):
         self.query_data(q=q)
         self.identify_events()
-        self.generate_excursion_plot()
+        self.generate_excursion_plot(plot_freq=plot_freq)
 
     def _format_events_table(self) -> pd.DataFrame:
         df = self.df_events.copy()
@@ -305,7 +393,9 @@ class VoltageAnalysis:
             df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d %H:%M:%S")
         for col in (
             "Start Setpoint (kV)",
+            "Start POI (kV)",
             "End Setpoint (kV)",
+            "End POI (kV)",
             "Duration (mins)",
             "Max Delta (kV)",
             "Min Delta (kV)",

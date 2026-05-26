@@ -13,8 +13,9 @@ from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.helpers import with_retries, quiet_print_function
 
 REPORT_TEMPLATE_PATH = Path(
-    oepaths.solar, "Data", "Comanche", "Templates", "Curtailment_Report_TEMPLATE.xlsx"
+    oepaths.python_projects, "Repositories", "excel_templates", "Curtailment_Report_TEMPLATE.xlsx"
 )
+
 FMT = SimpleNamespace(
     datetime="yyyy-mm-dd hh:mm;@",
     date="yyyy-mm-dd;@",
