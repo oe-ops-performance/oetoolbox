@@ -95,14 +95,9 @@ class VoltageMetadata:
 
 def _validate_filename(filepath):
     fpath = Path(filepath)
-    reqd_keys = ("voltage", "analysis", ".xlsx")
+    reqd_keys = ("voltage", "data", ".parquet")
     if not all(k in fpath.name for k in reqd_keys):
         raise ValueError("Invalid filename.")
-    if not all(
-        s in [*pd.read_excel(fpath, engine="calamine", nrows=0, sheet_name=None)]
-        for s in ["Data", "Events"]
-    ):
-        raise KeyError("One or more required sheets missing in file.")
     site, ym_str = fpath.name.split("_")[:2]
     year, month = int(ym_str[:4]), int(ym_str[4:])
     return site, year, month
@@ -116,7 +111,9 @@ class VoltageAnalysis:
         self.static = self.meta.static_target is not None
 
         self.site = site
-        self._assign_dates(year=year, month=month)
+        self.year = year
+        self.month = month
+        self._assign_dates()
 
         self.df_raw = None
         self.df = None
@@ -124,25 +121,46 @@ class VoltageAnalysis:
         self.df_events = None
         self.excursion_plot = None
 
-    def _assign_dates(self, year, month) -> None:
-        self.start = pd.Timestamp(year=year, month=month, day=1)
+    def _assign_dates(self) -> None:
+        self.start = pd.Timestamp(year=self.year, month=self.month, day=1)
         self.end = self.start + pd.DateOffset(months=1)
         self.start_date, self.end_date = map(
             lambda t: t.strftime("%Y-%m-%d"), [self.start, self.end]
         )
 
     def _load_analysis_data_from_file(self, filepath) -> None:
-        self.df = pd.read_excel(filepath, engine="calamine", sheet_name="Data", index_col=0)
-        # self.df_events = pd.read_excel(filepath, engine="calamine", sheet_name="Events")
+        self.df_query = pd.read_parquet(filepath)
+        self.df_raw = self._pivot_recvals_to_wide_format(df=self.df_query)
+        self._format_raw_data()  # assigns self.df
 
     @classmethod
     def from_existing_file(cls, filepath):
         site, year, month = _validate_filename(filepath)
         instance = cls(site, year, month)
-        instance._load_analysis_data_from_file(filepath)  # assigns self.df
+        instance._load_analysis_data_from_file(filepath)  # assigns self.df_raw
         instance.identify_events()
         instance.generate_excursion_plot()
         return instance
+
+    def _get_data_folder(self, analysis_dir):
+        data_folder = Path(analysis_dir, f"{year}-{month:02d}")
+        if allow_create and not data_folder.exists():
+            abbr_fpath = lambda fp: "..\\" + "\\".join(fp.parts[-2:])
+            print(f"Creating folder: {abbr_fpath(data_folder)}")
+            data_folder.mkdir()
+        return data_folder
+
+    @classmethod
+    def from_monthly_file(cls, site: str, year: int, month: int, analysis_dir: str | Path):
+        dir_ = self._get_data_folder(analysis_dir)
+        if not dir_.is_dir():
+            raise ValueError("Invalid path.")
+        filepattern = f"*{site}*voltage*data*.parquet"
+        fpath = oepaths.latest_file(list(data_folder.glob(filepattern)))
+        if fpath is None:
+            print("No file found.")
+            return
+        return cls.from_existing_file(filepath=fpath)
 
     def query_data(self, q=True) -> None:
         if self.df is not None:
@@ -159,6 +177,7 @@ class VoltageAnalysis:
             keep_tzinfo=True,
             q=q,
         )
+        self.df_query = dataset.data.copy()
         self.df_raw = self._pivot_recvals_to_wide_format(df=dataset.data)
         self._format_raw_data()  # assigns self.df
 
@@ -265,6 +284,14 @@ class VoltageAnalysis:
                 col=1,
             )
 
+        for val in (self.meta.lower_limit, self.meta.upper_limit):
+            fig.add_hline(
+                y=val,
+                line=dict(color="black", width=1, dash="dash"),
+                row=1,
+                col=1,
+            )
+
         fig.add_trace(
             go.Scattergl(
                 x=df.index,
@@ -276,7 +303,7 @@ class VoltageAnalysis:
             row=2,
             col=1,
         )
-        for val in (self.meta.upper_band, -self.meta.upper_band):
+        for val in (-self.meta.lower_band, self.meta.upper_band):
             fig.add_hline(
                 y=val,
                 line=dict(color="black", width=1, dash="dash"),
@@ -285,30 +312,28 @@ class VoltageAnalysis:
             )
 
         shapes = []
+        line_width = 0 if "Event" not in title else 0.5
         for dfg in events_to_shade:
             x0 = dfg.index.min()
             x1 = dfg.index.max()
             if plot_freq is not None:
                 x0 = x0.floor(plot_freq)
                 x1 = x1.ceil(plot_freq)
-            fig.add_vrect(
-                x0=x0,
-                x1=x1,
-                fillcolor="lightsalmon",
-                opacity=0.4,
-                layer="below",
-                line_width=0 if "Event" not in title else 0.5,
-                row="all",
-                col=1,
+            shapes.append(
+                {
+                    "type": "rect",
+                    "xref": "x",
+                    "yref": "paper",
+                    "x0": x0,
+                    "x1": x1,
+                    "y0": 0,
+                    "y1": 1,
+                    "fillcolor": "lightsalmon",
+                    "layer": "below",
+                    "line": {"width": line_width},
+                    "opacity": 0.4,
+                }
             )
-
-        fig.update_layout(
-            height=height,
-            width=1050,
-            title=dict(text=title, pad_b=15, yanchor="bottom", y=1, yref="paper", x=0.5),
-            legend=dict(x=1.02),
-            margin=dict(t=45, b=20, l=135, r=20),
-        )
 
         annot_kwargs = dict(
             x=0,
@@ -321,31 +346,33 @@ class VoltageAnalysis:
             showarrow=False,
             textangle=0,
         )
-        fig.add_annotation(text="Voltage (kV)", yref="y domain", **annot_kwargs)
-        fig.add_annotation(text="Delta (kV)", yref="y2 domain", **annot_kwargs)
+        annotations = [
+            dict(text="Voltage (kV)", yref="y domain", **annot_kwargs),
+            dict(text="Delta (kV)", yref="y2 domain", **annot_kwargs),
+        ]
 
-        if "Event" not in title:
-            if df["volt_poi"].min() < 200:
-                y0_ = df["volt_poi"].quantile(0.01)
-                y1_ = df["volt_poi"].quantile(0.99)
-                n_ = 2
-                buffer_pct = 0.01
-                y0 = np.floor((y0_ / n_) * (1 - buffer_pct)) * n_
-                y1 = np.ceil((y0_ / n_) * (1 + buffer_pct)) * n_
-                yrange_ = [y0, y1]
-                fig.update_yaxes(range=yrange_, row=1, col=1)
-            fig.update_yaxes(range=[-6, 6], row=2, col=1)
+        fig.update_layout(
+            height=height,
+            width=1050,
+            title=dict(text=title, pad_b=15, yanchor="bottom", y=1, yref="paper", x=0.5),
+            legend=dict(x=1.02),
+            margin=dict(t=45, b=20, l=135, r=20),
+            shapes=shapes,
+            annotations=annotations,
+        )
 
         return fig
 
-    def generate_excursion_plot(self, plot_freq=None) -> go.Figure:
+    def generate_excursion_plot(self, plot_freq="5min") -> go.Figure:
         if self.df is None or self.event_list is None:
             raise ValueError("Data must be queried and events identified first.")
 
         if plot_freq is None:
             df = self.df.copy()
         else:
-            df = self.df.resample(plot_freq).max()
+            df = self.df.resample(plot_freq).apply(
+                lambda x: x.min() if x["volt_poi"].mean() < x["volt_target"].mean() else x.max()
+            )
 
         events_to_shade = [
             dfg
@@ -359,9 +386,7 @@ class VoltageAnalysis:
         self.excursion_plot = fig
         return fig
 
-    def generate_event_plot(
-        self, event_idx: int, window: pd.Timedelta = pd.Timedelta("30min"), height: int = 300
-    ) -> go.Figure:
+    def generate_event_plot(self, event_idx: int, height: int = 300) -> go.Figure:
         if self.event_list is None:
             raise ValueError("Events must be identified before generating event plots.")
         if event_idx >= len(self.event_list):
@@ -370,12 +395,18 @@ class VoltageAnalysis:
             )
 
         event = self.event_list[event_idx]
+
+        # determine x-range around event for plot
         t0_, t1_ = event.index.min(), event.index.max()
-        if t1_ - t0_ < pd.Timedelta("5min"):
-            window = pd.Timedelta(minutes=10)
+        delta_minutes = (t1_ - t0_).total_seconds() / 60
+        if delta_minutes < 0.5:
+            window = pd.Timedelta(minutes=1)
+        else:
+            window_minutes = math.ceil(delta_minutes / 5) * 5  # up to nearest 5
+            window = pd.Timedelta(minutes=window_minutes)
+
         t0, t1 = t0_ - window, t1_ + window
         df = self.df[(self.df.index >= t0) & (self.df.index < t1)].copy()
-
         title = (
             f"{self.site} - Event {event_idx + 1} of {len(self.event_list)}"
             f" - {event.index[0].strftime('%Y-%m-%d %H:%M')}"
