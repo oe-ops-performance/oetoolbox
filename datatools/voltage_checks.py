@@ -65,7 +65,7 @@ VOLTAGE_SITES = [
 
 def _get_data_folder(analysis_dir, year, month):
     data_folder = Path(analysis_dir, f"{year}-{month:02d}")
-    if allow_create and not data_folder.exists():
+    if not data_folder.exists():
         abbr_fpath = lambda fp: "..\\" + "\\".join(fp.parts[-2:])
         print(f"Creating folder: {abbr_fpath(data_folder)}")
         data_folder.mkdir()
@@ -160,7 +160,7 @@ class VoltageAnalysis:
         if not dir_.is_dir():
             raise ValueError("Invalid path.")
         filepattern = f"*{site}*voltage*data*.parquet"
-        fpath = oepaths.latest_file(list(data_folder.glob(filepattern)))
+        fpath = oepaths.latest_file(list(dir_.glob(filepattern)))
         if fpath is None:
             print("No file found.")
             return
