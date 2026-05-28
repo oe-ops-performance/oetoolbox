@@ -21,20 +21,20 @@ VOLTAGE_POI_PIPOINTS = {
     "Camelot": "CMLOT.CAM_RIG_VLL_AVG",
     "Columbia II": "COLM2.C2_RIG_VLL_AVG",
     "FL4": "TALLA.Sub_1.PPC_1_HSM.AGC.Average kV L-L",
-    # "GA3": "",
+    # "GA3": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv (exists now)
     "Grand View West": "GRDVW.meters.DNP.owner.VOLTSAVG_L_L",
     "Hancock": "HAN.RTAC.735_T2_HIGH_VOLT_3PH_AVG",
-    # "Imperial Valley": "",
+    # "Imperial Valley": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv
     "Kansas": "KNSAS.KNS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
     "Kent South": "KENTS.KSS1_S001_SL.KSS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
     "Maplewood 1": "MPLWD.MWSP_MTR001.PO.VllAvg_kV",  # substation, not poi
     "Maplewood 2": "MPLWD.MWSP_MTR002.PO.VllAvg_kV",  # substation, not poi
     "Maricopa West": "MARWE.CAISO Main Meter Bus Voltage-Avg",
     "MS3": "SUMS3.MS3.PLC1.0S_REG01.V",
-    # "Mulberry": "",
+    # "Mulberry": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv
     "Old River One": "OLRVO.ORS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
     "Route 66": "RT66.RTAC.Tenska_ERCOT_VOLT_POI",
-    # "Selmer": "",
+    # "Selmer": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv
     "South Plains II": "SP2.RTAC.Tenaska_ERCOT_VOLT_POI",
     "West Antelope": "TCAAW.Antelope West DNP Client.DNP Client.CAISO Meter kVLL-Avg",
 }
@@ -42,12 +42,13 @@ VOLTAGE_POI_PIPOINTS = {
 STATIC_VOLTAGES = {  # [target, high, low]
     "Adams East": [71.0, 71.71, 70.29],
     "AZ1": [117.0, 120.8, 109.3],
-    "Camelot": [np.nan, np.nan, np.nan],
-    "Columbia II": [np.nan, np.nan, np.nan],
+    "Camelot": [66.05, 67.6, 64.5],  # need to confirm (eyeballed)
+    "Columbia II": [66.0, 67.6, 64.4],  # need to confirm (eyeballed)
     "FL4": [230.0, 241.5, 218.5],
     "Grand View West": [143.0, 144.9, 138.0],
     "Hancock": [120.0, 122.0, 118.0],
-    "Imperial Valley": [np.nan, np.nan, np.nan],
+    "Imperial Valley": [91.95, 96.6, 87.3],  # need to confirm (eyeballed)
+    "Kansas": [np.nan, np.nan, np.nan],  # TODO - time-of-day logic
     "Kent South": [72.0, 72.72, 71.28],
     "Maricopa West": [71.0, 71.71, 70.29],
     "MS3": [69.0, 71.0, 69.0],
@@ -58,6 +59,15 @@ STATIC_VOLTAGES = {  # [target, high, low]
 VOLTAGE_SITES = [
     s for s in VOLTAGE_POI_PIPOINTS if not any(pd.isna(x) for x in STATIC_VOLTAGES.get(s, []))
 ]
+
+
+def _get_data_folder(analysis_dir, year, month):
+    data_folder = Path(analysis_dir, f"{year}-{month:02d}")
+    if allow_create and not data_folder.exists():
+        abbr_fpath = lambda fp: "..\\" + "\\".join(fp.parts[-2:])
+        print(f"Creating folder: {abbr_fpath(data_folder)}")
+        data_folder.mkdir()
+    return data_folder
 
 
 class VoltageMetadata:
@@ -142,17 +152,9 @@ class VoltageAnalysis:
         instance.generate_excursion_plot()
         return instance
 
-    def _get_data_folder(self, analysis_dir):
-        data_folder = Path(analysis_dir, f"{year}-{month:02d}")
-        if allow_create and not data_folder.exists():
-            abbr_fpath = lambda fp: "..\\" + "\\".join(fp.parts[-2:])
-            print(f"Creating folder: {abbr_fpath(data_folder)}")
-            data_folder.mkdir()
-        return data_folder
-
     @classmethod
-    def from_monthly_file(cls, site: str, year: int, month: int, analysis_dir: str | Path):
-        dir_ = self._get_data_folder(analysis_dir)
+    def from_monthly_file(cls, site: str, year: int, month: int, analysis_dir: Path):
+        dir_ = _get_data_folder(analysis_dir, year, month)
         if not dir_.is_dir():
             raise ValueError("Invalid path.")
         filepattern = f"*{site}*voltage*data*.parquet"
@@ -202,8 +204,11 @@ class VoltageAnalysis:
         if self.site in ("Route 66", "South Plains II", "Camelot", "Columbia II"):
             # known sites where measured poi voltage is off by factor of 10
             for col in df.columns:
-                if df[col].max() > 1e3:
-                    df[col] = df[col].div(10)
+                df[col] = df[col].div(10)
+        elif self.site in ("Grand View West"):
+            # known sites where measured poi voltage is off by factor of 1000
+            for col in df.columns:
+                df[col] = df[col].div(1e3)
 
         if self.static is True:
             df["volt_target"] = self.meta.static_target
@@ -245,6 +250,8 @@ class VoltageAnalysis:
             "Duration (mins)",
             "Max Delta (kV)",
             "Min Delta (kV)",
+            "Lower Static Limit",
+            "Upper Static Limit",
         ]
         data = []
         for df in event_df_list:
@@ -257,7 +264,19 @@ class VoltageAnalysis:
             max_delta = df.loc[df["delta"].abs().eq(df["delta"].abs().max()), "delta"].mode()[0]
             min_delta = df.loc[df["delta"].abs().eq(df["delta"].abs().min()), "delta"].mode()[0]
             data.append(
-                [start, start_sp, start_poi, end, end_sp, end_poi, duration, max_delta, min_delta]
+                [
+                    start,
+                    start_sp,
+                    start_poi,
+                    end,
+                    end_sp,
+                    end_poi,
+                    duration,
+                    max_delta,
+                    min_delta,
+                    self.meta.lower_limit,
+                    self.meta.upper_limit,
+                ]
             )
         return pd.DataFrame(data, columns=columns)
 
@@ -267,7 +286,6 @@ class VoltageAnalysis:
         events_to_shade: list,
         title: str,
         height: int = 500,
-        plot_freq: bool = None,
     ) -> go.Figure:
         fig = make_subplots(
             rows=2,
@@ -285,12 +303,13 @@ class VoltageAnalysis:
             )
 
         for val in (self.meta.lower_limit, self.meta.upper_limit):
-            fig.add_hline(
-                y=val,
-                line=dict(color="black", width=1, dash="dash"),
-                row=1,
-                col=1,
-            )
+            if val is not None:
+                fig.add_hline(
+                    y=val,
+                    line=dict(color="black", width=1, dash="dash"),
+                    row=1,
+                    col=1,
+                )
 
         fig.add_trace(
             go.Scattergl(
@@ -316,9 +335,6 @@ class VoltageAnalysis:
         for dfg in events_to_shade:
             x0 = dfg.index.min()
             x1 = dfg.index.max()
-            if plot_freq is not None:
-                x0 = x0.floor(plot_freq)
-                x1 = x1.ceil(plot_freq)
             shapes.append(
                 {
                     "type": "rect",
@@ -328,10 +344,10 @@ class VoltageAnalysis:
                     "x1": x1,
                     "y0": 0,
                     "y1": 1,
-                    "fillcolor": "lightsalmon",
-                    "layer": "below",
+                    "fillcolor": None if (x1 - x0) < pd.Timedelta(minutes=5) else "lightsalmon",
+                    "layer": "above",
                     "line": {"width": line_width},
-                    "opacity": 0.4,
+                    "opacity": 0.3,
                 }
             )
 
@@ -366,23 +382,14 @@ class VoltageAnalysis:
     def generate_excursion_plot(self, plot_freq="5min") -> go.Figure:
         if self.df is None or self.event_list is None:
             raise ValueError("Data must be queried and events identified first.")
-
         if plot_freq is None:
             df = self.df.copy()
         else:
             df = self.df.resample(plot_freq).apply(
                 lambda x: x.min() if x["volt_poi"].mean() < x["volt_target"].mean() else x.max()
             )
-
-        events_to_shade = [
-            dfg
-            for dfg in self.event_list
-            if len(self.event_list) <= 50
-            or (dfg.index.max() - dfg.index.min()) >= pd.Timedelta("15min")
-        ]
-
         title = f"{self.site} - Voltage Profile - {df.index[0].strftime('%b-%Y')}"
-        fig = self._build_subplot_figure(df, events_to_shade, title, plot_freq=plot_freq)
+        fig = self._build_subplot_figure(df=df, events_to_shade=self.event_list, title=title)
         self.excursion_plot = fig
         return fig
 
@@ -411,7 +418,7 @@ class VoltageAnalysis:
             f"{self.site} - Event {event_idx + 1} of {len(self.event_list)}"
             f" - {event.index[0].strftime('%Y-%m-%d %H:%M')}"
         )
-        return self._build_subplot_figure(df, [event], title, height=height)
+        return self._build_subplot_figure(df, events_to_shade=[event], title=title, height=height)
 
     def run_analysis(self, plot_freq=None, q=True):
         self.query_data(q=q)
