@@ -3,40 +3,43 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 from ..utils import oepaths
+from ..utils.assets import PISite
+from ..utils.config import OPS_PERFORMANCE_DIR
 from ..utils.pi import PIDataset
+
+VOLTAGE_ANALYSIS_DIR = OPS_PERFORMANCE_DIR / "Voltage Threshold Analysis"
 
 ERCOT_VOLTAGE_BAND = 4  # kV
 
-VOLTAGE_TARGET_PIPOINTS = {  # ERCOT sites
+VOLTAGE_TARGET_TAGS = {  # ERCOT sites
     "Route 66": "RT66.RTAC.Tenska_ERCOT_VOLT_Target",
     "South Plains II": "SP2.RTAC.Tenaska_ERCOT_VOLT_Target",
     "Maplewood 1": "MPLWD.MWSP_QRA.PO.VSP_kV",  # same both MW1/2
     "Maplewood 2": "MPLWD.MWSP_QRA.PO.VSP_kV",  # same both MW1/2
 }
 
-VOLTAGE_POI_PIPOINTS = {
+VOLTAGE_POI_TAGS = {
     "Adams East": "ADMES.AES1_PPC1_SL.AES1_PPC1.Plant.Der.VPOI_kV",
     "AZ1": "ARZO1.Sub_1.PPC_1_HSM.AGC.Average kV L-L",
     "Camelot": "CMLOT.CAM_RIG_VLL_AVG",
     "Columbia II": "COLM2.C2_RIG_VLL_AVG",
     "FL4": "TALLA.Sub_1.PPC_1_HSM.AGC.Average kV L-L",
-    # "GA3": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv (exists now)
+    "GA3": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
     "Grand View West": "GRDVW.meters.DNP.owner.VOLTSAVG_L_L",
     "Hancock": "HAN.RTAC.735_T2_HIGH_VOLT_3PH_AVG",
-    # "Imperial Valley": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv
+    "Imperial Valley": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
     "Kansas": "KNSAS.KNS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
     "Kent South": "KENTS.KSS1_S001_SL.KSS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
     "Maplewood 1": "MPLWD.MWSP_MTR001.PO.VllAvg_kV",  # substation, not poi
     "Maplewood 2": "MPLWD.MWSP_MTR002.PO.VllAvg_kV",  # substation, not poi
     "Maricopa West": "MARWE.CAISO Main Meter Bus Voltage-Avg",
     "MS3": "SUMS3.MS3.PLC1.0S_REG01.V",
-    # "Mulberry": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv
+    "Mulberry": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
     "Old River One": "OLRVO.ORS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
     "Route 66": "RT66.RTAC.Tenska_ERCOT_VOLT_POI",
-    # "Selmer": "",  # TODO -- add reference to new PI AFAttribute -> OE.Avg_LL_Kv
+    "Selmer": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
     "South Plains II": "SP2.RTAC.Tenaska_ERCOT_VOLT_POI",
     "West Antelope": "TCAAW.Antelope West DNP Client.DNP Client.CAISO Meter kVLL-Avg",
 }
@@ -47,24 +50,36 @@ STATIC_VOLTAGES = {  # [target, high, low]
     "Camelot": [66.05, 67.6, 64.5],  # need to confirm (eyeballed)
     "Columbia II": [66.0, 67.6, 64.4],  # need to confirm (eyeballed)
     "FL4": [230.0, 241.5, 218.5],
+    "GA3": {  # {(h_start, h_end): [target, high, low]}
+        (0, 6): [235, 237, 233],  # schedule 3
+        (6, 18): [236, 238, 234],
+        (18, 21): [236, 238, 234],
+        (21, 24): [236, 238, 234],
+    },
     "Grand View West": [143.0, 144.9, 138.0],
     "Hancock": [120.0, 122.0, 118.0],
     "Imperial Valley": [91.95, 96.6, 87.3],  # need to confirm (eyeballed)
-    "Kansas": [np.nan, np.nan, np.nan],  # TODO - time-of-day logic
+    "Kansas": {  # keys: (hour_start, hour_end)
+        (0, 7): [116, 117.16, 114.84],
+        (7, 21): [119, 120.19, 117.81],
+        (21, 24): [116, 117.16, 114.84],
+    },
     "Kent South": [72.0, 72.72, 71.28],
     "Maricopa West": [71.0, 71.71, 70.29],
     "MS3": [69.0, 71.0, 69.0],
+    "Mulberry": [np.nan, np.nan, np.nan],  # TODO
     "Old River One": [71.0, 71.71, 70.29],
+    "Selmer": [np.nan, np.nan, np.nan],  # TODO
     "West Antelope": [66.0, 69.3, 66.0],
 }
 
 VOLTAGE_SITES = [
-    s for s in VOLTAGE_POI_PIPOINTS if not any(pd.isna(x) for x in STATIC_VOLTAGES.get(s, []))
+    s for s in VOLTAGE_POI_TAGS if not any(pd.isna(x) for x in STATIC_VOLTAGES.get(s, []))
 ]
 
 
-def _get_data_folder(analysis_dir, year, month):
-    data_folder = Path(analysis_dir, f"{year}-{month:02d}")
+def _get_data_folder(year, month):
+    data_folder = Path(VOLTAGE_ANALYSIS_DIR, f"{year}-{month:02d}")
     if not data_folder.exists():
         abbr_fpath = lambda fp: "..\\" + "\\".join(fp.parts[-2:])
         print(f"Creating folder: {abbr_fpath(data_folder)}")
@@ -72,37 +87,66 @@ def _get_data_folder(analysis_dir, year, month):
     return data_folder
 
 
+def get_existing_data_filepath(site, year, month):
+    dir_ = _get_data_folder(year, month)
+    return oepaths.latest_file(list(dir_.glob(f"*{site}*voltage*data*.parquet")))
+
+
 class VoltageMetadata:
     def __init__(self, site: str):
+        self.poi_tag = VOLTAGE_POI_TAGS.get(site, None)
+        if self.poi_tag is None:
+            raise KeyError(f"No voltage POI tag defined for {site=}.")
 
-        self.poi_pipt = VOLTAGE_POI_PIPOINTS.get(site, None)
-        if self.poi_pipt is None:
-            raise KeyError(f"No voltage POI pipoint(s) defined for {site=}.")
+        self.site = site
+        self.rename_cols = {self.poi_tag: "volt_poi"}  # before overwriting (if attribute path)
 
+        if self.poi_tag.startswith("OE."):
+            self.poi_tag = f"{PISite(site).af_path}|OE.Avg_LL_Kv"
+            self.poi_tag_type = "attribute_path"
+        else:
+            self.poi_tag_type = "pipoint"
+
+        self.multiple_targets = None  # init
         self.static_target = None  # init
         self.upper_limit = None  # init
         self.lower_limit = None  # init
-        self.upper_band = ERCOT_VOLTAGE_BAND
-        self.lower_band = ERCOT_VOLTAGE_BAND
 
-        self.target_pipt = VOLTAGE_TARGET_PIPOINTS.get(site, None)
-        if self.target_pipt is None:
+        self.target_tag = VOLTAGE_TARGET_TAGS.get(site, None)
+        if self.target_tag is not None:
+            self.target_tag_type = "pipoint"
+            self.rename_cols.update({self.target_tag: "volt_target"})
+        else:
+            self.target_tag_type = None
             voltages_ = STATIC_VOLTAGES.get(site, None)
-            if voltages_ is None:
+            if isinstance(voltages_, dict):
+                self.multiple_targets = voltages_
+            elif voltages_ is not None:
+                target, high, low = voltages_
+                self.static_target = target
+                self.upper_limit = high
+                self.lower_limit = low
+            else:
                 raise KeyError(f"Incomplete voltage metadata found for {site=}.")
-            target, high, low = voltages_
-            self.static_target = target
-            self.upper_limit = high
-            self.lower_limit = low
-            self.upper_band = high - target
-            self.lower_band = target - low
 
-        self.rename_cols = {
-            pt: f"volt_{lbl}"
-            for pt, lbl in zip([self.poi_pipt, self.target_pipt], ["poi", "target"])
-            if pt is not None
-        }
-        self.pipoint_names = [*self.rename_cols]
+        self.pipoint_names = []
+        self.attribute_paths = []
+        for tag, tag_col in self.rename_cols.items():
+            tag_type = {"volt_poi": self.poi_tag_type, "volt_target": self.target_tag_type}.get(
+                tag_col, None
+            )
+            if tag_type is None:
+                continue
+            if tag_type == "pipoint":
+                self.pipoint_names.append(tag)
+            else:
+                self.attribute_paths.append(tag)
+
+        self.tag_names = [*self.rename_cols]
+        self.static = self.static_target is not None and pd.notna(self.static_target)
+
+    def __str__(self):
+        fmt_row = lambda item, val: "  ".join([item.rjust(29), "-->", str(val)])
 
 
 def _validate_filename(filepath):
@@ -120,9 +164,7 @@ class VoltageAnalysis:
 
     def __init__(self, site: str, year: int, month: int):
         self.meta = VoltageMetadata(site=site)
-        self.static = self.meta.static_target is not None
-
-        self.site = site
+        self.analysis_folder = _get_data_folder(year, month)
         self.year = year
         self.month = month
         self._assign_dates()
@@ -141,7 +183,9 @@ class VoltageAnalysis:
         )
 
     def _load_analysis_data_from_file(self, filepath) -> None:
-        self.df_query = pd.read_parquet(filepath)
+        self.df_query = pd.read_parquet(filepath).rename(
+            columns={x: "Tag" for x in ["PIPoint", "Attribute"]}
+        )
         self.df_raw = self._pivot_recvals_to_wide_format(df=self.df_query)
         self._format_raw_data()  # assigns self.df
 
@@ -155,24 +199,19 @@ class VoltageAnalysis:
         return instance
 
     @classmethod
-    def from_monthly_file(cls, site: str, year: int, month: int, analysis_dir: Path):
-        dir_ = _get_data_folder(analysis_dir, year, month)
-        if not dir_.is_dir():
-            raise ValueError("Invalid path.")
-        filepattern = f"*{site}*voltage*data*.parquet"
-        fpath = oepaths.latest_file(list(dir_.glob(filepattern)))
+    def from_monthly_file(cls, site: str, year: int, month: int):
+        fpath = get_existing_data_filepath(site, year, month)
         if fpath is None:
             print("No file found.")
             return
         return cls.from_existing_file(filepath=fpath)
 
-    def query_data(self, q=True) -> None:
+    def query_data(self, overwrite=False, q=True) -> None:
         if self.df is not None:
-            print("Found existing data; delete/archive file to re-query and save new files.")
-            return
-        dataset = PIDataset.from_pipoints(
-            site_name=self.site,
-            pipoint_names=self.meta.pipoint_names,
+            raise ValueError("Data already exists in class instance.")
+
+        kwargs = dict(
+            site_name=self.meta.site,
             start_date=self.start_date,
             end_date=self.end_date,
             method="recorded_values",
@@ -181,17 +220,44 @@ class VoltageAnalysis:
             keep_tzinfo=True,
             q=q,
         )
-        self.df_query = dataset.data.copy()
-        self.df_raw = self._pivot_recvals_to_wide_format(df=dataset.data)
+        df_list = []
+
+        def _process_dataset(dataset, tag_type):
+            df_ = dataset.data.copy()
+            tcol = "PIPoint" if tag_type == "pipoint" else "Attribute"
+            df_list.append(df_[["Value", tcol]].rename(columns={tcol: "Tag"}).copy())
+            return
+
+        if len(self.meta.pipoint_names) > 0:
+            dataset1 = PIDataset.from_pipoints(**kwargs, pipoint_names=self.meta.pipoint_names)
+            _process_dataset(dataset1, tag_type="pipoint")
+
+        if len(self.meta.attribute_paths) > 0:
+            dataset2 = PIDataset.from_attribute_paths(
+                **kwargs, attribute_paths=self.meta.attribute_paths
+            )
+            _process_dataset(dataset2, tag_type="attribute_path")
+
+        self.df_query = pd.concat(df_list, axis=0)
+
+        # check for existing filepath & save if not exist
+        fname = f"{self.meta.site}_{self.year}{self.month:02d}_voltage_data.parquet"
+        fpath = _get_data_folder(self.year, self.month) / fname
+        if overwrite is True or not fpath.exists():
+            self.df_query.to_parquet(fpath)
+            if q is False:
+                print(f">> saved: {fpath.name}")
+
+        self.df_raw = self._pivot_recvals_to_wide_format(self.df_query)
         self._format_raw_data()  # assigns self.df
 
     def _pivot_recvals_to_wide_format(self, df) -> pd.DataFrame:
         # long-format df as input
         df_list = []
-        for pipt in df["PIPoint"].unique():
+        for tag in df["Tag"].unique():
             df_list.append(
-                df.loc[df["PIPoint"].eq(pipt), ["Value"]]
-                .rename(columns={"Value": pipt})
+                df.loc[df["Tag"].eq(tag), ["Value"]]
+                .rename(columns={"Value": tag})
                 .reset_index(drop=False)
                 .drop_duplicates(subset=["Timestamp"], keep="first")
                 .set_index("Timestamp")
@@ -203,17 +269,31 @@ class VoltageAnalysis:
     def _format_raw_data(self) -> None:
         df = self.df_raw.rename(columns=self.meta.rename_cols).copy()
 
-        if self.site in ("Route 66", "South Plains II", "Camelot", "Columbia II"):
-            # known sites where measured poi voltage is off by factor of 10
+        # known scaling of voltage units
+        if self.meta.site in ("Route 66", "South Plains II", "Camelot", "Columbia II"):
             for col in df.columns:
-                df[col] = df[col].div(10)
-        elif self.site in ("Grand View West"):
-            # known sites where measured poi voltage is off by factor of 1000
+                df[col] = df[col].div(10)  # off by factor of 10
+        elif self.meta.site in ("Grand View West"):
             for col in df.columns:
-                df[col] = df[col].div(1e3)
+                df[col] = df[col].div(1e3)  # off by factor of 1,000
 
-        if self.static is True:
+        if "volt_target" in df.columns:  # ERCOT sites
+            df["upper_limit"] = df["volt_target"] + ERCOT_VOLTAGE_BAND
+            df["upper_limit"] = df["volt_target"] - ERCOT_VOLTAGE_BAND
+
+        elif isinstance(self.meta.multiple_targets, dict):
+            condlist, choicelist = [], []
+            for hours, limits in self.meta.multiple_targets.items():
+                condlist.append(df.index.hour.isin(range(*hours)))
+                choicelist.append(limits)
+            getvals = lambda idx: [limits[idx] for limits in choicelist]
+            for i, col in enumerate(["volt_target", "upper_limit", "lower_limit"]):
+                df[col] = np.select(condlist=condlist, choicelist=getvals(i))
+
+        elif self.meta.static is True:
             df["volt_target"] = self.meta.static_target
+            df["upper_limit"] = self.meta.upper_limit
+            df["lower_limit"] = self.meta.lower_limit
 
         if "volt_target" not in df.columns:
             raise ValueError("Could not find 'volt_target' column in data.")
@@ -223,22 +303,33 @@ class VoltageAnalysis:
 
     def excursion_condition(self) -> pd.Series:
         df = self.df.copy()
-        if not self.static:
+        if isinstance(self.meta.multiple_targets, dict):
+            condition_list = []
+            for hours, limits in self.meta.multiple_targets.items():
+                _, upper_limit, lower_limit = limits
+                above_limit = df["delta"].gt(0.0) & df["volt_poi"].gt(upper_limit)
+                below_limit = df["delta"].lt(0.0) & df["volt_poi"].lt(lower_limit)
+                in_subrange = df.index.hour.isin(range(*hours))
+                is_excursion = in_subrange & (above_limit | below_limit)
+                condition_list.append(is_excursion)
+            is_excursion = pd.Series(np.logical_or.reduce(condition_list), index=df.index)
+
+        elif self.meta.static is False:
             is_excursion = df["delta"].abs().gt(ERCOT_VOLTAGE_BAND)
+
         else:
             above_limit = df["delta"].gt(0.0) & df["volt_poi"].gt(self.meta.upper_limit)
             below_limit = df["delta"].lt(0.0) & df["volt_poi"].lt(self.meta.lower_limit)
             is_excursion = above_limit | below_limit
+
         return is_excursion
 
     def identify_events(self):
         if self.df is None:
             raise ValueError("Data must be queried before identifying events.")
-        # resample recorded values and forward fill to ensure all timestamps are present for event detection
-        df = self.df.resample("1s").ffill().copy()
         condition = self.excursion_condition()
         breaks = (~condition).cumsum()
-        self.event_list = [group for _, group in df[condition].groupby(breaks)]
+        self.event_list = [group for _, group in self.df[condition].groupby(breaks)]
         self.df_events = self._create_excursion_event_table(self.event_list)
 
     def _create_excursion_event_table(self, event_df_list) -> pd.DataFrame:
@@ -282,104 +373,60 @@ class VoltageAnalysis:
             )
         return pd.DataFrame(data, columns=columns)
 
-    def _build_subplot_figure(
+    def _generate_figure(
         self,
         df: pd.DataFrame,
         events_to_shade: list,
         title: str,
         height: int = 500,
     ) -> go.Figure:
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.08,
-            row_heights=[0.65, 0.35],
+
+        kwargs = dict(x=df.index, mode="lines")
+        target_trace = go.Scattergl(**kwargs, y=df["volt_target"], name="Setpoint")
+        poi_trace = go.Scattergl(**kwargs, y=df["volt_poi"], name="POI")
+        upper_trace = go.Scattergl(
+            **kwargs,
+            y=df["upper_limit"],
+            line=dict(color="black", width=1, dash="dash"),
+            hoverinfo="skip",
+            showlegend=False,
         )
-
-        for col, name in [("volt_target", "Setpoint"), ("volt_poi", "POI")]:
-            fig.add_trace(
-                go.Scattergl(x=df.index, y=df[col], mode="lines", name=name),
-                row=1,
-                col=1,
-            )
-
-        for val in (self.meta.lower_limit, self.meta.upper_limit):
-            if val is not None:
-                fig.add_hline(
-                    y=val,
-                    line=dict(color="black", width=1, dash="dash"),
-                    row=1,
-                    col=1,
-                )
-
-        fig.add_trace(
-            go.Scattergl(
-                x=df.index,
-                y=df["delta"],
-                mode="lines",
-                name="Delta",
-                line=dict(color="black", width=1),
-            ),
-            row=2,
-            col=1,
+        lower_trace = go.Scattergl(
+            **kwargs,
+            y=df["lower_limit"],
+            line=dict(color="black", width=1, dash="dash"),
+            hoverinfo="skip",
+            showlegend=False,
         )
-        for val in (-self.meta.lower_band, self.meta.upper_band):
-            fig.add_hline(
-                y=val,
-                line=dict(color="black", width=1, dash="dash"),
-                row=2,
-                col=1,
-            )
+        traces = [upper_trace, lower_trace, target_trace, poi_trace]
 
+        skwargs = dict(
+            type="rect",
+            yref="paper",
+            y0=0,
+            y1=1,
+            line_width=0.6 if "Event" in title else 0.3,
+            layer="below",
+            opacity=0.3,
+        )
+        fillcondition = lambda x0, x1: (x1 - x0) > pd.Timedelta(minutes=5) or "Event" in title
         shapes = []
-        line_width = 0 if "Event" not in title else 0.5
         for dfg in events_to_shade:
             x0 = dfg.index.min()
             x1 = dfg.index.max()
-            shapes.append(
-                {
-                    "type": "rect",
-                    "xref": "x",
-                    "yref": "paper",
-                    "x0": x0,
-                    "x1": x1,
-                    "y0": 0,
-                    "y1": 1,
-                    "fillcolor": None if (x1 - x0) < pd.Timedelta(minutes=5) else "lightsalmon",
-                    "layer": "above",
-                    "line": {"width": line_width},
-                    "opacity": 0.3,
-                }
-            )
+            fillcolor = "lightsalmon" if fillcondition(x0, x1) else None
+            shapes.append({**skwargs, "x0": x0, "x1": x1, "fillcolor": fillcolor})
 
-        annot_kwargs = dict(
-            x=0,
-            xanchor="right",
-            xref="x domain",
-            xshift=-35,
-            y=0.5,
-            yanchor="middle",
-            yshift=0,
-            showarrow=False,
-            textangle=0,
-        )
-        annotations = [
-            dict(text="Voltage (kV)", yref="y domain", **annot_kwargs),
-            dict(text="Delta (kV)", yref="y2 domain", **annot_kwargs),
-        ]
-
-        fig.update_layout(
+        layout = go.Layout(
             height=height,
             width=1050,
             title=dict(text=title, pad_b=15, yanchor="bottom", y=1, yref="paper", x=0.5),
             legend=dict(x=1.02),
-            margin=dict(t=45, b=20, l=135, r=20),
+            margin=dict(t=45, b=40, l=40, r=40),
             shapes=shapes,
-            annotations=annotations,
         )
 
-        return fig
+        return go.Figure(data=traces, layout=layout)
 
     def generate_excursion_plot(self, plot_freq="5min") -> go.Figure:
         if self.df is None or self.event_list is None:
@@ -390,8 +437,8 @@ class VoltageAnalysis:
             df = self.df.resample(plot_freq).apply(
                 lambda x: x.min() if x["volt_poi"].mean() < x["volt_target"].mean() else x.max()
             )
-        title = f"{self.site} - Voltage Profile - {df.index[0].strftime('%b-%Y')}"
-        fig = self._build_subplot_figure(df=df, events_to_shade=self.event_list, title=title)
+        title = f"{self.meta.site} - Voltage Profile - {df.index[0].strftime('%b-%Y')}"
+        fig = self._generate_figure(df=df, events_to_shade=self.event_list, title=title)
         self.excursion_plot = fig
         return fig
 
@@ -417,10 +464,10 @@ class VoltageAnalysis:
         t0, t1 = t0_ - window, t1_ + window
         df = self.df[(self.df.index >= t0) & (self.df.index < t1)].copy()
         title = (
-            f"{self.site} - Event {event_idx + 1} of {len(self.event_list)}"
+            f"{self.meta.site} - Event {event_idx + 1} of {len(self.event_list)}"
             f" - {event.index[0].strftime('%Y-%m-%d %H:%M')}"
         )
-        return self._build_subplot_figure(df, events_to_shade=[event], title=title, height=height)
+        return self._generate_figure(df, events_to_shade=[event], title=title, height=height)
 
     def run_analysis(self, plot_freq=None, q=True):
         self.query_data(q=q)
@@ -485,21 +532,21 @@ def generate_email_summary(analyses: "VoltageAnalysis | list[VoltageAnalysis]") 
 
     for a in analyses:
         n = len(a.event_list)
-        lines.append(a.site)
+        lines.append(a.meta.site)
         if n == 0:
             lines.append("No voltage deviation events were detected during the analysis period.")
         else:
             lines.append(
                 f"{n} voltage deviation event(s) were detected during the analysis period."
             )
-            for i, row in a.df_events.iterrows():
-                start = pd.to_datetime(row["Start Time"]).strftime("%Y-%m-%d %H:%M")
-                duration = row["Duration (mins)"]
-                max_abs_delta = max(abs(row["Max Delta (kV)"]), abs(row["Min Delta (kV)"]))
-                lines.append(
-                    f"  Event {i + 1}: {start}  |  Duration: {duration:.1f} min"
-                    f"  |  Max Δ: {max_abs_delta:.2f} kV"
-                )
+            # for i, row in a.df_events.iterrows():
+            #     start = pd.to_datetime(row["Start Time"]).strftime("%Y-%m-%d %H:%M")
+            #     duration = row["Duration (mins)"]
+            #     max_abs_delta = max(abs(row["Max Delta (kV)"]), abs(row["Min Delta (kV)"]))
+            #     lines.append(
+            #         f"  Event {i + 1}: {start}  |  Duration: {duration:.1f} min"
+            #         f"  |  Max Δ: {max_abs_delta:.2f} kV"
+            #     )
         lines.append("")
 
     lines.append("Please see the attached report for full details.")
@@ -527,10 +574,10 @@ def _build_voltage_report_html(analyses: list) -> str:
             summary = f"{n} deviation events detected."
 
         table_html = ""
-        if n > 0:
-            table_html = "<h3>Events</h3>\n" + a._format_events_table().to_html(
-                index=False, border=0, classes="evt-table"
-            )
+        # if n > 0:
+        #     table_html = "<h3>Events</h3>\n" + a._format_events_table().to_html(
+        #         index=False, border=0, classes="evt-table"
+        #     )
 
         overview_fig = a.excursion_plot or a.generate_excursion_plot()
         include_js = "cdn" if first_fig else False
@@ -538,14 +585,15 @@ def _build_voltage_report_html(analyses: list) -> str:
         overview_div = _fig_to_html_div(overview_fig, include_js)
 
         event_divs = ""
-        for i in range(n):
-            fig = a.generate_event_plot(i)
-            event_divs += (
-                f'<div class="keep-together">\n'
-                f"<h4>Event {i + 1} of {n}</h4>\n" + _fig_to_html_div(fig, False) + "\n</div>\n"
-            )
+        # for i in range(n):
+        #     fig = a.generate_event_plot(i)
+        #     event_divs += (
+        #         f'<div class="keep-together">\n'
+        #         f"<h4>Event {i + 1} of {n}</h4>\n" + _fig_to_html_div(fig, False) + "\n</div>\n"
+        #     )
 
-        event_section = f"<h3>Event Detail</h3>\n{event_divs}" if n > 0 else ""
+        # event_section = f"<h3>Event Detail</h3>\n{event_divs}" if n > 0 else ""
+        event_section = ""
         section_class = "" if first_site else ' class="page-break"'
         first_site = False
         sections.append(
@@ -685,10 +733,10 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
 
             n = len(a.event_list)
             event_imgs = []
-            for j in range(n):
-                event_imgs.append(
-                    _export(a.generate_event_plot(j), os.path.join(tmp, f"event_{i}_{j}.png"))
-                )
+            # for j in range(n):
+            #     event_imgs.append(
+            #         _export(a.generate_event_plot(j), os.path.join(tmp, f"event_{i}_{j}.png"))
+            #     )
 
             site_data.append(
                 {
@@ -724,14 +772,14 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
             story.append(Paragraph(summary, s_body))
             story.append(Spacer(1, 0.1 * inch))
 
-            if n > 0:
-                story.append(Paragraph("Events", s_section))
-                df_fmt = a._format_events_table()
-                cols = list(df_fmt.columns)
-                col_w = page_w / len(cols)
-                tbl_data = [cols] + [[str(row[c]) for c in cols] for _, row in df_fmt.iterrows()]
-                story.append(Table(tbl_data, colWidths=[col_w] * len(cols), style=tbl_style))
-                story.append(Spacer(1, 0.15 * inch))
+            # if n > 0:
+            #     story.append(Paragraph("Events", s_section))
+            #     df_fmt = a._format_events_table()
+            #     cols = list(df_fmt.columns)
+            #     col_w = page_w / len(cols)
+            #     tbl_data = [cols] + [[str(row[c]) for c in cols] for _, row in df_fmt.iterrows()]
+            #     story.append(Table(tbl_data, colWidths=[col_w] * len(cols), style=tbl_style))
+            #     story.append(Spacer(1, 0.15 * inch))
 
             story.append(
                 KeepTogether(
@@ -755,23 +803,23 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
             )
             story.append(Spacer(1, 0.1 * inch))
 
-            if n > 0:
-                for j, (img_path, aspect) in enumerate(sd["events"]):
-                    header = [Paragraph("Event Detail", s_section)] if j == 0 else []
-                    story.append(
-                        KeepTogether(
-                            header
-                            + [
-                                Paragraph(f"Event {j + 1} of {n}", s_event),
-                                Table(
-                                    [[Image(img_path, width=page_w, height=page_w * aspect)]],
-                                    colWidths=[page_w],
-                                    style=fig_border_style,
-                                ),
-                            ]
-                        )
-                    )
-                    story.append(Spacer(1, 0.1 * inch))
+            # if n > 0:
+            #     for j, (img_path, aspect) in enumerate(sd["events"]):
+            #         header = [Paragraph("Event Detail", s_section)] if j == 0 else []
+            #         story.append(
+            #             KeepTogether(
+            #                 header
+            #                 + [
+            #                     Paragraph(f"Event {j + 1} of {n}", s_event),
+            #                     Table(
+            #                         [[Image(img_path, width=page_w, height=page_w * aspect)]],
+            #                         colWidths=[page_w],
+            #                         style=fig_border_style,
+            #                     ),
+            #                 ]
+            #             )
+            #         )
+            #         story.append(Spacer(1, 0.1 * inch))
 
         doc.build(story)
 
