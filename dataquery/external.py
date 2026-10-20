@@ -9,23 +9,36 @@ import requests
 
 from ..utils import oemeta
 from ..utils.config import DTN_CREDENTIALS
+from ..utils.datetime import segmented_date_ranges
 from ..utils.helpers import quiet_print_function, with_retries
 
-
-def segmented_date_ranges(start, end, n_days):
-    t0, t1 = start, start + pd.DateOffset(days=n_days)
-    if t1 > end:
-        return [(start, end)]
-    daterange_list = []  # init
-    while t1 <= end:
-        daterange_list.append((t0, t1))
-        if t1 == end:
-            break
-        t0 = t1
-        t1 = t1 + pd.DateOffset(days=n_days)
-        if t1 > end:
-            t1 = end
-    return daterange_list
+DTN_COLUMNS = [
+    "apparent_elevation",
+    "apparent_zenith",
+    "azimuth",
+    "dhi_clearsky",
+    "dni_clearsky",
+    "dtn_dhi",
+    "dtn_dni",
+    "dtn_ghi",
+    "dtn_temp_air",
+    "dtn_wind_speed",
+    "effectiveCloudCover",
+    "elevation",
+    "equation_of_time",
+    "ghi",
+    "ghi_clearsky",
+    "poa_diffuse",
+    "poa_direct",
+    "poa_global",
+    "poa_ground_diffuse",
+    "poa_sky_diffuse",
+    "precipAmount",
+    "snowfallAmount",
+    "sunshineDuration",
+    "totalCloudCover",
+    "zenith",
+]
 
 
 def request_access_token():
@@ -155,7 +168,7 @@ def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
         # dtn output usually includes last timestamp
         df = df.reindex(expected_index)
 
-    return df
+    return df.apply(pd.to_numeric, errors="coerce")
 
 
 def load_noaa_weather_data(site, start, end, freq="h", q=True):
@@ -192,6 +205,60 @@ def query_fracsun_daily_soiling(api_key: str, device_id: str, start_date: str, e
     """
     Query daily soiling and insolation values via Fracsun API.
     Dates must be in YYYY-MM-DD format.
+
+    (from API docs)
+    Query Parameters
+    ----------------
+        apiKey
+            32 characters
+            The Outbound API key of the device (provided from Fracsun by request)
+        startDate
+            YYYY-MM-DD
+            The starting date in ISO format (use the date without time for best results)
+        endDate
+            YYYY-MM-DD
+            The ending date in ISO format (use the date without time for best results)
+
+    Response
+    --------
+        day
+            String - Day that the soiling/insolation occurred.
+        device
+            String - The unique device ID for this ARES unit.
+        insolC
+            Float - Calculated daily insolation for the clean reference cell.
+        insolD
+            Float - Calculated daily insolation for the dirty reference cell.
+        soiling
+            Float - Calculated daily soiling loss (transmission loss).
+        utc_calcTime
+            String - The UTC timestamp when the daily calculation occurred.
+        calculation_time
+            String - The local timestamp (timezone-adjusted) when the daily
+        calculation occurred.
+
+    Example Response:
+    -----------------
+    [
+        {
+            "calculation_time": "2019-08-13T00:02:07.080459+07:00",
+            "day": "2018-08-12",
+            "device": "2c0031001447373333353132",
+            "insolC": "8.56",
+            "insolD": "8.02",
+            "soiling": "6.28",
+            "utc_calcTime": "2019-08-13T07:02:07.080459+00:00"
+        },
+        {
+            "calculation_time": "2019-08-14T00:02:07.080459+07:00",
+            "day": "2019-08-13",
+            "device": "2c0031001447373333353132",
+            "insolC": "8.69",
+            "insolD": "8.08",
+            "soiling": "6.58",
+            "utc_calcTime": "2019-08-14T07:02:07.080459+00:00"
+        }
+    ]
     """
     url = f"https://admin.fracsun.com/api/device/soiling/{device_id}/"
     params = {"apiKey": api_key, "startDate": start_date, "endDate": end_date}
