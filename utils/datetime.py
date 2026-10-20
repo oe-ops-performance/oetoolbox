@@ -1,6 +1,40 @@
 import pandas as pd
+from timezonefinder import TimezoneFinderL
 
 from . import oemeta
+
+_tf = TimezoneFinderL()
+
+IANA_MAPPING = {
+    "America/New_York": "US/Eastern",
+    "America/Indiana/Indianapolis": "US/Eastern",
+    "America/Chicago": "US/Central",
+    "America/Boise": "US/Mountain",
+    "America/Denver": "US/Mountain",
+    "America/Phoenix": "US/Arizona",
+    "America/Los_Angeles": "US/Pacific",
+}
+
+
+def infer_timezone(latitude: float, longitude: float, legacy=True) -> str:
+    """Return IANA or Legacy tz name (e.g. 'America/Chicago' or 'US/Central') for a coordinate.
+
+    IANA format -> Continent/City (avoids issues if countries or regional names change)
+    Legacy format -> Country/Region (from earlier days of the time zone database)
+
+    Longitude alone is ambiguous, so latitude is required. Handles Arizona
+    (America/Phoenix), Alaska, Hawaii, and irregular zone borders.
+    Raises ValueError if no timezone is found (e.g. a point far offshore).
+    """
+    iana_tz = _tf.timezone_at(lat=latitude, lng=longitude)
+    if iana_tz is None:
+        raise ValueError(f"No timezone found for ({latitude}, {longitude})")
+    if legacy is False:
+        return iana_tz
+    legacy_tz = IANA_MAPPING.get(iana_tz, None)
+    if not legacy_tz:
+        raise ValueError(f"No legacy timezone mapping found for {iana_tz = }.")
+    return legacy_tz
 
 
 def print_datetime_index_info(df: pd.DataFrame):
