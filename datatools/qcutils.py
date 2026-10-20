@@ -20,6 +20,7 @@ isMETER = lambda c: ("MeterMW" in c)
 isTEMP = lambda c: any(
     i in c.casefold() for i in ["temp", "tmp", "bom", "mts", "mst", "mdl", "mod"]
 )
+isAMBIENT = lambda c: "ambient" in c.casefold()
 isWIND = lambda c: any(i in c.casefold() for i in ["wind", "wnd", "speed", "ws_ms"])
 is_daylight_dependent = lambda c: any([isGHI(c), isPOA(c), isINV(c), isMETER(c)])
 
@@ -202,7 +203,7 @@ def run_auto_qc(df_raw, site, q=True, q_xtra=True):
               >> developed for Sweetwater modtemp sensor "BOM_Temp_2_B2.10" (June-2024 data)
     """
     n_rows = df.shape[0]
-    modtemp_cols = [c for c in data_cols if isTEMP(c)]
+    modtemp_cols = [c for c in data_cols if isTEMP(c) and not isAMBIENT(c)]
     if len(modtemp_cols) > 1:
         n_badvals = lambda c: df[(df[c].lt(-30) | df[c].gt(90))].shape[0]
         pct_bad = lambda c: (n_badvals(c) / n_rows)
@@ -238,6 +239,10 @@ def run_auto_qc(df_raw, site, q=True, q_xtra=True):
             cnd_ = (
                 df[col].abs().gt(24)
             )  # 24 m/s is ranked 10 of 12 on the Beaufort Wind Scale (Whole Gale)
+        elif isAMBIENT(col):
+            cnd_ = df[col].lt(-30) | df[col].gt(
+                130
+            )  # ambient temp (raw, deg-F); wider than mod-temp bound so legit hot days aren't clipped
         elif isTEMP(col):
             cnd_ = df[col].lt(-30) | df[col].gt(
                 90
