@@ -3,6 +3,17 @@ import pandas as pd
 from . import oemeta
 
 
+def print_datetime_index_info(df: pd.DataFrame):
+    if type(df.index) is not pd.DatetimeIndex:
+        print("Invalid index type.")
+        return
+    d0, d1 = map(lambda x: x.strftime("%Y-%m-%d %H:%M:%S"), [df.index[0], df.index[-1]])
+    freq_mins = int(infer_freq(df.index).total_seconds() / 60)
+    print(f"range: ['{d0}', '{d1}']")
+    print(f"( freq = {freq_mins}m | n_rows = {df.shape[0]} | timezone = {df.index.tzinfo} )")
+    return
+
+
 def infer_freq_timedelta(df: pd.DataFrame):
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("Error: dataframe must have datetime index")
@@ -155,7 +166,7 @@ def upsample(df, new_freq, agg_type="interpolate"):
     freq_td = infer_freq(df.index)
     if pd.Timedelta(new_freq) > freq_td:
         raise ValueError("New frequency must be smaller than native data interval.")
-    shift_td = freq_td
+    shift_td = freq_td / 2
     if agg_type == "interpolate":
         df_r = df.resample(new_freq).interpolate()
     elif agg_type in ("ffill", "mean", "max", "min"):
@@ -163,5 +174,24 @@ def upsample(df, new_freq, agg_type="interpolate"):
     else:
         raise KeyError("Invalid agg_type specified.")
     df_r = df_r.shift(periods=1, freq=shift_td)
-    new_index = pd.date_range(df.index.min(), df_r.index.max(), freq=new_freq, inclusive="left")
+    new_index = pd.date_range(
+        df.index.min(), df.index.max() + freq_td, freq=new_freq, inclusive="left"
+    )
     return df_r.reindex(new_index)
+
+
+def get_continuous_ranges(df_segmented: pd.DataFrame, native_freq: pd.Timedelta):
+    if type(df_segmented.index) is not pd.DatetimeIndex:
+        raise TypeError("Dataframe must have a datetime index.")
+    if df_segmented.empty:
+        return []
+    df = df_segmented.copy()
+    df["time_diff"] = df.index.diff()
+    if len(df) > 1:
+        df.iloc[0, -1] = df.iloc[1, -1]
+
+    step = native_freq
+    conditions = df.time_diff.eq(step)
+    breaks = df.time_diff.gt(step).cumsum()
+
+    return [x.index for _, x in df[conditions].groupby(breaks)]
