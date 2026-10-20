@@ -12,9 +12,13 @@ from .functions import (
     get_kpis_from_tracker,
     get_solar_budget_values,
 )
-from ..utils import oepaths
+from ..utils import oepaths, oemeta
 from ..utils.assets import SolarSite
-from ..datatools.meterhistorian import load_meter_data, load_meter_historian
+from ..datatools.meterhistorian import (
+    load_meter_data,
+    load_meter_historian,
+    VARSITY_STLMTUI_SITE_IDS,
+)
 
 config_ = {
     "displaylogo": False,
@@ -28,6 +32,29 @@ config_ = {
         "autoScale2d",
     ],
 }
+
+
+def _contiguous_runs(s, step):
+    """Yield (start, end, value) tuples for contiguous same-value runs in a series.
+
+    'end' is one 'step' past the last timestamp in the run, so it can be used
+    directly as the upper bound of a plotly vrect. (Inlined from
+    datatools.inverter_analysis to avoid importing that module's heavy
+    dependency chain into this plotting module.)
+    """
+    s = s.dropna()
+    if s.empty:
+        return
+    arr = s.values
+    idx = s.index
+    run_start_i = 0
+    for i in range(1, len(arr)):
+        same_val = arr[i] == arr[run_start_i]
+        contig = (idx[i] - idx[i - 1]) == step
+        if not (same_val and contig):
+            yield idx[run_start_i], idx[i - 1] + step, arr[run_start_i]
+            run_start_i = i
+    yield idx[run_start_i], idx[-1] + step, arr[run_start_i]
 
 
 def inv_pvlib_subplots(site, year=None, month=None, dfinv=None, dfpvl=None, fig_height=None):
@@ -154,6 +181,7 @@ def monthly_summary_subplots(
     df_util=None,
     return_df_and_fpaths=False,
     overwrite=False,
+    shade_curtailment=True,
 ):
     # error handling for invalid savepath
     if savepath is not None:
@@ -302,6 +330,76 @@ def monthly_summary_subplots(
         dfk[newcol] = 0.0  # init
         for kcol in dfk.iloc[:, 0].values:
             dfk.loc[dfk["Reporting Metric / KPI"].eq(kcol), newcol] = val_(kcol)
+
+    def _curtailment_bands(hourly_index):
+        """Return [(x0, x1), ...] datetime bounds of curtailed periods; [] if unavailable.
+
+        Source depends on site type:
+          - Comanche: 'Comanche_Curtailment_Report_*.xlsx' (n_curtailments column)
+          - CAISO/Varsity STLMTUI sites: 'Curtailment_ONW' sheet in the FlashReport
+            (curtailed condition recomputed from setpoint/PVLib/meter/capacity)
+          - all other sites: 'OE.CurtailmentStatus' flag from the Site PI query file
+        Never raises; returns [] on any missing file/column/error.
+        """
+        try:
+            if site == "Comanche":
+                fp = oepaths.latest_file(
+                    list(
+                        solarsite.flashreport_folder(year, month).glob(
+                            "Comanche_Curtailment_Report*.xlsx"
+                        )
+                    )
+                )
+                if fp is None:
+                    return []
+                dfc = pd.read_excel(fp, sheet_name="Curtailment_ONW")
+                dfc = dfc.set_index(dfc.columns[0])
+                dfc.index = pd.to_datetime(dfc.index, errors="coerce")
+                curtailed = pd.to_numeric(dfc["n_curtailments"], errors="coerce").fillna(0).gt(0)
+
+            elif site in VARSITY_STLMTUI_SITE_IDS:
+                if not frfpaths:
+                    return []
+                fp = oepaths.latest_file(frfpaths)
+                dfx = pd.read_excel(fp, sheet_name="Curtailment_ONW")
+                dfx = dfx.set_index(dfx.columns[0])
+                dfx.index = pd.to_datetime(dfx.index, errors="coerce")
+                cap = oemeta.data["SystemSize"]["MWAC"].get(site)
+                if cap is None:
+                    return []
+                sp, pvl, mtr = dfx["CAISO_MW_setpoint"], dfx["PVLib (MW)"], dfx["OE.MeterMW"]
+                # mirrors the '# Curtailments' logic written into the FlashReport sheet
+                curtailed = sp.lt(pvl) & sp.lt(cap) & (pvl - mtr).gt(0)
+
+            else:
+                sfp = oepaths.latest_file(
+                    solarsite.get_data_filepaths(year, month, asset_group="Site")
+                )
+                if sfp is None:
+                    return []
+                dfsite = solarsite._load_file(sfp, with_tz=False)
+                if "OE.CurtailmentStatus" not in dfsite.columns:
+                    return []
+                curtailed = (
+                    pd.to_numeric(dfsite["OE.CurtailmentStatus"], errors="coerce").fillna(0).gt(0)
+                )
+
+            curtailed = curtailed[curtailed.index.notna()]
+            if curtailed.empty:
+                return []
+            # aggregate to hourly, align to figure grid, then find contiguous bands
+            hourly = curtailed.astype(float).resample("h").mean()
+            # energy-based sources (CAISO/Comanche) flag any curtailment in the hour;
+            # the PI flag keeps the established 0.625 fraction-of-hour convention
+            thresh = 0.0 if (site == "Comanche" or site in VARSITY_STLMTUI_SITE_IDS) else 0.625
+            mask = hourly.gt(thresh).reindex(hourly_index).fillna(False)
+            if not mask.any():
+                return []
+            active = mask[mask]
+            return [(x0, x1) for x0, x1, _ in _contiguous_runs(active, pd.Timedelta(hours=1))]
+        except Exception as e:
+            print(f"Note: skipping curtailment shading ({e})")
+            return []
 
     """PLOT"""
     # define subplot figure
@@ -694,9 +792,54 @@ def monthly_summary_subplots(
         y0=0,
         y1=1,
     )
+    shapes = []
     for tstamp in dfbar["Date"][:-1]:
         x_ = tstamp + pd.Timedelta(hours=12)
-        fig.add_shape(type="line", x0=x_, x1=x_, **vline_kwargs)
+        shapes.append(dict(type="line", x0=x_, x1=x_, **vline_kwargs))
+
+    # shade curtailment periods on the time-axis subplots (bar, meter ts, inverter ts)
+    if shade_curtailment:
+        curt_bands = _curtailment_bands(common_idx)
+        if curt_bands:
+            # add_vrect(row, col) fails on figures containing a table subplot, so draw
+            # explicit rect shapes referencing each col-2 cartesian axis (index = 2*r - 1;
+            # e.g. row 2 -> x3, row 3 -> x5, row 4 -> x7, ...), matching the day-separator
+            # shapes above which use the same xref/yref pattern.
+            target_rows = [2, 3] + list(range(4, n_rows + 1))
+            for x0, x1 in curt_bands:
+                for r in target_rows:
+                    axis_n = 2 * r - 1
+                    shapes.append(
+                        dict(
+                            type="rect",
+                            xref=f"x{axis_n}",
+                            yref=f"y{axis_n} domain",
+                            x0=x0,
+                            x1=x1,
+                            y0=0,
+                            y1=1,
+                            line_width=0,
+                            fillcolor="#5dade2",
+                            opacity=0.3,
+                            layer="below",
+                        )
+                    )
+            # single legend entry describing the shading
+            fig.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode="markers",
+                    name="Curtailment",
+                    marker=dict(size=10, symbol="square", color="#5dade2", opacity=0.6),
+                    legendgroup="timeseries",
+                    showlegend=True,
+                ),
+                row=3,
+                col=2,
+            )
+
+    fig.update_layout(shapes=shapes)
 
     if save_html:
         sfolder_ = (
