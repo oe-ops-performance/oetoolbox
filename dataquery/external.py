@@ -1,9 +1,4 @@
-import warnings
-
-warnings.simplefilter(action="ignore", category=FutureWarning)  # temp, for meteostat
-
 import json
-import meteostat
 import pandas as pd
 import requests
 
@@ -169,35 +164,6 @@ def query_DTN(lat, lon, t_start, t_end, interval, fields, tz=None, q=True):
         df = df.reindex(expected_index)
 
     return df.apply(pd.to_numeric, errors="coerce")
-
-
-def load_noaa_weather_data(site, start, end, freq="h", q=True):
-    """Loads NOAA ambient temperature and wind speed data"""
-    qprint = quiet_print_function(q=q)
-    start_date = pd.Timestamp(start).floor("D")
-    end_date = pd.Timestamp(end).ceil("D")
-
-    # get nearest ten stations from meteostat library
-    lat, lon = oemeta.data["LatLong"].get(site)
-    df_stations = meteostat.Stations().nearby(lat, lon).fetch(10)
-
-    # check most recent available date
-    target_end_date = pd.Timestamp(end_date)
-    latest_date = df_stations["hourly_end"].max()
-    n_missing_days = (end_date - latest_date).days
-    if n_missing_days > 0:
-        qprint(f"NOTE: hourly data is only available until {latest_date} ({n_missing_days = })")
-        target_end_date = latest_date
-
-    # select nearest station with data, then get data
-    station = df_stations[(df_stations.hourly_end >= target_end_date)].iloc[0]
-    tz = oemeta.data["TZ"].get(site)
-    df = meteostat.Hourly(station.name, start_date, target_end_date, timezone=tz).fetch()
-
-    # convert wind speed units, then filter/rename columns
-    df["wspd"] = df["wspd"].mul(5 / 18)  # Convert km/h to m/s
-    df = df[["temp", "wspd"]].rename(columns={"temp": "NOAA_AmbTemp", "wspd": "NOAA_WindSpeed"})
-    return df
 
 
 @with_retries(n_max=5)
