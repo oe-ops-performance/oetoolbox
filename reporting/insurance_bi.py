@@ -6,16 +6,18 @@ from pathlib import Path
 from ..utils.assets import SolarSite
 from ..utils.config import SOLAR_OPERATIONS_DIR
 from ..utils.oemeta import PI_SITES_BY_FLEET
+from ..utils.oepaths import date_modified
 
 SOLAR_PERFORMANCE_REPORT_FILEPATH = Path(
     SOLAR_OPERATIONS_DIR, "SitePages", "Managers-ONLY", "Weekly-Solar-Performance-Report_2026.xlsx"
 )
 
 
-def load_performance_report_data():
+def load_performance_report_data(return_fpath: bool = False, q: bool = True):
+    fpath = SOLAR_PERFORMANCE_REPORT_FILEPATH
     df_dict = {}
     for key, sheet in zip(["site", "inverter"], ["Site Outages", "Inverter Outages"]):
-        df = pd.read_excel(SOLAR_PERFORMANCE_REPORT_FILEPATH, sheet_name=sheet, engine="calamine")
+        df = pd.read_excel(fpath, sheet_name=sheet, engine="calamine")
         for date_col in ("Date Offline", "Date Restored (Est)"):
             if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
                 cond = df[date_col].astype(str).str.contains("/")
@@ -45,7 +47,62 @@ def load_performance_report_data():
                     raise ValueError(errors)
 
         df_dict.update({key: df})
+    if not q:
+        abbr_ = "\\".join(fpath.parts[-3:])
+        print(
+            f"Loaded file: ..\\{abbr_}\n>>> last modified: {date_modified(fpath, as_string=True)}"
+        )
+    if return_fpath:
+        df_dict.update({"source_file": fpath})
     return df_dict
+
+
+def _filter_for_insurance_bi_claims(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp):
+    # filter to relevant date range -> can claim 1 month following outage
+    restored_after_start = (df["Date Restored (Est)"] >= start) | df["Date Restored (Est)"].isna()
+    offline_before_start = df["Date Offline"] < start
+
+    df = df[restored_after_start & offline_before_start].reset_index(drop=True).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    # round to floor/ceil to eliminate time component
+    df["Date Offline"] = df["Date Offline"].dt.floor("D")
+    df["Date Restored (Est)"] = df["Date Restored (Est)"].dt.ceil("D")
+
+    # dates for which the insurance claim will be made
+    target_dates = pd.date_range(start, end, inclusive="left")
+
+    # can claim 1 month after outage start
+    df["claim_begin"] = df["Date Offline"] + pd.DateOffset(months=1)
+    df["claim_end"] = df["Date Restored (Est)"].fillna(target_dates[-1])
+
+    # determine overlapping ranges (i.e. effective claim dates)
+    effective_ranges = []  # [(effective_start, effective_end), ... ]
+    for idx in range(len(df)):
+        claim_dates = pd.date_range(df.loc[idx, "claim_begin"], df.loc[idx, "claim_end"])
+        effective_dates = sorted(set(claim_dates).intersection(set(target_dates)))
+        if not effective_dates:
+            effective_dates = [pd.NaT]
+        effective_ranges.append((effective_dates[0], effective_dates[-1]))
+
+    df["effective_start"] = [rng[0] for rng in effective_ranges]
+    df["effective_end"] = [rng[1] for rng in effective_ranges]
+
+    df["n_claim_days"] = (
+        (df["effective_end"] - df["effective_start"]).dt.total_seconds().div(3600).div(24)
+    )
+    df["n_inv"] = 1 if "Inverter ID" in df.columns else df["# of Inv Offline"].copy()
+    df["inverter_outage_days"] = df["n_claim_days"] * df["n_inv"]
+    for c in ["n_claim_days", "n_inv", "inverter_outage_days"]:
+        df[c] = df[c].fillna(0).astype(int)
+
+    # for reordering/inserting new columns
+    idx = df.columns.get_loc("Category") - 1
+    start_cols = list(df.columns)[:idx]
+    end_cols = list(df.columns)[idx:-3]
+
+    return df[[*start_cols, "n_claim_days", "n_inv", "inverter_outage_days", *end_cols]]
 
 
 def process_claim_dates(dataframe: pd.DataFrame, site: str, start_date: str, end_date: str):
@@ -192,8 +249,13 @@ def get_insurance_bi_claims(year: int, month: int, sitelist: list[str] = [], q: 
     claim_list = []
     df_outages_list = []
     for site in target_sites:
-        output = calculate_insurance_bi_adjustment(site, year, month, return_claim_and_df=True, q=q)
         claimed_mwh = 0  # init
+        if site != "CW-Marin":
+            output = calculate_insurance_bi_adjustment(
+                site, year, month, return_claim_and_df=True, q=q
+            )
+        else:
+            output = None
         if output is not None:
             claimed_mwh = output["total_claim_mwh"]
             # get outages and add to list
