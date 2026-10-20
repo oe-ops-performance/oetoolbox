@@ -2,6 +2,7 @@ import datetime as dt
 from joblib import Parallel, delayed
 import numpy as np
 import pandas as pd
+from pvlib.clearsky import detect_clearsky
 from pvlib.irradiance import complete_irradiance, dirint, get_extra_radiation, get_total_irradiance
 from pvlib.location import Location
 from pvlib.modelchain import ModelChain
@@ -10,6 +11,7 @@ from pvlib.solarposition import get_solarposition
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 from pvlib.tracking import singleaxis
 
+from .qc import get_daylight_timestamps
 from ..dataquery.external import query_DTN
 from ..utils import oemeta, oepaths
 from ..utils.assets import SolarSite
@@ -18,6 +20,7 @@ from ..utils.datetime import (
     create_naive_index,
     localize_naive_datetimeindex,
     remove_tzinfo_and_standardize_index,
+    upsample,
 )
 from ..utils.helpers import quiet_print_function
 
@@ -251,6 +254,11 @@ def get_inverter_configs(site, inv_names=None):
         racking_mount = get_racking_mount(dict_inv)
         combiner_list = get_combiner_list(dict_inv)
 
+        # TEMP
+        if site == "Columbia II" and inv == "InvI":
+            # cb17 does not exist (last in list)
+            combiner_list = combiner_list[:-1]
+
         for cmb in combiner_list:
             dict_cmb = dict_inv[cmb]
             df = parse_dict_cmb(dict_cmb)
@@ -386,6 +394,82 @@ def add_solar_metadata_to_dtn_output(df_dtn: pd.DataFrame, site: str):
     df = df.resample("30min").ffill().shift(-1).resample("h").mean()
 
     return df
+
+
+def _get_aligned_clearsky_data(site, datetime_index, include_solar_position=False) -> pd.DataFrame:
+    """for adding clearsky to existing dtn files (ensures alignment with sensor data)"""
+    # get solar position data
+    lat, lon = SolarSite(site).coordinates
+    solar_position = get_solarposition(datetime_index, lat, lon)
+
+    # add clearsky data
+    location = get_site_location(site)
+    df = location.get_clearsky(datetime_index, solar_position=solar_position)
+    df.columns = [f"{c}_clearsky" for c in df.columns]
+
+    # transposition to get clearsky poa from ghi
+    surface_tilt, surface_azimuth = get_surface_parameters(site, solar_position)
+    df_irr = get_total_irradiance(
+        surface_tilt=surface_tilt,
+        surface_azimuth=surface_azimuth,
+        dni=df["dni_clearsky"],
+        ghi=df["ghi_clearsky"],
+        dhi=df["dhi_clearsky"],
+        dni_extra=get_extra_radiation(df.index),
+        solar_zenith=solar_position["apparent_zenith"],
+        solar_azimuth=solar_position["azimuth"],
+        model="perez",
+    )
+    df["poa_clearsky"] = df_irr["poa_global"].copy()
+
+    if include_solar_position:
+        for col in ["apparent_zenith", "azimuth", "zenith"]:
+            df[col] = solar_position[col].copy()
+
+    # shift to align with sensor data before joining back
+    df = df.resample("30min").ffill().shift(-1).resample("h").mean().fillna(0)
+
+    return df
+
+
+def format_dtn_data_for_clearsky_detect(df_dtn, cs_window=30) -> pd.DataFrame:
+    """df_dtn should be hourly (native); returns minute-level data ('df_sky')"""
+    df = upsample(
+        df=df_dtn[["dtn_ghi", "ghi_clearsky"]].fillna(0),
+        new_freq=pd.Timedelta(minutes=1),
+        agg_type="interpolate",
+    )
+    df["clearsky_flag"] = _generate_clearsky_flag(df, window=cs_window)
+    return df
+
+
+def _generate_clearsky_flag(df_dtn, window=30) -> pd.Series:
+    """df_dtn should be minute-level (via 'upsample' function)"""
+    flag = detect_clearsky(
+        measured=df_dtn["dtn_ghi"],
+        clearsky=df_dtn["ghi_clearsky"],
+        window_length=window,  # minutes
+    ).astype(int)
+    return pd.Series(flag)
+
+
+def generate_daily_clearsky_percent(cs_flag: pd.Series, site: str) -> pd.Series:
+    """where cs_flag is from df_sky["clearsky_flag"]"""
+    lat, lon = SolarSite(site).coordinates
+    daylight_tstamps = get_daylight_timestamps(
+        start_date=cs_flag.index[0],
+        end_date=cs_flag.index[-1],
+        tz=cs_flag.index.tz,
+        lat=lat,
+        lon=lon,
+        freq=pd.Timedelta(minutes=1),
+        limits=("dawn", "dusk"),
+    )
+    daylight_idx = pd.DatetimeIndex(daylight_tstamps)
+    cs_flag_dl = cs_flag.loc[cs_flag.index.intersection(daylight_idx)].copy()
+    daily_pct = cs_flag_dl.groupby(cs_flag_dl.index.date).mean()
+    daily_pct.index = pd.to_datetime(daily_pct.index)
+    return pd.Series(daily_pct, name="pct_clearsky")
 
 
 DTN_FIELDS = [
@@ -707,6 +791,7 @@ def _format_poa_data_for_model(site: str, poa_data: pd.Series) -> pd.DataFrame:
     array_losses, dc_losses, _ = get_site_model_losses(site)
     weather_data = poa_data.to_frame()
     weather_data["effective_irradiance"] = poa_data.mul(array_losses).mul(dc_losses)
+    weather_data.loc[weather_data["effective_irradiance"].le(0.0), "effective_irradiance"] = 1e-5
     return weather_data
 
 
