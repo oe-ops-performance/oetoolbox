@@ -1,40 +1,36 @@
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from pvlib.clearsky import detect_clearsky
 
 from .assets import SolarSite
+from .cache_tools import DataCache
 from .config import CACHE_DIR
 from .datetime import infer_freq, upsample
 from .helpers import quiet_print_function
 from .pi import PIDataset
 from .solar import SolarDataset
+from ..datatools.backfill import backfill_meteo_data
+from ..datatools.pvlib import format_dtn_data_for_clearsky_detect, generate_daily_clearsky_percent
 from ..datatools.qc import get_sun
-
-
-def _range_id(start_date, end_date):
-    start, end = map(pd.Timestamp, [start_date, end_date])
-    return f"{start:%Y%m%d}_{end:%Y%m%d}"
-
-
-def _cache_fpath(site: str, start_date: str, end_date: str, file_type: str, ext: str = "parquet"):
-    folder = CACHE_DIR / "analysis_data"
-    if not folder.exists():
-        folder.mkdir()
-    site_str = site.lower().replace(" ", "").replace("-", "")
-    ftype_str = file_type.lower()
-    rng_id = get_range_id(start_date, end_date)
-    return folder / f"{site_str}_{ftype_str}_{rng_id}.{ext}"
-
+from ..datatools.qcutils import run_auto_qc
 
 # for use with PI queries
-ANALYSIS_QUERY_GROUPS = ["combiners", "curtailment", "inverters", "met_stations", "meter"]
+ANALYSIS_QUERY_GROUPS = ["combiners", "inverters", "met_stations", "meter", "site"]  # curtailment
 
-ANALYSIS_QUERY_FREQUENCIES = {
-    "combiners": "1h",
-    "curtailment": "1m",
+ANALYSIS_DATA_KEYS = ["dtn", *ANALYSIS_QUERY_GROUPS, "pvlib", "pvlib_cmb"]
+
+# all '1m' except combiners, dtn, pvlib_cmb
+ANALYSIS_DATA_FREQUENCIES = {
+    "combiners": "60m",
+    # "curtailment": "1m",
+    "dtn": "60m",
     "inverters": "1m",
     "met_stations": "1m",
     "meter": "1m",
+    # "pvlib": "1m",  # can be 60m if using DTN POA data
+    "pvlib_cmb": "60m",
+    "site": "1m",
 }
 
 
@@ -93,17 +89,45 @@ class SolarAnalysisDataset(SolarDataset):
     _ANALYSIS_FREQ = pd.Timedelta("1min")
     _UPSAMPLE_SHIFT = pd.Timedelta(hours=1)
 
-    def __init__(self, site: SolarSite, start_date: str = None, end_date: str = None):
-        super().__init__(site, start_date, end_date)
-        self.data = {}
+    def __init__(
+        self, site: SolarSite, start_date: str = None, end_date: str = None, cache_dir: Path = None
+    ):
+        super().__init__(site, start_date, end_date)  # assigns self.start_date, self.end_date
+        self.data = {key: pd.DataFrame() for key in ANALYSIS_DATA_KEYS}
         self.combined_df = None
         self._daylight_timestamps = None
         self._solar_noon = None
+
         self.datetime_index = None
+
+        self._process_cache_input(cache_dir=cache_dir)
+        self._loaded_from_cache = False  # used in get_data to prevent repeat load
+        self.backfill_changes = {}  # init
+        self.df_sky = None
+        self.daily_clearsky_percent = None
+
+    def _process_cache_input(self, cache_dir):
+        if not isinstance(cache_dir, Path):
+            cache_dir = None
+        elif not cache_dir.exists():
+            cache_dir = None
+        if cache_dir is not None:
+            self.cache = DataCache(folder=cache_dir)
+        else:
+            self.cache = None
+        self.cacheable = cache_dir is not None
 
     @property
     def columns(self):
         return []
+
+    @property
+    def groups_with_data(self):
+        return [k for k, df in self.data.items() if not df.empty]
+
+    @property
+    def remaining_data_groups(self):
+        return [k for k, df in self.data.items() if df.empty]
 
     # -----------------------------------------------------------------------
     # Construction
@@ -114,8 +138,8 @@ class SolarAnalysisDataset(SolarDataset):
         cls,
         site_name: str,
         data: dict,
-        start_date: str = None,
-        end_date: str = None,
+        # start_date: str = None,
+        # end_date: str = None,
     ):
         """Initialize from an existing dict of DataFrames.
 
@@ -128,47 +152,78 @@ class SolarAnalysisDataset(SolarDataset):
             If omitted, inferred from the first non-empty DataFrame in data.
         end_date : str, optional
         """
-        site = SolarSite(site_name)
-        dataset = cls(site, start_date, end_date)
-        dataset.data = {k: v.copy() for k, v in data.items() if isinstance(v, pd.DataFrame)}
-        if start_date is None or end_date is None:
-            dataset._infer_date_range()
-            dataset._format_data_index_for_merge()
+        # site = SolarSite(site_name)
+        # dataset = cls(site, start_date, end_date)
+        dataset = cls(SolarSite(site_name))
+
+        for key, val in data.items():
+            if not isinstance(val, pd.DataFrame):
+                continue
+            elif key not in dataset.data.keys():
+                continue
+            elif val.empty:
+                continue
+            dataset.data.update({key: val.copy()})
+
+        # if start_date is None or end_date is None:
+        dataset._infer_date_range()  # assigns self.start_date, end_date, datetime_index
+        dataset._format_data_index_for_merge()
+        dataset._check_data_and_add_clearsky_flag()
         return dataset
 
     def _infer_date_range(self):
-        """Infer start/end dates from first non-empty DataFrame in self.data."""
-        for grp, df in self.data.items():
-            if grp == "dtn":
-                continue
-            if not df.empty:
-                self.start_date = df.index.min().floor("D").strftime("%Y-%m-%d")
-                self.end_date = df.index.max().ceil("D").strftime("%Y-%m-%d")
-                self.datetime_index = pd.date_range(
-                    self.start_date,
-                    self.end_date,
-                    freq=self._ANALYSIS_FREQ,
-                    tz=df.index.tzinfo,
-                    inclusive="left",
-                )
-                return
+        """Infer start/end dates from first non-empty DataFrame in self.data.
+        -> only for when self.start_date and self.end_date are None
+        -> assigns self.start_date, self.end_date, self.datetime_index
+        """
+        if not self.groups_with_data:
+            return
+        elif self.datetime_index is not None:
+            return
+        df = self.data[self.groups_with_data[0]].copy()
+        self.start_date = df.index.min().floor("D").strftime("%Y-%m-%d")
+        self.end_date = df.index.max().ceil("D").strftime("%Y-%m-%d")
+        self.datetime_index = pd.date_range(
+            self.start_date,
+            self.end_date,
+            freq=self._ANALYSIS_FREQ,
+            tz=df.index.tzinfo,
+            inclusive="left",
+        )
+        return
+
+    def _check_data_and_add_clearsky_flag(self):
+        if self.data["dtn"].empty or self.df_sky is not None:
+            return
+        self.df_sky = format_dtn_data_for_clearsky_detect(self.data["dtn"], cs_window=30)
+        self.daily_clearsky_percent = generate_daily_clearsky_percent(
+            cs_flag=self.df_sky["clearsky_flag"], site=self.site.name
+        )
 
     def _format_data_index_for_merge(self):
         # updates timezone -- query files have UTC-offset, and DTN file has tz name
-        if self.datetime_index is None:
+        if not self.groups_with_data:
             return
+        elif self.groups_with_data == ["dtn"]:
+            return
+
+        if self.datetime_index is None:
+            self._infer_date_range()
+
         if self.datetime_index[0].utcoffset() is None:
             return
+
         offset_ = self.datetime_index[0].utcoffset()
-        for grp in self.data.keys():
+        for grp in self.groups_with_data:
             if offset_ == self.data[grp].index[0].utcoffset():
                 self.data[grp] = self.data[grp].tz_convert(self.datetime_index.tzinfo)
+        return
 
     # -----------------------------------------------------------------------
     # Data loading
     # -----------------------------------------------------------------------
 
-    def query_data(self, groups=None, freq=None, overwrite=False, q=True):
+    def query_data(self, groups=None, freq=None, overwrite=False, q=True, **kwargs):
         """Query data from PI/DTN for the specified groups and store in self.data.
 
         Parameters
@@ -182,29 +237,122 @@ class SolarAnalysisDataset(SolarDataset):
         overwrite : bool, optional
             Re-query even if data is already loaded. Default False.
         q : bool, optional
+        kwargs : dict, optional
+            used for r2_backfill parameter
         """
         qprint = quiet_print_function(q=q)
+        if self.start_date is None or self.end_date is None:
+            raise ValueError("Must provide start and end dates in order to query data.")
         if groups is None:
             groups = ["inverters", "dtn"]
+        if "met_stations" in groups:
+            if self.data["dtn"].empty:
+                groups = ["dtn"] + [g for g in groups if g != "dtn"]  # need dtn before backfill
+
         if freq is not None:
             freq_list = [freq] * len(groups)
         else:
             freq_list = ["1h" if g in ("combiners", "dtn") else "1m" for g in groups]
+
         for grp, frq in zip(groups, freq_list):
-            if grp in self.data and not self.data[grp].empty and not overwrite:
-                qprint(f"Found existing data for {grp}; skipping.")
+            if not self.data[grp].empty and not overwrite:
+                qprint(f"\nFound existing data for {grp}; skipping.")
                 continue
-            qprint(f"Querying data for {grp}...")
-            df = self._get_group_data(grp, freq=frq, q=q)
+            qprint(f"\nQuerying data for {grp}...")
+            df = self._get_group_data(grp, freq=frq, q=q, **kwargs)
             if df is not None:
                 self.data[grp] = df
+                self._save_data_to_cache(grp, df, q=q)
+
         self._format_data_index_for_merge()
         qprint("Done.")
 
-    def _get_group_data(self, grp, freq="1h", q=True):
+    def get_data(self, groups=None, freq=None, q=True, only_from_cache=False):
+        """Checks cache dir (if defined) and loads cached files first, then queries remaining groups."""
+        qprint = quiet_print_function(q=q)
+        if self.start_date is None or self.end_date is None:
+            raise ValueError("Must provide start and end dates in order to query data.")
+        if groups is None:
+            groups = ["dtn", *ANALYSIS_QUERY_GROUPS]
+        remaining_groups = [grp for grp in groups if self.data[grp].empty]
+        if not remaining_groups:
+            raise ValueError(f"Data already loaded for specified groups: {groups}.")
+
+        if self.cacheable is True and self._loaded_from_cache is False:
+            qprint("[Begin load from cache]\n")
+            cached_data = self.cache.load(
+                site=self.site.name, start_date=self.start_date, end_date=self.end_date, q=q
+            )
+            n_added = 0
+            for grp, df in cached_data.items():
+                if grp not in remaining_groups + ["pvlib", "pvlib_cmb"]:
+                    continue
+                freq_td = infer_freq(df.index)
+                if freq_td != self._ANALYSIS_FREQ:
+                    if grp not in ("combiners", "dtn", "pvlib_cmb", "pvlib"):
+                        qprint(
+                            f"Note: cached data for {grp=} has invalid frequency: {freq_td}; skipping."
+                        )
+                        continue
+                self.data.update({grp: df})
+                n_added += 1
+
+            qprint(f"\n[End load from cache] -> loaded {n_added}/{len(cached_data)} files")
+            if only_from_cache is True and len(cached_data) == 0:
+                return
+
+            remaining_groups = [grp for grp in groups if self.data[grp].empty]
+            if not remaining_groups or only_from_cache is True:
+                self._format_data_index_for_merge()
+                return
+
+            qprint(f"\nContinuing to query {remaining_groups = }.")
+        else:
+            qprint(f"\nRunning query for {remaining_groups = }.")
+
+        if only_from_cache is True:
+            raise ValueError("Invalid input; cache folder not set.")
+
+        self.query_data(groups=remaining_groups, q=q)
+
+    @classmethod
+    def from_cache(
+        cls,
+        site_name: str,
+        start_date: str,
+        end_date: str,
+        cache_dir: Path,
+        q: bool = True,
+    ):
+        site = SolarSite(site_name)
+        dataset = cls(site, start_date, end_date, cache_dir=cache_dir)
+        if dataset.cacheable is False:
+            raise ValueError("Problem with provided cache directory.")
+
+        dataset.get_data(q=q, only_from_cache=True)
+        dataset._check_data_and_add_clearsky_flag()
+        dataset._loaded_from_cache = True
+        return dataset
+
+    def _save_data_to_cache(self, grp, df, q=True):
+        if not self.cacheable:
+            return
+        savepath = self.cache.generate_cache_filepath(
+            site=self.site.name,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            file_type=grp,
+        )
+        df.to_parquet(savepath)
+        if q is False:
+            print(f"Saved: {savepath.name}")
+        return
+
+    def _get_group_data(self, grp, freq, q=True, **kwargs):
         try:
             if grp == "dtn":
                 return SolarDataset.from_dtn(self.site.name, self.start_date, self.end_date, q=q)
+
             if grp == "curtailment":
                 curtailment_path = f"{self.site.af_path}|OE.CurtailmentStatus"
                 dataset = PIDataset.from_attribute_paths(
@@ -217,10 +365,11 @@ class SolarAnalysisDataset(SolarDataset):
                     q=q,
                 )
                 return dataset.data
-            asset_group = grp.replace("_", " ").title()
-            kwargs = dict(
+
+            query_group = grp.replace("_", " ").title()
+            qkwargs = dict(
                 site_name=self.site.name,
-                asset_group=asset_group,
+                asset_group=query_group,
                 start_date=self.start_date,
                 end_date=self.end_date,
                 freq=freq,
@@ -229,12 +378,42 @@ class SolarAnalysisDataset(SolarDataset):
                 raise_error=False,
             )
             if grp == "combiners":
-                kwargs["n_segment"] = 3
-            dataset = SolarDataset.from_defined_query_attributes(**kwargs)
-            return dataset.data
+                qkwargs["n_segment"] = 3
+
+            dataset = SolarDataset.from_defined_query_attributes(**qkwargs)
+            if grp not in ("Inverters", "Met Stations", "Meter"):
+                return dataset.data
+
+            qprint = quiet_print_function(q=q)
+            qprint(f">>> Running auto QC script for {grp}")
+            df = self._run_auto_qc(df=dataset.data)
+            if grp not in ("Met Stations"):
+                return df
+
+            qprint(f">>> Running backfill for {grp}...")
+            if self.data["dtn"].empty:
+                raise ValueError("Class instance must have DTN data before backfill.")
+
+            r2_diff = kwargs.get("r2_diff", 0.1)
+            qprint(f"({r2_diff = })")
+            df, changes = backfill_meteo_data(
+                df_met=df, df_ext=self.data["dtn"], site=self.site.name, r2_diff=r2_diff
+            )
+            self.backfill_changes = changes
+            return df
+
         except Exception as e:
             print(f"Error querying data for {grp}: {e}")
             return None
+
+    def _run_auto_qc(self, df) -> pd.DataFrame:
+        original_cols = list(df.columns)
+        df = run_auto_qc(df, site=self.site.name)
+        df = df[[c for c in original_cols if c in df.columns]]
+        for i, c in enumerate(original_cols):
+            if c not in df.columns:
+                df.insert(i, c, np.nan)
+        return df
 
     def run_pvlib(self, poa_source="dtn", overwrite=False, q=True):
         """Run the inverter-level pvlib model; stores result in self.data['pvlib'].
@@ -259,6 +438,7 @@ class SolarAnalysisDataset(SolarDataset):
         poa_data = self._get_poa_data(poa_source)
         qprint("Running inverter-level pvlib model...")
         self.data["pvlib"] = run_pvlib_model(self.site.name, poa_data=poa_data, q=q)
+        self._save_data_to_cache(grp="pvlib", df=self.data["pvlib"], q=q)
 
     def run_pvlib_cmb(self, poa_source="dtn", overwrite=False, q=True):
         """Run the combiner-level pvlib model; stores result in self.data['pvlib_cmb'].
@@ -289,6 +469,7 @@ class SolarAnalysisDataset(SolarDataset):
         self.data["pvlib_cmb"] = run_pvlib_combiner_level(
             site=self.site.name, poa_data=poa_data, return_dict=False, q=q
         )
+        self._save_data_to_cache(grp="pvlib_cmb", df=self.data["pvlib_cmb"], q=q)
 
     def _get_poa_data(self, source="dtn") -> pd.Series:
         if source == "dtn":
@@ -411,24 +592,28 @@ class SolarAnalysisDataset(SolarDataset):
             cloud_cover, clearsky_flag, and optionally site_ghi / site_meter.
         """
         df_list = []
-        for grp in ("pvlib", "inverters", "meter", "ghi", "dtn"):
-            df_ = self.data.get(grp)
-            if df_ is None or df_.empty:
+        for grp in self.groups_with_data:
+            if grp in ("combiners", "pvlib_cmb"):
                 continue
-            df_ = self._upsample_if_needed(df_)
-            if grp in ("pvlib", "inverters"):
+            df_ = self._upsample_if_needed(self.data[grp])
+            if grp == "dtn":
+                target_cols = ["poa_global", "dtn_ghi", "ghi_clearsky", "effectiveCloudCover"]
+                dtncols = [c for c in target_cols if c in df_.columns]
+                df_list.append(df_[dtncols].rename(columns={"effectiveCloudCover": "cloud_cover"}))
+
+            elif grp in ("meter", "ghi"):
+                df_list.append(df_.iloc[:, 0].to_frame(name=f"site_{grp}"))
+
+            elif grp in ("pvlib", "inverters"):
                 pattern = "Possible_Power" if grp == "pvlib" else "ActivePower"
                 df_list.append(
                     df_.filter(like=pattern).sum(axis=1).div(1e3).to_frame(name=f"site_{grp}")
                 )
                 if grp == "pvlib":
                     df_list.append(df_.iloc[:, 0].to_frame(name="poa"))
-            elif grp in ("meter", "ghi"):
-                df_list.append(df_.iloc[:, 0].to_frame(name=f"site_{grp}"))
-            elif grp == "dtn":
-                dtn_cols = ["dtn_ghi", "ghi_clearsky", "effectiveCloudCover"]
-                present = [c for c in dtn_cols if c in df_.columns]
-                df_list.append(df_[present].rename(columns={"effectiveCloudCover": "cloud_cover"}))
+
+            elif grp in ("site"):
+                df_list.append(df_)
 
         df = pd.concat(df_list, axis=1)
         df = df[list(reversed(sorted(df.columns)))]
