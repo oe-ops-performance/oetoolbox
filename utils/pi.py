@@ -444,6 +444,10 @@ class PIDataset(Dataset):
                 df = df.reindex(expected_index)  # removes extra timestamp at end (from resample)
 
         df = df.rename_axis("Timestamp")
+        if self.data_format == "wide" and not all(c in df.columns for c in self.expected_columns()):
+            df = pd.concat(
+                [df, pd.DataFrame(columns=self.expected_columns(), index=df.index)], axis=1
+            )
         self.data = df.copy()
         qprint(f"Done. {df.shape = }")
 
