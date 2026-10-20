@@ -11,5 +11,10 @@
         "100"
     ],
     "autoDocstring.docstringFormat": "numpy",
-    "python.REPL.enableREPLSmartSend": false
+    "python.REPL.enableREPLSmartSend": false,
+    "search.exclude": {
+        "**/*.ipynb": true
+    },
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

@@ -357,6 +357,8 @@ class InverterAnalyzer(_HourlyAnalyzerBase):
         self.thresholds = self.config.resolve(self.inv_ac_capacity_kw, self.ac_capacity_kw)
         self.inv_col_pattern = inv_col_pattern or "OE.ActivePower_"
         self.pvl_col_pattern = pvl_col_pattern or "_Possible_Power"
+        self.df_inv_pvl = None
+        self.daily_totals = None
 
         self._process_input_data(data)
         self._detect_frequencies()
@@ -438,6 +440,43 @@ class InverterAnalyzer(_HourlyAnalyzerBase):
         # Combined wide frame for plotting (inv + inv_possible)
         possible_renamed = self.df_possible_kw.rename(columns=lambda c: f"{c}_possible")
         self.df_inv_pvl = pd.concat([self.df_measured_kw, possible_renamed], axis=1)
+        self._process_generation_totals()
+
+    def _process_generation_totals(self) -> None:
+        df = self._mwh_from_interval_kw(self.df_inv_pvl)
+        for inv in self.inverter_names:
+            poss_col = f"{inv}_possible"
+            df[f"{inv}_%-loss"] = df[poss_col].sub(df[inv]).div(df[poss_col])
+        sorted_cols = sorted(df.columns, key=lambda c: c.replace("%", "z"))
+        self.daily_totals = df[sorted_cols].copy()
+
+    def _mwh_from_interval_kw(self, df, freq="D") -> pd.DataFrame:
+        # e.g. kW -> kWh
+        pwr2nrg_multiplier = infer_freq(df.index) / pd.Timedelta(hours=1)
+
+        # divide by 1,000 to get MW, then convert to MWh via multiplier
+        if freq is not None:
+            return df.resample("D").sum().div(1e3).mul(pwr2nrg_multiplier)
+        return df.sum().div(1e3).mul(pwr2nrg_multiplier)
+
+    def get_total_mwh(self, days: list[str]) -> dict[str, pd.DataFrame]:
+        if self.daily_totals is None:
+            return {}
+
+        _in_range = self.daily_totals.index.strftime("%Y-%m-%d").isin(days)
+        totals = self.daily_totals[_in_range].sum()
+
+        df_list = []
+        for lbl, sfx in zip(["mwh", "possible"], ["", "_possible"]):
+            filtercols = [f"{inv}{sfx}" for inv in self.inverter_names]
+            dff = totals[totals.index.isin(filtercols)].to_frame(lbl).copy()
+            dff.index = dff.index.str.replace(sfx, "")
+            df_list.append(dff)
+
+        df = pd.concat(df_list, axis=1)
+
+        df["%-loss"] = df["possible"].sub(df["mwh"]).div(df["possible"])
+        return df
 
     # ------------------------------------------------------------------
     # vectorized hourly aggregates
@@ -990,6 +1029,7 @@ class InverterAnalyzer(_HourlyAnalyzerBase):
         show_possible: bool = True,
         height_per_row: int = 80,
         resample: Optional[str] = "15min",
+        with_flags: bool = True,
     ):
         """Time-series plot of inverter power with hourly flags shaded.
 
@@ -1095,19 +1135,44 @@ class InverterAnalyzer(_HourlyAnalyzerBase):
         fig.add_traces(traces, rows=rows_list, cols=cols_list)
 
         # ---- batch shapes (hourly bands + daily tracker bands) ----
-        hour_step = pd.Timedelta(hours=1)
-        day_step = pd.Timedelta(days=1)
-        tz = self.tz
-        daylight_bounds = self._get_daylight_bounds_by_date()
         shapes: list[dict] = []
+        if with_flags is True:
+            hour_step = pd.Timedelta(hours=1)
+            day_step = pd.Timedelta(days=1)
+            tz = self.tz
+            daylight_bounds = self._get_daylight_bounds_by_date()
 
-        for i, inv in enumerate(inv_names, start=1):
-            xref = "x" if i == 1 else f"x{i}"
-            yref = "y domain" if i == 1 else f"y{i} domain"
+            for i, inv in enumerate(inv_names, start=1):
+                xref = "x" if i == 1 else f"x{i}"
+                yref = "y domain" if i == 1 else f"y{i} domain"
 
-            if not self.hourly_flags.empty and inv in self.hourly_flags.columns:
-                inv_hourly = self.hourly_flags[inv].dropna()
-                for x0, x1, category in _contiguous_runs(inv_hourly, hour_step):
+                if not self.hourly_flags.empty and inv in self.hourly_flags.columns:
+                    inv_hourly = self.hourly_flags[inv].dropna()
+                    for x0, x1, category in _contiguous_runs(inv_hourly, hour_step):
+                        shapes.append(
+                            {
+                                "type": "rect",
+                                "xref": xref,
+                                "yref": yref,
+                                "x0": x0,
+                                "x1": x1,
+                                "y0": 0,
+                                "y1": 1,
+                                "fillcolor": FLAG_COLORS.get(category, "#cccccc"),
+                                "opacity": 0.25,
+                                "line": {"width": 0},
+                                "layer": "below",
+                            }
+                        )
+
+                for date, (t_type, _loss_mwh) in tracker_by_inv.get(inv, {}).items():
+                    # Clip tracker band to that day's daylight window; fall back to
+                    # 00:00–24:00 only if daylight bounds aren't available for the date.
+                    if date in daylight_bounds:
+                        x0, x1 = daylight_bounds[date]
+                    else:
+                        x0 = pd.Timestamp(date, tz=tz)
+                        x1 = x0 + day_step
                     shapes.append(
                         {
                             "type": "rect",
@@ -1117,36 +1182,12 @@ class InverterAnalyzer(_HourlyAnalyzerBase):
                             "x1": x1,
                             "y0": 0,
                             "y1": 1,
-                            "fillcolor": FLAG_COLORS.get(category, "#cccccc"),
-                            "opacity": 0.25,
+                            "fillcolor": FLAG_COLORS.get(f"tracker_{t_type}", "#cccccc"),
+                            "opacity": 0.18,
                             "line": {"width": 0},
                             "layer": "below",
                         }
                     )
-
-            for date, (t_type, _loss_mwh) in tracker_by_inv.get(inv, {}).items():
-                # Clip tracker band to that day's daylight window; fall back to
-                # 00:00–24:00 only if daylight bounds aren't available for the date.
-                if date in daylight_bounds:
-                    x0, x1 = daylight_bounds[date]
-                else:
-                    x0 = pd.Timestamp(date, tz=tz)
-                    x1 = x0 + day_step
-                shapes.append(
-                    {
-                        "type": "rect",
-                        "xref": xref,
-                        "yref": yref,
-                        "x0": x0,
-                        "x1": x1,
-                        "y0": 0,
-                        "y1": 1,
-                        "fillcolor": FLAG_COLORS.get(f"tracker_{t_type}", "#cccccc"),
-                        "opacity": 0.18,
-                        "line": {"width": 0},
-                        "layer": "below",
-                    }
-                )
 
         fig.update_layout(
             height=height_per_row * n_rows + 60,

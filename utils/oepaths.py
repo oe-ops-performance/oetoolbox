@@ -7,6 +7,7 @@ from .config import (
     INTRALINKS_PATH,
     COMMERCIAL_DIR,
     OPS_PERFORMANCE_DIR,
+    OPS_LEGACY_PATH,
 )
 
 
@@ -32,13 +33,11 @@ if "Onward Energy" not in Path.cwd().parts:
 else:
     idx = Path.cwd().parts.index("Onward Energy")
     onward_fp = Path(*Path.cwd().parts[: idx + 1])
-shared_fp = max(
-    (fp.stat().st_mtime, fp) for fp in onward_fp.iterdir() if fp.name.startswith("Shared")
-)[1]
-intra_fp = shared_fp if "Intralinks" in shared_fp.name else Path(shared_fp, "Intralinks")
 internal_documents = Path(INTRALINKS_PATH, "Internal Documents")
 
-operations_legacy = internal_documents / "Operations"
+operations_legacy = OPS_LEGACY_PATH
+if not OPS_LEGACY_PATH.exists() or "Pete.Stein" in Path.home().parts:
+    operations_legacy = Path.home() / "OneDrive - Onward Energy" / "Shared - Operations"
 
 # frequently-referenced directories
 operations = OPS_PERFORMANCE_DIR
@@ -60,7 +59,7 @@ UTILITY_METER_DIR = Path("\\\\corp-cdaas\\Meter_Data_Historian")
 meter_generation_historian = Path(
     UTILITY_METER_DIR, "Master_Version", "Meter_Generation_Historian.xlsm"
 )
-kpi_tracker_rev1 = operations_legacy / "Solar" / "z_Monthly KPI Tracker_Rev2.xlsx"
+kpi_tracker_rev1 = OPS_PERFORMANCE_DIR / "Solar" / "z_Monthly KPI Tracker_Rev2.xlsx"
 kpi_notes_file = Path(flashreports, "_kpis_and_notes_.xlsx")
 
 

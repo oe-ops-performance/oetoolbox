@@ -52,27 +52,27 @@ class PISite:
         return oemeta.data[self.fleet_key].get(self.name, {})
 
     @property
-    def asset_heirarchy(self) -> dict:
+    def asset_hierarchy(self) -> dict:
         """Returns nested dictionary with asset groups, assets, subassets as keys
         -> if no assets, {asset_group: []}
         -> assets in list if no subassets, otherwise keys of dict w/ list of subassets as values
         """
-        heirarchy = {}
+        hierarchy = {}
         subassets_exist = lambda dict_: any(dict_[a].get(f"{a}_Subassets") for a in dict_)
         for asset_group, group_dict in self.af_dict.items():
             asset_dict = group_dict.get(f"{asset_group}_Assets")  # asset names as keys
             if not asset_dict:
-                heirarchy[asset_group] = []
+                hierarchy[asset_group] = []
                 continue
             if not subassets_exist(asset_dict):
-                heirarchy[asset_group] = list(asset_dict.keys())
+                hierarchy[asset_group] = list(asset_dict.keys())
                 continue
             # note: does not catch further subasset levels if exist
-            heirarchy[asset_group] = {
+            hierarchy[asset_group] = {
                 asset: list(dict_[f"{asset}_Subassets"].keys())
                 for asset, dict_ in asset_dict.items()
             }
-        return heirarchy
+        return hierarchy
 
     @property
     def asset_groups(self) -> list:
@@ -84,9 +84,14 @@ class PISite:
     @property
     def asset_names_by_group(self) -> dict:
         """Returns dictionary with asset groups as keys, and asset names as values"""
+        if self.name != "Richland":
+            return {
+                group: list(self.af_dict[group][f"{group}_Assets"].keys())
+                for group in self.asset_groups
+            }
         return {
-            group: list(self.af_dict[group][f"{group}_Assets"].keys())
-            for group in self.asset_groups
+            grp: [x for x in oemeta.data["solar_af_structure"][self.name][grp]]
+            for grp in self.asset_groups
         }
 
     @property
@@ -257,6 +262,11 @@ class SolarSite(PISite):
     @property
     def region(self) -> str:
         return "West" if self.coordinates[1] < REGION_SPLIT_LONGITUDE else "East"
+
+    @property
+    def location_kwargs(self) -> dict:
+        lat, lon = self.coordinates
+        return dict(tz=self.timezone, lat=lat, lon=lon)
 
     @property
     def design_database(self) -> dict:

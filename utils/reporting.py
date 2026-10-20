@@ -8,7 +8,8 @@ from typing import Union
 
 from .assets import SolarSite
 from .datetime import (
-    infer_freq_timedelta,
+    infer_freq,
+    upsample,
     localize_naive_datetimeindex,
     remove_tzinfo_and_standardize_index,
 )
@@ -54,8 +55,8 @@ def most_recent_reporting_period() -> tuple[int]:
 def validate_reporting_period(year: int, month: int) -> None:
     """Ensures defined year/month is before the current year/month."""
     max_year, max_month = most_recent_reporting_period()
-    if (year, month) > (max_year, max_month):
-        raise ValueError("Invalid year/month specified.")
+    # if (year, month) > (max_year, max_month):
+    #     raise ValueError("Invalid year/month specified.")
     return
 
 
@@ -287,6 +288,10 @@ class FlashReportGenerator:
                 asset_group=asset_group, version="all", with_tz=with_tz, return_fpath=True
             )
             if not df.empty:
+                if asset_group not in ["Modules", "Combiners"] and infer_freq(
+                    df.index
+                ) > pd.Timedelta(minutes=1):
+                    df = upsample(df, pd.Timedelta(minutes=1))
                 data[asset_group] = df.copy()
                 source_fpaths.append(fpath)
 
@@ -321,13 +326,18 @@ class FlashReportGenerator:
                 df, fpath = output
                 source_fpaths.append(fpath)
                 if "Site" in data.keys():
-                    if all(data["Site"].index == df.index):
-                        qprint(
-                            "Overwriting OE.CurtailmentStatus and OE.SiteSetpoint data with CAISO data."
-                        )
-                        df.index = data["Site"].index
-                        data["Site"]["OE.CurtailmentStatus"] = df["CurtailmentStatus"]
-                        data["Site"]["OE.SiteSetpoint"] = df["CAISO_MW_Setpoint"]
+                    if len(data["Site"]) == len(df):
+                        if (data["Site"].index == df.index).all():
+                            qprint(
+                                "Overwriting OE.CurtailmentStatus and OE.SiteSetpoint data with CAISO data."
+                            )
+                            df.index = data["Site"].index
+                            data["Site"]["OE.CurtailmentStatus"] = df["CurtailmentStatus"]
+                            data["Site"]["OE.SiteSetpoint"] = df["CAISO_MW_Setpoint"]
+                        else:
+                            qprint(
+                                "Warning: index mismatch between CAISO data and 'Site' PI dataset."
+                            )
                     else:
                         qprint("Warning: index mismatch between CAISO data and 'Site' PI dataset.")
                 else:
@@ -624,6 +634,12 @@ class FlashReportGenerator:
     def run_met_backfill(
         self,
         r2_diff=0.1,
+        per_day_qc=True,
+        daily_r2_diff=0.1,
+        peer_r2_diff=0.1,
+        min_daily_points=6,
+        min_peer_sensors=2,
+        exclude_sensors=None,
         clean_fpath=None,  # temp
         # df_clean=None,  # TODO
         skip_if_exists=True,
@@ -650,7 +666,17 @@ class FlashReportGenerator:
 
         qprint(f"Using data from file: {clean_fp.name}\n\n--- BEGIN BACKFILL ---")
         output = process_and_backfill_meteo_data(
-            filepath=clean_fp, site=self.site.name, n_clearsky=5, r2_diff=r2_diff, q=q
+            filepath=clean_fp,
+            site=self.site.name,
+            n_clearsky=5,
+            r2_diff=r2_diff,
+            per_day_qc=per_day_qc,
+            daily_r2_diff=daily_r2_diff,
+            peer_r2_diff=peer_r2_diff,
+            min_daily_points=min_daily_points,
+            min_peer_sensors=min_peer_sensors,
+            exclude_sensors=exclude_sensors,
+            q=q,
         )
         if output is None or isinstance(output, pd.DataFrame):
             qprint(f"Error in backfill script (no output).\n--- END BACKFILL ---\n")
@@ -741,6 +767,7 @@ class FlashReportGenerator:
         else:
             df = self.site._load_file(processed_fpath, with_tz=True)
             poa_data = pd.Series(df["Processed_POA"], name="POA")
+            poa_data = poa_data.clip(lower=1e-5)
             df_pvlib = run_pvlib_model(
                 site=self.site.name,
                 datetime_index=poa_data.index,
@@ -833,7 +860,9 @@ class FlashReportGenerator:
                 incomplete.update({k: sts for k, sts in status.items() if sts is False})
         return incomplete
 
-    def create_monthly_subplots(self, save_html=True, overwrite=False, skip_existing=True, q=True):
+    def create_monthly_subplots(
+        self, save_html=True, overwrite=False, skip_existing=True, q=True, shade_curtailment=True
+    ):
         qprint = quiet_print_function(q=q)
         if skip_existing:
             if list(self.folder.glob("*summary*plots*.html")):
@@ -844,7 +873,11 @@ class FlashReportGenerator:
             qprint("Loaded meter historian file.")
         try:
             fig = monthly_summary_subplots(
-                *self.args, save_html=save_html, df_util=self.df_util, overwrite=overwrite
+                *self.args,
+                save_html=save_html,
+                df_util=self.df_util,
+                overwrite=overwrite,
+                shade_curtailment=shade_curtailment,
             )
         except Exception as e:
             fig = None
@@ -858,14 +891,19 @@ class FlashReportGenerator:
         if source not in ("file", "tracker"):
             raise ValueError("Invalid source specified. Must be either 'file' or 'tracker'.")
         if source == "file":
-            output = calculate_insurance_bi_adjustment(
-                site_name=self.site.name,
-                year=self.year,
-                month=self.month,
-                return_claim_and_df=True,
-                q=q,
-            )
-            claim_total = output["total_claim_mwh"]
+            try:
+                output = calculate_insurance_bi_adjustment(
+                    site_name=self.site.name,
+                    year=self.year,
+                    month=self.month,
+                    return_claim_and_df=True,
+                    q=q,
+                )
+                claim_total = output["total_claim_mwh"]
+            except Exception as e:
+                if q is False:
+                    print(f">>> ERROR retrieving insurance bi claims for {self.site.name}: {e}")
+                claim_total = 0
             source_fpath = SOLAR_PERFORMANCE_REPORT_FILEPATH
         else:
             # otherwise, load from tracker file
@@ -1275,11 +1313,11 @@ class MonthlySolarReporting:
         self.kpis = {"notes": None, "tracker": {}}  # init
 
     def _validate_df_util_input(self, df_util):
-        if df_util is None:
+        if df_util == "load":
             df_util = load_utility_meter_data(
                 year=self.year, month=self.month, fleet="solar", q=self.q
             )
-        elif not isinstance(df_util, pd.DataFrame):
+        elif df_util is not None and not isinstance(df_util, pd.DataFrame):
             raise ValueError("Argument 'df_util' must be a DataFrame.")
         self.df_util = df_util
 
@@ -1375,6 +1413,7 @@ class MonthlySolarReporting:
         if with_meta is True:
             capacity_mapping = {s: oemeta.data["SystemSize"]["MWAC"].get(s, 0) for s in SOLAR_SITES}
             df.insert(0, "ac_capacity", df.index.map(capacity_mapping))
+            df.insert(0, "region", df.index.map(lambda s: SolarSite(s).region))
 
         df = df.rename_axis("Site")
         return df

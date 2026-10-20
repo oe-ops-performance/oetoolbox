@@ -207,7 +207,10 @@ def get_monthly_ghi_total(site, year, month, force_dtn=False):
     met_fpath = oepaths.latest_file(list(report_dir.glob("PIQuery*MetStations*PROCESSED*.csv")))
     if isinstance(met_fpath, Path) and not force_dtn:
         df = pd.read_csv(met_fpath, index_col=0, parse_dates=True)
-        ghi_total = df["Processed_GHI"].sum() / 1e3 / 60  # minute-level data
+        if "Processed_GHI" in df.columns:
+            ghi_total = df["Processed_GHI"].sum() / 1e3 / 60  # minute-level data
+        else:
+            ghi_total = 0
     else:
         # query DTN ghi
         tz = oemeta.data["TZ"].get(site)

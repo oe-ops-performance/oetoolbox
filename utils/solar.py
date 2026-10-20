@@ -10,7 +10,7 @@ from .helpers import quiet_print_function
 from .oepaths import frpath, latest_file
 from .pi import PIDataset
 from ..dataquery.external import query_fracsun
-from ..datatools.pvlib import query_dtn_meteo_data
+from ..datatools.pvlib import query_dtn_meteo_data, _get_aligned_clearsky_data
 from ..reporting.curtailment import load_caiso_data
 
 
@@ -45,7 +45,11 @@ class SolarDataset(Dataset):
 
     @classmethod
     def from_existing_data_files(
-        cls, site_name: str, asset_group: str, start_date: str = None, end_date: str = None
+        cls,
+        site_name: str,
+        asset_group: str,
+        start_date: str = None,
+        end_date: str = None,
     ):
         """Loads data from existing query files in flashreport folders
 
@@ -54,7 +58,7 @@ class SolarDataset(Dataset):
         site_name : str
             Name of site (used to initialize SolarSite instance)
         asset_group : str
-            The particular asset group to load data for. Includes PVLib.
+            The particular asset group to load data for. Includes 'pvlib'.
         start_date : str, optional
             The target start date for the dataset, default = None
         end_date : str, optional
@@ -105,21 +109,25 @@ class SolarDataset(Dataset):
             latest_fp = latest_file(matching_query_fpaths)
             try:
                 df_ = self.site._load_file(latest_fp, with_tz=True)
-                df_ = df_.rename(columns={"POA_DTN": "POA"})
-                if "pvlib" in latest_fp.name.lower():
-                    df_.columns = df_.columns.map(str.lower)
-                elif "meter" in latest_fp.name.lower():
-                    df_ = df_.rename(columns={df_.columns[0]: "OE.MeterMW"})
+                if len(data_year_month_list) > 1:
+                    # format to prevent errors during concat
+                    df_ = df_.rename(columns={"POA_DTN": "POA"})
+                    if "pvlib" in latest_fp.name.lower():
+                        df_.columns = df_.columns.map(str.lower)
+                    elif "meter" in latest_fp.name.lower():
+                        df_ = df_.rename(columns={df_.columns[0]: "OE.MeterMW"})
 
-                if df_.index.diff().max() > pd.Timedelta(minutes=1):
-                    df_ = df_.resample("1min").interpolate()
+                    if df_.index.diff().max() > pd.Timedelta(minutes=1):
+                        df_ = df_.resample("1min").interpolate()
 
                 df_list.append(df_)
                 self.source_files.append(str(latest_fp))
             except:
                 raise ValueError("Problem loading data")
 
-        if len(df_list) > 0:
+        if len(df_list) == 1:
+            self.data = df_list[0].copy()
+        elif len(df_list) > 0:
             common_cols = [
                 c for c in df_list[0].columns if all((c in df_.columns) for df_ in df_list)
             ]
@@ -151,22 +159,52 @@ class SolarDataset(Dataset):
         n_segment: int = 11,
         q: bool = True,
         raise_error: bool = True,
+        n_batch: int = 30,
     ):
         """Queries data from PI for pre-defined attributes used in monthly reporting."""
         site = SolarSite(site_name)
+        dataset = cls(site, start_date, end_date)
         query_att_dict = site.query_attributes
         attribute_paths = query_att_dict.get(asset_group, [])
 
-        dataset = cls(site, start_date, end_date)
         if not attribute_paths:
             if raise_error is False:
                 return dataset
             err_msg = f"No pre-defined attributes found for {site_name=}, {asset_group=}."
             raise KeyError(f"{err_msg}\nSupported asset groups: {[*query_att_dict]}")
 
-        dataset._query_data_from_pi(
-            attribute_paths, freq, method, keep_tzinfo, data_format, n_segment, q
+        qkwargs = dict(
+            freq=freq,
+            method=method,
+            keep_tzinfo=keep_tzinfo,
+            data_format=data_format,
+            n_segment=n_segment,
+            q=q,
         )
+
+        qprint = quiet_print_function(q=q)
+        n_attpaths = len(attribute_paths)
+        if n_attpaths <= n_batch or asset_group not in (
+            "Combiners",
+            "Combiners Weighted",
+            "AC Modules",
+            "Trackers",
+        ):
+            dataset._query_data_from_pi(attribute_paths=attribute_paths, **qkwargs)
+            return dataset
+
+        qprint(f"Running query in batches of {n_batch} attributes (total {n_attpaths = })")
+        attpath_batches = [attribute_paths[i : i + n_batch] for i in range(0, n_attpaths, n_batch)]
+        dataset_list = []
+        for i, batch in enumerate(attpath_batches, start=1):
+            qprint(f"(( batch {i}/{len(attpath_batches)} ))")
+            dset = cls(site, start_date, end_date)
+            dset._query_data_from_pi(attribute_paths=batch, **qkwargs)
+            dataset_list.append(dset)
+
+        axis = 1 if data_format == "wide" else 0
+        dataset.data = pd.concat([d.data for d in dataset_list], axis=axis, ignore_index=False)
+        qprint(f"\nEnd batched query; combined df.shape = {dataset.data.shape}")
         return dataset
 
     def _query_data_from_pi(
@@ -279,6 +317,10 @@ class SolarDataset(Dataset):
         )
         if len(df.index) == len(expected_index):
             df.index = expected_index
+
+        if not any("clearsky" in c for c in df.columns):
+            clearsky = _get_aligned_clearsky_data(self.site.name, df.index)
+            df = df.join(clearsky)
 
         self.source_files.append(str(filepath))
         return df

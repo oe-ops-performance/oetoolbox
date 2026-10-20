@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from types import SimpleNamespace
 
 from ..utils import oepaths, oemeta
+from ..utils.config import SOLAR_COMMERCIAL_DIR
 from ..utils.datetime import remove_tzinfo_and_standardize_index
 from ..utils.helpers import with_retries, quiet_print_function
 
@@ -25,6 +26,8 @@ FMT = SimpleNamespace(
     int="0",
 )
 
+DATA_SOURCE_OPTIONS = ["pi", "sql", "mixed"]
+
 
 class ComancheCurtailment:
     def __init__(self, year: int, month: int, scaling_factor: float):
@@ -36,14 +39,17 @@ class ComancheCurtailment:
             "poa": None,  # dataframe with poa from pvlib file (sourced from PI or DTN)
             "pi": None,  # dataframe with pvlib, pi meter, and ppc setpoint
             "sql": None,  # dataframe with expected, sql meter, and curtailment
+            "mixed": None,  # dataframe with ppc setpoint from pi, and possible/meter from sql
         }
         self.report_data = {
             "pi": {"interval": None, "summary": None},
             "sql": {"interval": None, "summary": None},
+            "mixed": {"interval": None, "summary": None},
         }
         self.source_files = []
         self._load_data_from_files()
         self._query_sql_data()
+        self._generate_mixed_source_data()
 
     @lru_cache(maxsize=128)
     def _load_data_from_files(self):
@@ -96,24 +102,36 @@ class ComancheCurtailment:
 
         # get ppc data
         sp_col = "xcel_MW_setpoint"
+        cmd_request_col = "xcel_MW_cmd_request"
         df_ppc = getloadfile("PIQuery_PPC_*.csv")
         if sp_col not in df_ppc.columns:
             raise ValueError(f"Column '{sp_col}' not found in PPC dataset.")
+
         df[sp_col] = df_ppc[sp_col].copy()
         if df[sp_col].max() == 0.12:
             df[sp_col] = df[sp_col].mul(1e3)
 
+        if cmd_request_col not in df_ppc.columns:
+            raise ValueError(f"Column '{cmd_request_col}' not found in PPC dataset.")
+        df[cmd_request_col] = df_ppc[cmd_request_col].copy()
+
         # create column for curtailed kW
-        is_curtailed = (
-            df[sp_col].lt(120.0) & df[sp_col].lt(df["possible"]) & df["possible"].gt(df["meter"])
-        )
+        is_curtailed = df[cmd_request_col].eq(1) & df["possible"].gt(df["meter"])
+
         # NOTE: this is in kW; converted to kWh in subsequent steps
         df["curtailment_kw"] = np.where(  # poss/meter are in MW
             is_curtailed, df["possible"].sub(df["meter"]).mul(1e3), 0.0
         )
 
-        # assign pi data - columns: ["possible", "meter", "xcel_MW_setpoint", "curtailment_kw"]
+        # assign pi data - columns: ["possible", "meter", "xcel_MW_setpoint", "xcel_MW_cmd_request", "curtailment_kw"]
         self.data["pi"] = df.copy()
+
+    def curtailment_condition(self, df_interval):
+        ac_capacity = 120.0
+        c1 = df_interval["xcel_MW_setpoint"].lt(ac_capacity)
+        c2 = df_interval["xcel_MW_setpoint"].lt(df_interval["possible"])
+        c3 = df_interval["possible"].gt(df_interval["meter"])
+        return c1 & c2 & c3
 
     @lru_cache(maxsize=128)
     def _query_sql_data(self):
@@ -133,9 +151,31 @@ class ComancheCurtailment:
         df[mw_cols] = df[mw_cols].div(1e3)  # convert kW to MW
         self.data["sql"] = df.copy()
 
+    def _generate_mixed_source_data(self):
+        # take the meter and possible generation from sql data
+        df = pd.concat(
+            [
+                self.data["sql"][["possible", "meter"]].copy(),
+                self.data["pi"][["xcel_MW_setpoint", "xcel_MW_cmd_request"]].copy(),
+            ],
+            axis=1,
+        )
+        # is_curtailed = self.curtailment_condition(df_interval=df)
+        is_curtailed = df["xcel_MW_cmd_request"].eq(1) & df["possible"].gt(df["meter"])
+
+        # NOTE: this is in kW; converted to kWh in subsequent steps
+        df["curtailment_kw"] = np.where(  # poss/meter are in MW
+            is_curtailed, df["possible"].sub(df["meter"]).mul(1e3), 0.0
+        )
+        self.data["mixed"] = df.copy()
+
     def _generate_report_interval_data(self, source):
-        # combine: [poa, possible, meter, xcel_MW_setpoint, curtailment]
+        # combine: [poa, possible, meter, xcel_MW_cmd_request, curtailment]
         df = self.data[source].copy()
+        if source != "sql":
+            if "xcel_MW_cmd_request" not in df.columns:
+                raise ValueError("Missing column: 'xcel_MW_cmd_request'")
+            df = df[[c for c in df.columns if c != "xcel_MW_setpoint"]]
         df.insert(0, "poa", self.data["poa"])
         df["curt_rate"] = 0.0625  # units: $/kWh
 
@@ -160,7 +200,7 @@ class ComancheCurtailment:
         self.report_data[source]["summary"] = df.copy()
 
     def _generate_data_for_report(self):
-        for source in ("pi", "sql"):
+        for source in ("pi", "sql", "mixed"):
             self._generate_report_interval_data(source=source)
             self._generate_daily_summary_table(source=source)
 
@@ -178,7 +218,8 @@ class ComancheCurtailment:
         print(f"Total curtailment losses:")
         for source, dict_ in self.report_data.items():
             lost_mwh = dict_["interval"]["curtailment_kwh"].sum() / 1e3
-            print(f"   {source.rjust(3)} -> {lost_mwh:.2f}")
+            msg = "" if source != "mixed" else "  (PI PPC cmd_request & SQL Meter/Possible)"
+            print(f"  {source.rjust(5)} -> {lost_mwh:.2f}{msg}")
         return
 
     def generate_report(self, source, q=True, local=False):
@@ -193,6 +234,7 @@ class ComancheCurtailment:
             .agg({c: "sum" if c in sum_cols else "mean" for c in df.columns})
             .copy()
         )
+
         df = df.drop(columns=["curtailment_kw"]).reset_index(drop=False)
         dfs = dfs.reset_index(drop=False)
 
@@ -208,6 +250,9 @@ class ComancheCurtailment:
             for c, val in enumerate(row):
                 ws.cell(r + 2, c + 1).value = val
                 ws.cell(r + 2, c + 1).number_format = rng1_formats[c]
+
+        if source != "sql":
+            ws.cell(row=1, column=5).value = "xcel_MW_cmd_request"
 
         # SUMMARY TABLE (from dfs)
         # cols. L-O: [Timestamp, curtailment_kwh, curt_hrs, lost_rev]
@@ -263,38 +308,56 @@ def comanche_reporting_timeseries(year, month, q=True) -> pd.DataFrame:
     end = start + pd.DateOffset(months=1)
     start_date, end_date = map(lambda ts: ts.strftime("%Y-%m-%d"), [start, end])
 
+    query = """
+        DECLARE @startDate date;
+        DECLARE @endDate date;
+
+        SET @startDate = ?;
+        SET @endDate = ?;
+
+        SELECT
+            Timestamp_UTC
+            ,Park_Potential_KW AS Expected_KW
+            ,Meter_KW AS Meter_KW
+            ,Power_Limit_SP AS Power_SP_KW
+            ,CASE
+                WHEN (Park_Potential_KW > Meter_KW)
+                    AND (Power_Limit_SP < 120000)
+                    AND (Park_Potential_KW > Power_Limit_SP)
+                THEN Park_Potential_KW - Meter_KW
+                ELSE 0
+            END AS Curtailed_KW
+        FROM [Comanche].dbo.POIData
+        WHERE DATEADD(HOUR, -6, Timestamp_UTC) BETWEEN @startDate AND @endDate
+        ORDER BY Timestamp_UTC;
+    """
+
     # create engine for connection to SQL server, then use pandas to get query results
-    engine = create_engine(
-        "mssql+pyodbc://CORP-OPSSQL/Comanche?driver=ODBC+Driver+17+for+SQL+Server"
-    )
-    with engine.connect() as conn, conn.begin():
-        df = pd.read_sql_query(
-            """
-            DECLARE @startDate date;
-            DECLARE @endDate date;
+    def generate_url(driver_version: int):
+        url_start = "mssql+pyodbc://CORP-OPSSQL/Comanche?driver=ODBC+Driver+"
+        url_end = "+for+SQL+Server&TrustServerCertificate=yes"
+        return url_start + str(driver_version) + url_end
 
-            SET @startDate = ?;
-            SET @endDate = ?;
+    connected = False
+    for version in (18, 17):
+        url = generate_url(version)
+        qprint(url)
+        try:
+            engine = create_engine(url)
+            with engine.connect() as conn, conn.begin():
+                df = pd.read_sql_query(
+                    query,
+                    con=conn,
+                    params=(start_date, end_date),
+                )
+            connected = True
+            break
+        except Exception as e:
+            qprint(e)
+            continue
 
-            SELECT
-                Timestamp_UTC
-                ,Park_Potential_KW AS Expected_KW
-                ,Meter_KW AS Meter_KW
-                ,Power_Limit_SP AS Power_SP_KW
-                ,CASE
-                    WHEN (Park_Potential_KW > Meter_KW)
-                        AND (Power_Limit_SP < 120000)
-                        AND (Park_Potential_KW > Power_Limit_SP)
-                    THEN Park_Potential_KW - Meter_KW
-                    ELSE 0
-                END AS Curtailed_KW
-            FROM [Comanche].dbo.POIData
-            WHERE DATEADD(HOUR, -6, Timestamp_UTC) BETWEEN @startDate AND @endDate
-            ORDER BY Timestamp_UTC;
-            """,
-            con=conn,
-            params=(start_date, end_date),
-        )
+    if not connected:
+        raise Exception("Error with database connection url.")
 
     df["Timestamp"] = df["Timestamp_UTC"] - pd.Timedelta(hours=6)
     df = df.set_index("Timestamp").drop(columns=["Timestamp_UTC"])
@@ -311,7 +374,7 @@ def comanche_reporting_timeseries(year, month, q=True) -> pd.DataFrame:
             # extra hour (60 extra/duplicate timestamps)
             df = df[~df.index.duplicated(keep="first")]
         else:
-            raise ValueError("Unexpected timestamp mismatch in SQL output.")
+            pass  # raise ValueError("Unexpected timestamp mismatch in SQL output.")
         df = df.reindex(expected_sql_index)
         qprint("Reindexed DST condition")
 
@@ -340,24 +403,22 @@ def get_comanche_curtailment(year, month, return_fpath: bool = False):
     return curt_total
 
 
-def commercial_folder():
-    for fpath in oepaths.onward_fp.glob("*Commercial*Documents*"):
-        if Path(fpath, "Commercial").exists():
-            return Path(fpath, "Commercial")
-    return
+def get_commercial_folder(site: str):
+    """Returns Settlements folder for Maplewood 1/2"""
+    # currently configured to work with solar sites
+    if not SOLAR_COMMERCIAL_DIR.exists():
+        raise ValueError(f"Path not found: '{str(SOLAR_COMMERCIAL_DIR)}'")
+
+    folder = SOLAR_COMMERCIAL_DIR / site / "Settlements"
+    if not folder.exists():
+        raise ValueError(f"Settlements folder not found: '{str(folder)}'")
+
+    return folder
 
 
-def get_commercial_folder(site: str, fleet: str = "solar"):
-    commercial_dir = commercial_folder()
-    if commercial_dir is None:
-        raise ValueError("Commercial directory not found in expected location.")
-    if fleet.lower() not in ("solar", "thermal", "wind"):
-        raise KeyError("Invalid fleet specified.")
-    folder_name = site  # temp; might need mapping for certain sites
-    site_folder = Path(commercial_dir, fleet.capitalize(), folder_name)
-    if not site_folder.exists():
-        raise KeyError("Unsupported site; temp.")
-    return site_folder
+def _maplewood_settlements_filepaths(site, year, month) -> list[Path]:
+    folder = get_commercial_folder(site)
+    return list(folder.glob(f"*Energy*Invoice*{year}*{month}*.xls*"))
 
 
 def _curtailment_from_settlement_invoice(filepath):
@@ -394,15 +455,9 @@ def _curtailment_from_settlement_invoice(filepath):
 
 
 def get_maplewood_curtailment(site: str, year: int, month: int) -> dict:
-    """NOTE: this will only work if the Commercial SharePoint folder is synced to the user's "Onward Energy" folder"""
     if site not in ("Maplewood 1", "Maplewood 2"):
         raise ValueError("Invalid site specified.")
-    folder = get_commercial_folder(site=site)
-    settlements_folder = Path(folder, "Settlements")
-    if not settlements_folder.exists():
-        raise ValueError("Could not find Settlements folder.")
-    fpattern = f"*{site}*Energy*Invoice*{year}*{month:02d}*.xlsx"
-    invoice_fpaths = list(Path(folder, "Settlements").glob(fpattern))
+    invoice_fpaths = _maplewood_settlements_filepaths(site, year, month)
     if not invoice_fpaths:
         raise ValueError("No settlement files found for specified period.")
 
@@ -413,6 +468,7 @@ def get_maplewood_curtailment(site: str, year: int, month: int) -> dict:
     invoice_fp = oepaths.latest_file(invoice_fpaths)
     df = _curtailment_from_settlement_invoice(invoice_fp)
     total_mwh = df.iloc[:, -1].sum()
+
     return {"data": df, "total_mwh": total_mwh, "source": invoice_fp}
 
 

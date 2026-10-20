@@ -36,10 +36,10 @@ VOLTAGE_POI_TAGS = {
     "Maplewood 2": "MPLWD.MWSP_MTR002.PO.VllAvg_kV",  # substation, not poi
     "Maricopa West": "MARWE.CAISO Main Meter Bus Voltage-Avg",
     "MS3": "SUMS3.MS3.PLC1.0S_REG01.V",
-    "Mulberry": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
+    # "Mulberry": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
     "Old River One": "OLRVO.ORS1_S001.PMCAISOPri.Sts.VLLAvg_kV",
     "Route 66": "RT66.RTAC.Tenska_ERCOT_VOLT_POI",
-    "Selmer": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
+    # "Selmer": "OE.Avg_LL_Kv",  # site-level, OE.Avg_LL_Kv
     "South Plains II": "SP2.RTAC.Tenaska_ERCOT_VOLT_POI",
     "West Antelope": "TCAAW.Antelope West DNP Client.DNP Client.CAISO Meter kVLL-Avg",
 }
@@ -102,7 +102,6 @@ class VoltageMetadata:
         self.rename_cols = {self.poi_tag: "volt_poi"}  # before overwriting (if attribute path)
 
         if self.poi_tag.startswith("OE."):
-            self.poi_tag = f"{PISite(site).af_path}|OE.Avg_LL_Kv"
             self.poi_tag_type = "attribute_path"
         else:
             self.poi_tag_type = "pipoint"
@@ -140,7 +139,7 @@ class VoltageMetadata:
             if tag_type == "pipoint":
                 self.pipoint_names.append(tag)
             else:
-                self.attribute_paths.append(tag)
+                self.attribute_paths.append(f"{PISite(site).af_path}|{tag}")
 
         self.tag_names = [*self.rename_cols]
         self.static = self.static_target is not None and pd.notna(self.static_target)
@@ -173,6 +172,7 @@ class VoltageAnalysis:
         self.df = None
         self.event_list = None
         self.df_events = None
+        self.event_notes = {}  # keys -> index of related event in df_events
         self.excursion_plot = None
 
     def _assign_dates(self) -> None:
@@ -187,24 +187,26 @@ class VoltageAnalysis:
             columns={x: "Tag" for x in ["PIPoint", "Attribute"]}
         )
         self.df_raw = self._pivot_recvals_to_wide_format(df=self.df_query)
-        self._format_raw_data()  # assigns self.df
+        self.df = self._format_raw_data(self.df_raw)
 
     @classmethod
-    def from_existing_file(cls, filepath):
+    def from_existing_file(cls, filepath, show_events: bool = None):
         site, year, month = _validate_filename(filepath)
         instance = cls(site, year, month)
         instance._load_analysis_data_from_file(filepath)  # assigns self.df_raw
         instance.identify_events()
-        instance.generate_excursion_plot()
+        if show_events is None:  # auto-mode; hides shapes if > 50 events (for pdf)
+            show_events = len(instance.event_list) <= 50
+        instance.generate_excursion_plot(show_events=show_events)
         return instance
 
     @classmethod
-    def from_monthly_file(cls, site: str, year: int, month: int):
+    def from_monthly_file(cls, site: str, year: int, month: int, show_events: bool = None):
         fpath = get_existing_data_filepath(site, year, month)
         if fpath is None:
             print("No file found.")
             return
-        return cls.from_existing_file(filepath=fpath)
+        return cls.from_existing_file(filepath=fpath, show_events=show_events)
 
     def query_data(self, overwrite=False, q=True) -> None:
         if self.df is not None:
@@ -249,7 +251,23 @@ class VoltageAnalysis:
                 print(f">> saved: {fpath.name}")
 
         self.df_raw = self._pivot_recvals_to_wide_format(self.df_query)
-        self._format_raw_data()  # assigns self.df
+        self.df = self._format_raw_data(self.df_raw)
+
+    def _formatted_query_data_for_save(self) -> pd.DataFrame:
+        df_list = []
+        for tag in self.df_query["Tag"].unique():
+            df_list.append(
+                self.df_query.loc[self.df_query["Tag"].eq(tag), ["Value"]]
+                .rename(columns={"Value": tag})
+                .reset_index(drop=False)
+                .drop_duplicates(subset=["Timestamp"], keep="first")
+                .set_index("Timestamp")
+            )
+        df = pd.concat(df_list, axis=1).ffill()
+        df = self._format_raw_data(df_raw=df)
+        df.index = df.index.strftime("%Y-%m-%d %H:%M:%S")
+        df = df.reset_index(drop=False)
+        return df
 
     def _pivot_recvals_to_wide_format(self, df) -> pd.DataFrame:
         # long-format df as input
@@ -266,8 +284,8 @@ class VoltageAnalysis:
             )
         return pd.concat(df_list, axis=1)
 
-    def _format_raw_data(self) -> None:
-        df = self.df_raw.rename(columns=self.meta.rename_cols).copy()
+    def _format_raw_data(self, df_raw) -> pd.DataFrame:
+        df = df_raw.rename(columns=self.meta.rename_cols).copy()
 
         # known scaling of voltage units
         if self.meta.site in ("Route 66", "South Plains II", "Camelot", "Columbia II"):
@@ -279,7 +297,7 @@ class VoltageAnalysis:
 
         if "volt_target" in df.columns:  # ERCOT sites
             df["upper_limit"] = df["volt_target"] + ERCOT_VOLTAGE_BAND
-            df["upper_limit"] = df["volt_target"] - ERCOT_VOLTAGE_BAND
+            df["lower_limit"] = df["volt_target"] - ERCOT_VOLTAGE_BAND
 
         elif isinstance(self.meta.multiple_targets, dict):
             condlist, choicelist = [], []
@@ -299,7 +317,7 @@ class VoltageAnalysis:
             raise ValueError("Could not find 'volt_target' column in data.")
 
         df["delta"] = df["volt_poi"].sub(df["volt_target"])
-        self.df = df
+        return df
 
     def excursion_condition(self) -> pd.Series:
         df = self.df.copy()
@@ -331,6 +349,14 @@ class VoltageAnalysis:
         breaks = (~condition).cumsum()
         self.event_list = [group for _, group in self.df[condition].groupby(breaks)]
         self.df_events = self._create_excursion_event_table(self.event_list)
+
+    def add_event_note(self, event_index: int, event_note: str) -> None:
+        """Updates self.event_notes dict."""
+        if self.df_events is None:
+            raise ValueError("Need to run analysis and identify events before adding notes.")
+        if event_index >= len(self.df_events):
+            raise IndexError("Specified event index is out of range.")
+        self.event_notes.update({event_index: event_note})
 
     def _create_excursion_event_table(self, event_df_list) -> pd.DataFrame:
         columns = [
@@ -382,16 +408,16 @@ class VoltageAnalysis:
     ) -> go.Figure:
 
         kwargs = dict(x=df.index, mode="lines")
-        target_trace = go.Scattergl(**kwargs, y=df["volt_target"], name="Setpoint")
-        poi_trace = go.Scattergl(**kwargs, y=df["volt_poi"], name="POI")
-        upper_trace = go.Scattergl(
+        target_trace = go.Scatter(**kwargs, y=df["volt_target"], name="Setpoint")
+        poi_trace = go.Scatter(**kwargs, y=df["volt_poi"], name="POI")
+        upper_trace = go.Scatter(
             **kwargs,
             y=df["upper_limit"],
             line=dict(color="black", width=1, dash="dash"),
             hoverinfo="skip",
             showlegend=False,
         )
-        lower_trace = go.Scattergl(
+        lower_trace = go.Scatter(
             **kwargs,
             y=df["lower_limit"],
             line=dict(color="black", width=1, dash="dash"),
@@ -428,7 +454,7 @@ class VoltageAnalysis:
 
         return go.Figure(data=traces, layout=layout)
 
-    def generate_excursion_plot(self, plot_freq="5min") -> go.Figure:
+    def generate_excursion_plot(self, plot_freq="5min", show_events: bool = True) -> go.Figure:
         if self.df is None or self.event_list is None:
             raise ValueError("Data must be queried and events identified first.")
         if plot_freq is None:
@@ -438,11 +464,14 @@ class VoltageAnalysis:
                 lambda x: x.min() if x["volt_poi"].mean() < x["volt_target"].mean() else x.max()
             )
         title = f"{self.meta.site} - Voltage Profile - {df.index[0].strftime('%b-%Y')}"
-        fig = self._generate_figure(df=df, events_to_shade=self.event_list, title=title)
+        events_to_shade = self.event_list if show_events else []
+        fig = self._generate_figure(df=df, events_to_shade=events_to_shade, title=title)
         self.excursion_plot = fig
         return fig
 
-    def generate_event_plot(self, event_idx: int, height: int = 300) -> go.Figure:
+    def generate_event_plot(
+        self, event_idx: int, height: int = 275, max_points: int = 5000
+    ) -> go.Figure:
         if self.event_list is None:
             raise ValueError("Events must be identified before generating event plots.")
         if event_idx >= len(self.event_list):
@@ -457,43 +486,77 @@ class VoltageAnalysis:
         delta_minutes = (t1_ - t0_).total_seconds() / 60
         if delta_minutes < 0.5:
             window = pd.Timedelta(minutes=1)
+        elif delta_minutes > 60 * 24 * 2:
+            window = pd.Timedelta(minutes=60)
         else:
             window_minutes = math.ceil(delta_minutes / 5) * 5  # up to nearest 5
             window = pd.Timedelta(minutes=window_minutes)
 
         t0, t1 = t0_ - window, t1_ + window
         df = self.df[(self.df.index >= t0) & (self.df.index < t1)].copy()
+
+        # downsample long (multi-day) windows so the figure stays small enough to
+        # serialize/export; short events keep full 1-second resolution.
+        if len(df) > max_points:
+            span_seconds = (df.index[-1] - df.index[0]).total_seconds()
+            freq_seconds = max(1, math.ceil(span_seconds / max_points))
+            df = (
+                df.resample(f"{freq_seconds}s")
+                .apply(
+                    lambda x: x.min() if x["volt_poi"].mean() < x["volt_target"].mean() else x.max()
+                )
+                .dropna(how="all")
+            )
+
         title = (
             f"{self.meta.site} - Event {event_idx + 1} of {len(self.event_list)}"
             f" - {event.index[0].strftime('%Y-%m-%d %H:%M')}"
         )
         return self._generate_figure(df, events_to_shade=[event], title=title, height=height)
 
-    def run_analysis(self, plot_freq=None, q=True):
+    def run_analysis(self, plot_freq="5min", show_events=None, q=True):
         self.query_data(q=q)
         self.identify_events()
-        self.generate_excursion_plot(plot_freq=plot_freq)
+        if show_events is None:
+            # auto-mode
+            show_events = len(self.event_list) <= 50
+        self.generate_excursion_plot(plot_freq=plot_freq, show_events=show_events)
 
     def _format_events_table(self) -> pd.DataFrame:
-        df = self.df_events.copy()
-        for col in ("Start Time", "End Time"):
-            df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d %H:%M:%S")
-        for col in (
-            "Start Setpoint (kV)",
-            "Start POI (kV)",
-            "End Setpoint (kV)",
-            "End POI (kV)",
-            "Duration (mins)",
-            "Max Delta (kV)",
-            "Min Delta (kV)",
-        ):
-            df[col] = df[col].map(lambda x: f"{x:.2f}")
+        keepcols = [c for c in self.df_events.columns if "Static Limit" not in c]
+        df = self.df_events[keepcols].copy()
+        for col in df.columns:
+            if col in ("Start Time", "End Time"):
+                df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                df[col] = df[col].map(lambda x: f"{x:.2f}")
         return df
+
+    def get_data_for_file_output(self) -> dict[str, pd.DataFrame]:
+        return {
+            "events": self._format_events_table(),
+            "data": self._formatted_query_data_for_save(),
+        }
 
 
 # ------------------------------------------------------------------ #
 # Module-level report functions
 # ------------------------------------------------------------------ #
+
+
+def filter_df_to_event(df, df_event):
+    # determine x-range around event for plot
+    t0_, t1_ = df_event.index.min(), df_event.index.max()
+    delta_minutes = (t1_ - t0_).total_seconds() / 60
+    if delta_minutes < 0.5:
+        window = pd.Timedelta(minutes=1)
+    elif delta_minutes > 60 * 24 * 2:
+        window = pd.Timedelta(minutes=60)
+    else:
+        window_minutes = math.ceil(delta_minutes / 5) * 5  # up to nearest 5
+        window = pd.Timedelta(minutes=window_minutes)
+    t0, t1 = t0_ - window, t1_ + window
+    return df[(df.index >= t0) & (df.index < t1)].copy()
 
 
 def _report_title(analyses: list, separator: str = " – ") -> str:
@@ -503,7 +566,7 @@ def _report_title(analyses: list, separator: str = " – ") -> str:
 
 
 def _report_subtitle(analyses: list) -> str:
-    sites = [a.site for a in analyses]
+    sites = [a.meta.site for a in analyses]
     if len(sites) == 1:
         sites_str = sites[0]
     elif len(sites) == 2:
@@ -513,7 +576,9 @@ def _report_subtitle(analyses: list) -> str:
     return f"Included Sites: {sites_str}"
 
 
-def generate_email_summary(analyses: "VoltageAnalysis | list[VoltageAnalysis]") -> str:
+def generate_email_summary(
+    analyses: "VoltageAnalysis | list[VoltageAnalysis]", max_events: int = 5
+) -> str:
     """Return a plain-text email summary for one or more completed voltage analyses.
 
     Parameters
@@ -539,14 +604,19 @@ def generate_email_summary(analyses: "VoltageAnalysis | list[VoltageAnalysis]") 
             lines.append(
                 f"{n} voltage deviation event(s) were detected during the analysis period."
             )
-            # for i, row in a.df_events.iterrows():
-            #     start = pd.to_datetime(row["Start Time"]).strftime("%Y-%m-%d %H:%M")
-            #     duration = row["Duration (mins)"]
-            #     max_abs_delta = max(abs(row["Max Delta (kV)"]), abs(row["Min Delta (kV)"]))
-            #     lines.append(
-            #         f"  Event {i + 1}: {start}  |  Duration: {duration:.1f} min"
-            #         f"  |  Max Δ: {max_abs_delta:.2f} kV"
-            #     )
+            for i, row in a.df_events.iterrows():
+                if (i + 1) > max_events:
+                    break
+                t0 = pd.to_datetime(row["Start Time"]).strftime("%Y-%m-%d %H:%M")
+                dur = row["Duration (mins)"]
+                dlt = max(abs(row["Max Delta (kV)"]), abs(row["Min Delta (kV)"]))
+                txt = f"  Event {i + 1}: {t0}  |  Duration: {dur:.1f} min  |  Max Δ: {dlt:.2f} kV"
+                note = a.event_notes.get(i, None)
+                if note is not None:
+                    txt += f"    → → {note.lower()}"
+                lines.append(txt)
+            if len(a.df_events) > max_events:
+                lines.append("  ...")
         lines.append("")
 
     lines.append("Please see the attached report for full details.")
@@ -557,7 +627,7 @@ def _fig_to_html_div(fig: go.Figure, include_plotlyjs) -> str:
     return fig.to_html(full_html=False, include_plotlyjs=include_plotlyjs)
 
 
-def _build_voltage_report_html(analyses: list) -> str:
+def _build_voltage_report_html(analyses: list, max_events: int = 5) -> str:
     title = _report_title(analyses)
     subtitle = _report_subtitle(analyses)
     first_fig = True
@@ -574,10 +644,12 @@ def _build_voltage_report_html(analyses: list) -> str:
             summary = f"{n} deviation events detected."
 
         table_html = ""
-        # if n > 0:
-        #     table_html = "<h3>Events</h3>\n" + a._format_events_table().to_html(
-        #         index=False, border=0, classes="evt-table"
-        #     )
+        if n > 0:
+            h3_str = "Events" if n <= max_events else f"Events (top {max_events} shown)"
+            events_tbl = a._format_events_table().head(max_events)
+            table_html = f"<h3>{h3_str}</h3>\n" + events_tbl.to_html(
+                index=False, border=0, classes="evt-table"
+            )
 
         overview_fig = a.excursion_plot or a.generate_excursion_plot()
         include_js = "cdn" if first_fig else False
@@ -585,20 +657,22 @@ def _build_voltage_report_html(analyses: list) -> str:
         overview_div = _fig_to_html_div(overview_fig, include_js)
 
         event_divs = ""
-        # for i in range(n):
-        #     fig = a.generate_event_plot(i)
-        #     event_divs += (
-        #         f'<div class="keep-together">\n'
-        #         f"<h4>Event {i + 1} of {n}</h4>\n" + _fig_to_html_div(fig, False) + "\n</div>\n"
-        #     )
+        for i in range(n):
+            if (i + 1) > max_events:
+                break
+            fig = a.generate_event_plot(i)
+            event_divs += (
+                f'<div class="keep-together">\n'
+                f"<h4>Event {i + 1} of {n}</h4>\n" + _fig_to_html_div(fig, False) + "\n</div>\n"
+            )
 
-        # event_section = f"<h3>Event Detail</h3>\n{event_divs}" if n > 0 else ""
-        event_section = ""
+        event_section = f"<h3>Event Detail</h3>\n{event_divs}" if n > 0 else ""
+        # event_section = ""
         section_class = "" if first_site else ' class="page-break"'
         first_site = False
         sections.append(
             f"<section{section_class}>\n"
-            f"  <h2>{a.site}</h2>\n"
+            f"  <h2>{a.meta.site}</h2>\n"
             f'  <div class="summary">{summary}</div>\n'
             f"  {table_html}\n"
             f"  <h3>Monthly Overview</h3>\n"
@@ -640,7 +714,7 @@ def _build_voltage_report_html(analyses: list) -> str:
 </html>"""
 
 
-def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
+def _save_voltage_report_pdf(analyses: list, filepath: Path, max_events: int = 3) -> None:
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter
@@ -688,18 +762,26 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
         "rpt_event", parent=styles["Heading4"], fontSize=10, spaceBefore=6, spaceAfter=2
     )
     s_body = styles["Normal"]
+    # wrapping cell styles so long headers / datetimes break across lines
+    # instead of overflowing the narrow columns
+    s_th = ParagraphStyle(
+        "rpt_th",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=6.5,
+        leading=7.5,
+        alignment=1,  # center
+    )
+    s_td = ParagraphStyle("rpt_td", parent=styles["Normal"], fontSize=6.5, leading=7.5, alignment=1)
 
     tbl_style = TableStyle(
         [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
             ("TOPPADDING", (0, 0), (-1, -1), 3),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]
     )
@@ -721,7 +803,7 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
         def _export(fig, path):
             fw = fig.layout.width or 1050
             fh = fig.layout.height or 600
-            fig.write_image(path, width=fw, height=fh, scale=1.5)
+            fig.write_image(path, width=fw, height=fh, scale=1.0)
             return (path, fh / fw)
 
         site_data = []
@@ -733,10 +815,12 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
 
             n = len(a.event_list)
             event_imgs = []
-            # for j in range(n):
-            #     event_imgs.append(
-            #         _export(a.generate_event_plot(j), os.path.join(tmp, f"event_{i}_{j}.png"))
-            #     )
+            for j in range(n):
+                if (j + 1) > max_events:
+                    break
+                event_imgs.append(
+                    _export(a.generate_event_plot(j), os.path.join(tmp, f"event_{i}_{j}.png"))
+                )
 
             site_data.append(
                 {
@@ -765,21 +849,23 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
             if idx > 0:
                 story.append(PageBreak())
 
-            story.append(Paragraph(a.site, s_site))
+            story.append(Paragraph(a.meta.site, s_site))
             summary = (
                 "No deviation events detected." if n == 0 else f"{n} deviation event(s) detected."
             )
             story.append(Paragraph(summary, s_body))
             story.append(Spacer(1, 0.1 * inch))
 
-            # if n > 0:
-            #     story.append(Paragraph("Events", s_section))
-            #     df_fmt = a._format_events_table()
-            #     cols = list(df_fmt.columns)
-            #     col_w = page_w / len(cols)
-            #     tbl_data = [cols] + [[str(row[c]) for c in cols] for _, row in df_fmt.iterrows()]
-            #     story.append(Table(tbl_data, colWidths=[col_w] * len(cols), style=tbl_style))
-            #     story.append(Spacer(1, 0.15 * inch))
+            if n > 0:
+                story.append(Paragraph("Events", s_section))
+                df_fmt = a._format_events_table().head(max_events)
+                cols = list(df_fmt.columns)
+                col_w = page_w / len(cols)
+                tbl_data = [[Paragraph(c, s_th) for c in cols]] + [
+                    [Paragraph(str(row[c]), s_td) for c in cols] for _, row in df_fmt.iterrows()
+                ]
+                story.append(Table(tbl_data, colWidths=[col_w] * len(cols), style=tbl_style))
+                story.append(Spacer(1, 0.15 * inch))
 
             story.append(
                 KeepTogether(
@@ -803,23 +889,22 @@ def _save_voltage_report_pdf(analyses: list, filepath: Path) -> None:
             )
             story.append(Spacer(1, 0.1 * inch))
 
-            # if n > 0:
-            #     for j, (img_path, aspect) in enumerate(sd["events"]):
-            #         header = [Paragraph("Event Detail", s_section)] if j == 0 else []
-            #         story.append(
-            #             KeepTogether(
-            #                 header
-            #                 + [
-            #                     Paragraph(f"Event {j + 1} of {n}", s_event),
-            #                     Table(
-            #                         [[Image(img_path, width=page_w, height=page_w * aspect)]],
-            #                         colWidths=[page_w],
-            #                         style=fig_border_style,
-            #                     ),
-            #                 ]
-            #             )
-            #         )
-            #         story.append(Spacer(1, 0.1 * inch))
+            if n > 0:
+                for j, (img_path, aspect) in enumerate(sd["events"]):
+                    header = [Paragraph("Event Detail", s_section)] if j == 0 else []
+                    event = [
+                        Paragraph(f"Event {j + 1} of {n}", s_event),
+                        Table(
+                            [[Image(img_path, width=page_w, height=page_w * aspect)]],
+                            colWidths=[page_w],
+                            style=fig_border_style,
+                        ),
+                    ]
+                    note = a.event_notes.get(j, None)
+                    if note is not None:
+                        event.insert(1, Paragraph(note, s_body))
+                    story.append(KeepTogether(header + event))
+                    story.append(Spacer(1, 0.1 * inch))
 
         doc.build(story)
 
@@ -847,7 +932,7 @@ def save_voltage_report(
         raise ValueError("No analyses provided.")
     for a in analyses:
         if a.df is None or a.event_list is None:
-            raise ValueError(f"Analysis for '{a.site}' has not been run.")
+            raise ValueError(f"Analysis for '{a.meta.site}' has not been run.")
 
     fpath = Path(filepath)
     if fmt == "html":

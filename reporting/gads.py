@@ -146,7 +146,7 @@ class GADSSite(PISite):
     Properties (PISite)
     ----------
     af_dict : dict
-    asset_heirarchy : dict
+    asset_hierarchy : dict
     asset_groups : list
     asset_names_by_group : dict
     timezone : str

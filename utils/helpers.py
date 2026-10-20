@@ -1,5 +1,7 @@
 from functools import wraps
 import inspect
+import math
+import pandas as pd
 
 from .datetime import localize_naive_datetimeindex, remove_tzinfo_and_standardize_index
 
@@ -131,14 +133,17 @@ def print_list(data: list[str], max_per_row: int = 7, min_per_row: int = 3, list
 
     if len(data) < max_per_row:
         rows = [", ".join(data)]
-    else:
-        # ensure number of items in last row is not less than 'min_per_row'
-        while len(data) % max_per_row < min_per_row:
-            max_per_row -= 1
-            if max_per_row <= 0:
-                raise Exception("Unknown error")
-        rows = [", ".join(data[i : i + max_per_row]) for i in range(0, len(data), max_per_row)]
-
+    else:  ##PETE:REPLACED PREVIOUS ELSE LOOP WITH THIS##
+        # pick the widest row size (down to min_per_row + 1) whose last row is
+        # either full (remainder 0) or has at least 'min_per_row' items; if none
+        # qualifies, fall back to the requested max_per_row rather than failing
+        row_size = max_per_row
+        for candidate in range(max_per_row, min_per_row, -1):
+            remainder = len(data) % candidate
+            if remainder == 0 or remainder >= min_per_row:
+                row_size = candidate
+                break
+        rows = [", ".join(data[i : i + row_size]) for i in range(0, len(data), row_size)]
     print(f"{list_name}[")
     for row in rows:
         print(f"    {row}")
@@ -225,3 +230,10 @@ def print_class_info(cls, member_type=None):
             obj_str = func.__name__ + arg_str
             print(f"    .{obj_str}")
     return
+
+
+def round_to_nearest(number, multiple=10, direction="up"):
+    if direction not in ("down", "up"):
+        raise ValueError("Invalid direction.")
+    operator_ = math.ceil if direction == "up" else math.floor
+    return operator_(number / multiple) * multiple

@@ -2,7 +2,6 @@ import itertools
 from ..utils import oemeta
 from ..utils.config import PI_DATABASE_PATH
 
-
 RENEWABLE_FLEET_AF_PATH = f"{PI_DATABASE_PATH}\\Renewable Fleet"
 SOLAR_AF_PATH = "\\".join([RENEWABLE_FLEET_AF_PATH, "Solar Assets"])
 
@@ -76,6 +75,12 @@ OE_SOLAR_ATTRIBUTES = {
     "Meter": ["OE_MeterMW"],
     "PPC": ["xcel_MW_cmd_request", "xcel_MW_setpoint"],  # TEMP: only for Comanche
     "Modules": ["OE.ModulesOffline", "OE.ModulesOffline_Percent"],  # ac module related
+    "Site": [
+        "OE.CountBadTrackers",
+        "OE.CurtailmentStatus",
+        "OE.SiteSetpoint",
+        "OE.ModulesOffline_Percent",
+    ],
 }
 
 
@@ -109,6 +114,18 @@ def _build_solar_attpath_list(site, group=None, asset_names=[], attribute_names=
     return attpaths
 
 
+def _generate_grand_view_ac_mod_attpaths(site):
+    if site not in ["Grand View East", "Grand View West"]:
+        raise KeyError("Invalid site.")
+    site_path = "\\".join([PI_DATABASE_PATH, "Renewable Fleet", "Solar Assets", site])
+    attpaths = []
+    for inv, mod_list in oemeta.data["solar_af_structure"][site]["Inverters"].items():
+        attpaths.extend(
+            [f"{site_path}\\Inverters\\{inv}\\{mod}|OE.ActivePower" for mod in mod_list]
+        )
+    return attpaths
+
+
 def get_solar_attributes(site, validated=True) -> dict:
     """returns dictionary with asset groups as keys and lists of attribute paths as values"""
     af_struct = oemeta.data["solar_af_structure"].get(site, None)
@@ -125,16 +142,16 @@ def get_solar_attributes(site, validated=True) -> dict:
             continue
 
         # validate asset group, get asset_names if appl.
-        if group_id not in af_struct.keys() and group_id != "Modules":
+        if group_id not in [*af_struct, "Modules", "Site"]:
             continue
 
         asset_names = []  # init
-        if group_id not in ("Meter", "Modules"):
+        if group_id not in ("Meter", "Modules", "Site"):
             asset_names = af_struct[group_id]
             if isinstance(asset_names, dict):
                 asset_names = [*asset_names]
 
-        asset_group = group_id if group_id not in ("Modules") else None
+        asset_group = group_id if group_id not in ("Modules", "Site") else None
 
         attpath_dict[group_id] = _build_solar_attpath_list(
             site=site,
@@ -158,5 +175,38 @@ def get_solar_attributes(site, validated=True) -> dict:
                 )
             )
         attpath_dict["Combiners"] = cmb_attpaths
+
+    weighted_cmb_atts_by_inv = oemeta.data["weighted_combiner_attributes"].get(site, None)
+    if weighted_cmb_atts_by_inv is not None:
+        cmb_attpaths = []
+        for inv, cmb_atts in weighted_cmb_atts_by_inv.items():
+            cmb_attpaths.extend(
+                _build_solar_attpath_list(
+                    site=site,
+                    group="Inverters",
+                    asset_names=[inv],
+                    attribute_names=cmb_atts,
+                    validated=validated,
+                )
+            )
+        attpath_dict["Combiners Weighted"] = cmb_attpaths
+
+    ac_mod_atts_by_inv = oemeta.data["ac_module_attributes"].get(site, None)
+    if ac_mod_atts_by_inv is not None:
+        acmod_attpaths = []
+        for inv, acmod_atts in ac_mod_atts_by_inv.items():
+            acmod_attpaths.extend(
+                _build_solar_attpath_list(
+                    site=site,
+                    group="Inverters",
+                    asset_names=[inv],
+                    attribute_names=acmod_atts,
+                    validated=validated,
+                )
+            )
+        attpath_dict["AC Modules"] = acmod_attpaths
+
+    if site in ["Grand View East", "Grand View West"]:
+        attpath_dict["AC Modules"] = _generate_grand_view_ac_mod_attpaths(site)
 
     return attpath_dict
