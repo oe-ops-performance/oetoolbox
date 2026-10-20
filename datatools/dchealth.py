@@ -9,9 +9,12 @@ from .pvlib import pvlib_dataframe_to_dict, run_pvlib_combiner_level
 from .qcutils import run_auto_qc
 from ..reporting.query_attributes import get_solar_attributes
 from ..utils import oemeta, oepaths
+from ..utils.config import OPS_PERFORMANCE_DIR
 from ..utils.helpers import quiet_print_function
 from ..utils.pi import PIDataset
 from ..utils.solar import SolarDataset
+
+DC_REPORT_DIR = OPS_PERFORMANCE_DIR / "Weekly DC Health Reports"
 
 
 @lru_cache(maxsize=128)
@@ -28,6 +31,83 @@ def load_design_db():
 
     df.columns = df.columns.map(fmt_cols)
     return df
+
+
+DATA_FILE_TYPES = ["dtn", "combiners", "inverters", "met_stations", "curtailment"]
+ANALYSIS_FILE_TYPES = DATA_FILE_TYPES + ["pvlib"]
+
+
+def _range_id(start_date, end_date):
+    """example: '20260128_20260211'"""
+    start, end = map(pd.Timestamp, [start_date, end_date])
+    return f"{start:%Y%m%d}_{end:%Y%m%d}"
+
+
+def _get_data_folder(start_date, end_date):
+    end_date_str = _range_id(start_date, end_date).split("_")[1]
+    folder = DC_REPORT_DIR / end_date_str
+    if not folder.exists():
+        abbr_fpath = lambda fp: "..\\" + "\\".join(fp.parts[-2:])
+        print(f"Creating folder: {abbr_fpath(folder)}")
+        folder.mkdir()
+    return folder
+
+
+def existing_data_folders():
+    # naming convention: 'YYYYMMDD'
+    is_data_folder = lambda fp: len(fp.name) == 8 and fp.name.isdecimal()
+    return list(filter(is_data_folder, oepaths.get_contents(DC_REPORT_DIR)["folders"]))
+
+
+def _extract_end_date(folder_name) -> list[int]:
+    parts = []
+    for i0, i1 in [(0, 4), (4, 6), (6, 8)]:
+        try:
+            parts.append(int(folder_name[i0:i1]))
+        except:
+            raise ValueError(f"Could not parse ({i0}, {i1})")
+    return parts
+
+
+def infer_range(folder_name) -> list[pd.Timestamp]:
+    end_date_parts = _extract_end_date(folder_name)
+    end_tstamp = pd.Timestamp(*end_date_parts)
+    start_tstamp = end_tstamp - pd.Timedelta(days=7)
+    return [start_tstamp, end_tstamp]
+
+
+def _get_data_filestem(site, start_date, end_date, file_type):
+    site_str = site.lower().replace(" ", "").replace("-", "")
+    return f"{site_str}_{file_type.lower()}_{_range_id(start_date, end_date)}"
+
+
+def generate_savepath(site, start_date, end_date, file_type):
+    folder = _get_data_folder(start_date, end_date)
+    filestem = _get_data_filestem(site, start_date, end_date, file_type)
+    savepath = folder / f"{filestem}.parquet"
+    return oepaths.validated_savepath(savepath)
+
+
+def get_existing_data_filepath(site, start_date, end_date, file_type):
+    folder = _get_data_folder(start_date, end_date)
+    filestem = _get_data_filestem(site, start_date, end_date, file_type)
+    return oepaths.latest_file(list(folder.glob(f"{filestem}*.parquet")))
+
+
+def analysis_data_filepaths(site, start_date, end_date):
+    output = {
+        file_type: get_existing_data_filepath(site, start_date, end_date, file_type)
+        for file_type in ANALYSIS_FILE_TYPES
+    }
+    return {ft: fpath for ft, fpath in output.items() if fpath is not None}
+
+
+def get_status(site, start_date, end_date) -> dict:
+    fpath_dict = analysis_data_filepaths(site, start_date, end_date)
+    missing_query = [ft for ft in DATA_FILE_TYPES if ft not in fpath_dict.keys()]
+    missing_pvlib = "pvlib" not in fpath_dict.keys()
+    all_reqs = len(missing_query) == 0 and not missing_pvlib
+    return dict(query=missing_query, pvlib=missing_pvlib, ready=all_reqs)
 
 
 SORTKEY = lambda x: ["".join(filter(str.isalpha, x)), int("".join(filter(str.isdigit, x)))]
@@ -220,7 +300,6 @@ class CombinerMetadata:
         return "\n".join(row_list)
 
 
-CMB_ANALYSIS_DATA_KEYS = ["dtn", "combiners", "inverters", "met_stations", "curtailment"]
 CMB_ANALYSIS_THRESHOLDS = {
     "offline_cmb_range": 1,  # current (amps) -- max. range of data in column
     "offline_inv": 10,  # min. total kwh over range to determine if inv is offline
@@ -251,6 +330,7 @@ class DCHealthChecks:
         self.date_range = None  # [start_date, end_date]
         self.datetime_index = None
         self._process_input_data(data)
+        self.backfill_changes = None  # init
 
         self.flagged_combiners = {}  # updated in run_combiner_analysis
         self.thresholds = CMB_ANALYSIS_THRESHOLDS  # can be updated in run_combiner_analysis
@@ -258,7 +338,7 @@ class DCHealthChecks:
     def _process_input_data(self, data):
         self.data = {}
         compare_indexes = []
-        for key in (*CMB_ANALYSIS_DATA_KEYS, "pvlib"):
+        for key in ANALYSIS_FILE_TYPES:
             df = data.get(key, pd.DataFrame())
             if not type(df) is pd.DataFrame:
                 raise TypeError(f"Provided {key} data is not a dataframe.")
@@ -331,33 +411,48 @@ class DCHealthChecks:
             return dataset.data
 
         except Exception as e:
-            print(f"Error while running query for {data_key} data")
+            print(f"Error while running query for {data_key} data -> {e}")
             return None
 
     def query_analysis_data(
         self,
         start_date=None,
         end_date=None,
-        data_keys=CMB_ANALYSIS_DATA_KEYS,
+        data_keys=DATA_FILE_TYPES,
         freq="1h",
         overwrite=False,
         q=True,
+        save=True,
+        backfill_r2_diff=0.2,
     ):
         qprint = quiet_print_function(q=q)
         start_date, end_date = self._evaluate_input_dates(start_date, end_date)
-        data_keys = [k for k in CMB_ANALYSIS_DATA_KEYS if k in data_keys]
+        data_keys = [k for k in DATA_FILE_TYPES if k in data_keys]
         if not data_keys:
             raise ValueError("No valid data keys specified.")
 
-        for key in data_keys:
-            if not self.data[key].empty:
-                qprint(f"Found existing data for {key}.")
-                if overwrite is False:
-                    qprint(f">>> skipping ({overwrite=})")
+        if "met_stations" in data_keys and "dtn" not in data_keys:
+            qprint(f"\nNote: included 'met_stations' in data keys & not 'dtn';")
+            qprint("adding 'dtn', as it is required for the met data backfill following qc.")
+            data_keys = ["dtn"] + data_keys
+
+        already_loaded = lambda k: not self.data[k].empty
+        has_file = lambda k: k in analysis_data_filepaths(self.site, start_date, end_date)
+
+        for key in sorted(data_keys):  # ensures "dtn" always first
+            change_msg = None  # init
+            if already_loaded(key):
+                change_msg = "Data already loaded"
+            elif has_file(key):
+                change_msg = "Found existing file"
+
+            if change_msg is not None:
+                action = "skipping" if not overwrite else "re-querying"
+                qprint(f"\n{change_msg} for {key}.\n>>> {action} ({overwrite=})")
+                if not overwrite:
                     continue
-                qprint(f">>> re-querying ({overwrite=})")
-            else:
-                qprint(f"Querying data for {key}...")
+
+            qprint(f"\nBegin query for {key}...")
 
             if key == "met_stations" and self.data["dtn"].empty:
                 raise ValueError("Error: need DTN data for running met station backfill.")
@@ -375,8 +470,9 @@ class DCHealthChecks:
                 if key == "met_stations":
                     qprint("Running backfill...")
                     df, changes = backfill_meteo_data(
-                        df_met=df, df_ext=self.data["dtn"], site=self.site
+                        df_met=df, df_ext=self.data["dtn"], site=self.site, r2_diff=backfill_r2_diff
                     )
+                    self.backfill_changes = changes
 
             if df is None:
                 qprint(f"Error for {key=}.")
@@ -385,9 +481,36 @@ class DCHealthChecks:
                 df = df.rename(columns=self.meta.rename_cols)
             self._assign_or_validate_date_range(df.index)
             self.data.update({key: df})
+            if save is True:
+                self._save_file(df=df, file_type=key, q=q)
 
         qprint(f"End data query.")
         return
+
+    def _save_file(self, df, file_type, q=True):
+        savepath = generate_savepath(self.site, *self.date_range, file_type=file_type)
+        df.to_parquet(savepath)
+        if q is False:
+            abbr_path = "\\".join(savepath.parts[-2:])
+            print(f"Saved file: ..{abbr_path}")
+
+    @classmethod
+    def from_existing_data_files(cls, site, start_date, end_date, q=True):
+        existing_filepaths = analysis_data_filepaths(site, start_date, end_date)
+        missing_types = [ft for ft in ANALYSIS_FILE_TYPES if ft not in existing_filepaths.keys()]
+        if len(missing_types) > 0:
+            raise ValueError(f"Missing the following data files: {missing_types}")
+        data = {}
+        for ft, fpath in existing_filepaths.items():
+            data[ft] = pd.read_parquet(fpath)
+            if q is False:
+                abbr_path = "\\".join(fpath.parts[-2:])
+                print(f"Loaded {ft} data: ..{abbr_path}")
+        instance = cls(site, data=data)
+        instance.run_combiner_analysis(printouts=not q)
+        if q is False:
+            print(f"{site} - {len(instance.flagged_combiners)} flagged combiners")
+        return instance
 
     def _get_poa_for_pvlib(self, source):
         if source not in ("dtn", "sensors"):
@@ -405,18 +528,22 @@ class DCHealthChecks:
             raise ValueError("Invalid requirements for pvlib - missing DTN data.")
         return pd.Series(self.data["dtn"]["poa_global"], name="POA_DTN")
 
-    def run_pvlib(self, poa_source="sensors", overwrite=False, q=True):
+    def run_pvlib(self, poa_source="sensors", overwrite=False, q=True, save=True):
         """Runs combiner-level pvlib model. Updates self.data["pvlib"] with result."""
         qprint = quiet_print_function(q=q)
+        change_msg = None
         if not self.data["pvlib"].empty:
-            qprint(f"Found existing pvlib data.")
-            if overwrite is False:
-                qprint(f">>> skipping ({overwrite=})")
-                return
-            qprint(f">>> re-running model ({overwrite=})")
-        else:
-            qprint(f"Running pvlib model...")
+            change_msg = "PVLib data already loaded."
+        elif "pvlib" in analysis_data_filepaths(self.site, *self.date_range):
+            change_msg = "Found existing PVLib file."
 
+        if change_msg is not None:
+            action = "skipping" if not overwrite else "re-running model"
+            qprint(f"\n{change_msg}\n>>> {action} ({overwrite=})")
+            if not overwrite:
+                return
+
+        qprint(f"\nRunning pvlib model...")
         try:
             poa_data = self._get_poa_for_pvlib(source=poa_source)
             df_pvl = run_pvlib_combiner_level(
@@ -427,11 +554,13 @@ class DCHealthChecks:
 
         self._assign_or_validate_date_range(df_pvl.index)
         self.data.update({"pvlib": df_pvl})
+        if save is True:
+            self._save_file(df=df_pvl, file_type="pvlib", q=q)
 
     def _validate_requirements(self):
         for data_key in ["combiners", "inverters", "pvlib"]:
             if self.data[data_key].empty:
-                raise ValueError(f"Missing the following required data: {missing_}")
+                raise ValueError(f"Missing the following required data: {data_key}")
         return
 
     def run_combiner_analysis(self, printouts=False, custom_thresholds={}) -> None:
