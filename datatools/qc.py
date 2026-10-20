@@ -5,8 +5,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import pvanalytics.features.daytime as daytime
+from pvanalytics.features.orientation import tracking_nrel, fixed_nrel
+
 
 from ..utils.dataset import Dataset
+from ..utils.datetime import get_continuous_ranges, infer_freq
 from ..utils.helpers import quiet_print_function
 
 
@@ -320,6 +324,283 @@ def remove_outliers(series, method, **kwargs) -> pd.Series:
     series_outliers = series.loc[is_outlier].copy()
     series.loc[is_outlier] = np.nan
     return series_outliers
+
+
+def detect_and_remove_outliers(series, method, **kwargs):
+    """removes outliers from series using selected method;"""
+    if method not in ("iqr", "z_score"):
+        raise ValueError(f"Unsupported {method = }.")
+
+    if method == "iqr":
+        iqr_multiplier = kwargs.get("iqr_multiplier", 1.5)
+        is_outlier = iqr_outlier_condition(series=series, iqr_multiplier=iqr_multiplier)
+    elif method == "z_score":
+        z_threshold = kwargs.get("z_threshold", 3)
+        is_outlier = z_score_outlier_condition(series=series, z_threshold=z_threshold)
+
+    outliers = series.loc[is_outlier].copy()
+    new_series = series.copy()
+    new_series.loc[is_outlier] = np.nan
+    return dict(data=new_series, outliers=outliers)
+
+
+def _mirrored_data(series, noon_time):
+    # where series is one day of data, and split time is noon
+    df = series.to_frame(name=series.name if series.name else "original")
+    df["mirrored_part1"] = df.iloc[:, 0].copy()
+    df["mirrored_part2"] = df.iloc[:, 0].copy()
+
+    _morning = series.index < noon_time
+    _afternoon = series.index >= noon_time
+
+    part1 = series[_morning]
+    part2 = series[_afternoon]
+
+    mirrored_1_vals = part1.iloc[::-1].values.tolist()
+    if len(mirrored_1_vals) > len(part2):
+        mirrored_1_vals = mirrored_1_vals[: len(part2)]
+    elif len(mirrored_1_vals) < len(part2):
+        mirrored_1_vals.extend([np.nan] * (len(part2) - len(mirrored_1_vals)))
+    df.loc[_afternoon, "mirrored_part1"] = mirrored_1_vals
+
+    mirrored_2_vals = part2.iloc[::-1].values.tolist()
+    if len(mirrored_2_vals) > len(part1):
+        n_diff = len(mirrored_2_vals) - len(part1)
+        mirrored_2_vals = mirrored_2_vals[n_diff:]
+    elif len(mirrored_2_vals) < len(part1):
+        n_diff = len(part1) - len(mirrored_2_vals)
+        mirrored_2_vals = ([np.nan] * n_diff) + mirrored_2_vals
+    df.loc[_morning, "mirrored_part2"] = mirrored_2_vals
+
+    return df
+
+
+# Assuming 'poa_measured' is a pandas Series with a DatetimeIndex
+# and 'solar_noon' is a Series containing the time of solar noon for each day.
+
+
+def analyze_half_days(poa_measured, solar_noon):
+    # Initialize a mask for bad data (True = BAD (remove), False = GOOD (keep))
+    qc_mask = pd.Series(False, index=poa_measured.index)
+
+    # Group by date to evaluate day-by-day
+    for date, day_data in poa_measured.groupby(poa_measured.index.date):
+        noon_time = solar_noon.loc[date].strftime("%Y-%m-%d %H:%M")  # prevent tz mismatch errors
+        mirrored_data = _mirrored_data(day_data, noon_time)
+
+        # Split day data into morning and afternoon chunks
+        morning = day_data[day_data.index < noon_time]
+        afternoon = day_data[day_data.index >= noon_time]
+
+        # --- Evaluate Morning (Mirror the morning curve into the afternoon) ---
+        synthetic_morning_day = mirrored_data["mirrored_part1"].copy()
+
+        daytime_mask = daytime.power_or_irradiance(synthetic_morning_day)
+
+        # fixed_nrel returns True if the profile matches a fixed tilt profile
+        is_fixed_tilt_am = fixed_nrel(synthetic_morning_day, daytime_mask)
+        if is_fixed_tilt_am.all():
+            qc_mask.loc[morning.index] = True
+
+        # --- Evaluate Afternoon (Mirror the afternoon curve into the morning) ---
+        synthetic_afternoon_day = mirrored_data["mirrored_part2"].copy()
+
+        daytime_mask = daytime.power_or_irradiance(synthetic_afternoon_day)
+        is_fixed_tilt_pm = fixed_nrel(synthetic_afternoon_day, daytime_mask)
+        if is_fixed_tilt_pm.all():
+            qc_mask.loc[afternoon.index] = True
+
+    return qc_mask
+
+
+def process_poa_sensor_data(df_, location_kwargs):
+    df_ = df_.filter(like="OE.POA_").copy()
+    if df_.empty:
+        raise ValueError("The only columns in the provided dataframe should be OE.POA sensors.")
+    poa_columns = list(df_.columns)
+    noon_tstamps = {
+        date: get_sun(date, **location_kwargs)["noon"] for date in sorted(set(df_.index.date))
+    }
+    solar_noon = pd.Series(index=noon_tstamps.keys(), data=noon_tstamps.values())
+
+    df = df_.copy()
+    for col in poa_columns:
+        bad_data_flag = analyze_half_days(poa_measured=df_[col], solar_noon=solar_noon)
+        df[f"{col}_flagged"] = bad_data_flag.astype(int)
+        df[f"{col}_processed"] = np.where(bad_data_flag, np.nan, df[col])
+
+    return {key: df.filter(like=f"_{key}").copy() for key in ("flagged", "processed")}
+
+
+def _daylight_filter(df, location_kwargs):
+    start_date = df.index[0].strftime("%Y-%m-%d")
+    end_date = df.index[-1].ceil("D").strftime("%Y-%m-%d")
+    freq = infer_freq(df.index)
+    daylight_tstamps = get_daylight_timestamps(
+        start_date,
+        end_date,
+        freq=freq,
+        **location_kwargs,
+    )
+    return df.index.tz_localize(None).isin(daylight_tstamps)
+
+
+def _data_group(column):
+    contains = lambda *args: all(x.lower() in column.lower() for x in args)
+    if contains("activepower"):
+        return "inverter"
+    elif contains("meter", "mw"):
+        return "meter"
+    elif contains("wind", "speed"):
+        return "wind"
+    elif contains("poa") or contains("ghi"):
+        return "irradiance"
+    elif contains("ambient", "temp"):
+        return "temperature"
+    return "unknown"
+
+
+def clean_raw_data(df, location_kwargs):
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Dataframe must have datetime index.")
+
+    df = df.select_dtypes(include="number").copy()
+    if df.empty:
+        raise ValueError("No numeric columns found in dataset.")
+
+    changes = {}
+
+    def _process_changes(**kwargs):
+        changes.update({key: val for key, val in kwargs.items() if val})
+        return
+
+    # Remove empty columns
+    original_cols = list(df.columns)
+    df = df.dropna(axis=1, how="all")
+    removed_cols = [c for c in original_cols if c not in df.columns]
+    _process_changes(removed_cols=removed_cols)
+
+    negatives = {}
+    outliers = {}
+    iqr_outliers = {}
+    interpolated = {}
+    for col in df.columns:
+        coltype = _data_group(col)
+
+        # Part 1: Replace negative values with zero
+        is_negative = df[col].lt(0)
+        if is_negative.any():
+            negatives[col] = is_negative.sum()
+            df.loc[is_negative, col] = 0.0
+
+        # Part 2: Remove outliers -> primarily for transient spikes
+        cstats = df[col].describe(percentiles=[0.95])
+        p95_, max_ = cstats.loc["95%"], cstats.loc["max"]
+        delta_ = ((max_ - p95_) / p95_) if p95_ > 0 else 0
+
+        skip_outlier_detect = coltype in ("wind", "inverter", "meter") and delta_ < 5
+        if not skip_outlier_detect:
+            outlier_condition = (
+                (df[col].shift(-1) - df[col]).abs().rolling(4, center=True).mean().gt(1000)
+            )
+            if outlier_condition.any():
+                outliers[col] = df.loc[outlier_condition, col].copy()
+                df.loc[outlier_condition, col] = np.nan
+
+        # Part 2a: Remove IQR outliers
+        is_iqr_outlier = iqr_outlier_condition(df[col], iqr_multiplier=1.5)
+        if is_iqr_outlier.any():
+            iqr_outliers[col] = df.loc[is_iqr_outlier, col].copy()
+            df.loc[is_iqr_outlier, col] = np.nan
+
+        # Part 3: Remove interpolated data
+        d1_col, d2_col = f"{col}_d1", f"{col}_d2"
+        dfc = df[[col]].copy()
+        dfc[d1_col] = dfc[col].shift(-1) - dfc[col]
+        dfc[d2_col] = dfc[d1_col].shift(-1) - dfc[d1_col]
+
+        min_val = 25 if coltype not in ("meter", "wind") else 0.025
+        min_hours = 2  # flagged event duration threshold
+        if coltype in ("meter", "temperature"):
+            min_hours += 1
+        elif coltype == "inverter" and "_Pad_" in col:  # FL4
+            min_hours += 3  # because of clipping
+        elif coltype == "wind":
+            min_hours += 10
+
+        freq_td = infer_freq(df.index)
+        min_periods_threshold = pd.Timedelta(hours=min_hours) / freq_td
+        window = 15 if freq_td == pd.Timedelta(minutes=1) else 2
+        flag_1 = dfc[d2_col].rolling(window, center=True).mean().round(4)
+
+        conditions = flag_1.eq(0)
+        if "ActivePower" in col:
+            conditions &= dfc[col].gt(1)
+        elif "Meter" in col:
+            conditions &= dfc[col].gt(0.001)
+
+        grouped_idx_list = get_continuous_ranges(dfc[conditions], native_freq=freq_td)
+        flagged_ranges = [idx for idx in grouped_idx_list if len(idx) >= min_periods_threshold]
+        interpolated_ranges = []
+        for idx in flagged_ranges:
+            timespan = idx[-1] - idx[0]
+            dfc_ = dfc[dfc.index.isin(idx)].copy()
+
+            # exceptions - daylight-dependent data
+            if coltype in ("inverters", "meter", "irradiance", "temperature"):
+                daylight_ = _daylight_filter(dfc_, location_kwargs)
+                pct_night = (len(dfc_) - daylight_.sum()) / len(dfc_)
+                pct_night_limit = 0.7
+
+                df_dark, df_light = dfc_[~daylight_].copy(), dfc_[daylight_].copy()
+
+                if pct_night > pct_night_limit:  # nighttime groups
+
+                    # exception - temperature data
+                    if "_Temp" in col:
+                        continue
+
+                    # exception - nighttime flatline near/at zero
+                    if (df_dark[col].mean() < 5) and (df_dark[col].max() < 5):
+                        continue
+
+                elif pct_night > 0.5 and timespan < pd.Timedelta(hours=8):  # mostly-night
+
+                    # exception - nighttime flatline near/at zero
+                    if (df_dark[col].mean() < 5) and (df_dark[col].max() < min_val):
+                        continue
+
+                elif pct_night < 0.05:  # daylight groups
+
+                    # exception - ac module outage condition
+                    if df_light[col].mean() > min_val:
+                        continue
+
+                    # exception - originally intended for GHI/POA (semi-linear trend)
+                    if timespan < pd.Timedelta(hours=2.5) and dfc_[d1_col].abs().mean() > 1:
+                        continue
+
+            # exception - meter outage
+            if coltype == "meter" and dfc_[col].mean().round(1) == 0.0:
+                continue
+
+            # if no exceptions hit, add index/range to list for data removal
+            interpolated_ranges.append(idx)
+
+        if interpolated_ranges:
+            remove_index = pd.concat([x.to_frame() for x in interpolated_ranges]).index
+            df.loc[df.index.isin(remove_index), col] = np.nan
+            interpolated[col] = pd.DataFrame(
+                {
+                    "start": [x[0] for x in interpolated_ranges],
+                    "end": [x[-1] for x in interpolated_ranges],
+                }
+            )
+
+    _process_changes(
+        negatives=negatives, outliers=outliers, iqr_outliers=iqr_outliers, interpolated=interpolated
+    )
+    return df, changes
 
 
 class QCDataset(Dataset):
