@@ -297,7 +297,7 @@ def z_score_outlier_condition(series: pd.Series, z_threshold: int = 3):
         freq=15min -> window=4
         freq=1h -> window=2 (TODO: determine whether this should be supported)
     """
-    freq_mins = int(series.index.diff.max().total_seconds() / 60)
+    freq_mins = int(series.index.diff().max().total_seconds() / 60)
     window = {1: 30, 5: 6, 15: 4, 60: 2}.get(freq_mins, None)
     if window is None:
         raise KeyError("Unsupported data interval/frequency detected.")
@@ -455,9 +455,163 @@ def _data_group(column):
         return "wind"
     elif contains("poa") or contains("ghi"):
         return "irradiance"
-    elif contains("ambient", "temp"):
+    elif contains("temp"):
         return "temperature"
     return "unknown"
+
+
+def flag_interpolated_data(
+    series: pd.Series,
+    location_kwargs: dict = None,
+    min_duration="2h",
+    max_plateau="8h",
+    tol_rel: float = 1e-6,
+    zero_frac: float = 0.01,
+    ramp_low_frac: float = 0.05,
+    night_pct_limit: float = 0.05,
+) -> pd.DataFrame:
+    """Finds ranges of interpolated (linear) or held/stuck (flatline) data in a single series.
+
+    Method: a point is "collinear" when the second difference using its two neighbors,
+    x[t+1] - 2*x[t] + x[t-1], is ~0 (within ``tol_rel`` * data scale). Real measurements almost
+    never stay collinear for hours, but linear interpolation and forward-fill do so exactly (up to
+    rounding). A flagged range holds only the *interior* points; the bracketing anchor values on
+    either side are real measurements and are not included. Each candidate run must also stay
+    within tolerance of the straight line between its anchors (guards against slow curvature that
+    individually passes the second-difference test).
+
+    Candidates are then checked for legitimate flat conditions, which are not flagged:
+        - flat at/near zero (|value| <= ``zero_frac`` * scale), e.g. nighttime or idle
+        - flat non-zero plateau (clipping/curtailment) lasting <= ``max_plateau`` and, if
+          ``location_kwargs`` is given, entirely in daylight (<= ``night_pct_limit`` night points)
+    - sloped run staying below ``ramp_low_frac`` * scale (e.g. dawn/dusk ramps from zero)
+    All other sloped runs are flagged. NOTE: a genuine ramp-rate-limited recovery with a large
+    amplitude cannot be told apart from interpolation by shape alone; raise ``min_duration``
+    if those are a concern.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Numeric data with a DatetimeIndex. Duplicate/missing timestamps are handled; gaps are
+        filled with NaN on the inferred regular grid and break any run.
+    location_kwargs : dict, optional
+        Keys for ``get_daylight_timestamps`` (tz, lat, lon, ...). Enables the night-time check.
+    min_duration : str | pd.Timedelta
+        Minimum run length to flag (number of interior points x data interval).
+    max_plateau : str | pd.Timedelta
+        Longest flat non-zero run still considered a plausible clipping/curtailment plateau.
+    tol_rel : float
+        Collinearity tolerance relative to data scale (99th percentile of non-collinear values).
+    zero_frac : float
+        Flat runs with |value| below this fraction of scale are treated as zero.
+    ramp_low_frac : float
+        Sloped runs whose |value| never exceeds this fraction of scale are not flagged.
+    night_pct_limit : float
+        Max fraction of a flat non-zero run allowed to fall outside daylight to stay exempt.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per flagged range: start, end (inclusive, interior points), n_points,
+        kind ("linear" | "flatline"), start_value, end_value.
+    """
+    columns = ["start", "end", "n_points", "kind", "start_value", "end_value"]
+    s = pd.to_numeric(series, errors="coerce").astype(float)
+    s = s[~s.index.duplicated()].sort_index()
+    if s.notna().sum() < 3:
+        return pd.DataFrame(columns=columns)
+
+    freq = infer_freq(s.index)
+    s = s.reindex(pd.date_range(s.index[0], s.index[-1], freq=freq))
+    d2 = s.shift(-1) + s.shift(1) - 2 * s  # centered at t; NaN if any of 3 points is missing
+
+    def _scale(x):
+        v = x.dropna().abs().quantile(0.99) if x.notna().any() else 0.0
+        return v if v > 0 else 1.0
+
+    # two-pass scale: exclude collinear points so long held/interpolated spans don't skew it
+    scale = _scale(s)
+    is_collinear = d2.abs().le(tol_rel * scale)
+    scale = _scale(s[~is_collinear])
+    zero_tol = zero_frac * scale
+
+    # tolerances: relative to scale, but never tighter than the data's own rounding noise
+    # (rounding to q adds up to q/2 per point -> 2q in the second difference, ~q in a line fit)
+    tol = tol_rel * scale
+    fit_tol = 5 * tol
+    q = _data_resolution(s.to_numpy())
+    if q is not None:
+        tol = max(tol, 2.1 * q)
+        fit_tol = max(fit_tol, 1.5 * q)
+    is_collinear = d2.abs().le(tol).to_numpy()
+
+    min_points = int(np.ceil(pd.Timedelta(min_duration) / freq))
+    max_plateau_td = pd.Timedelta(max_plateau)
+    values = s.to_numpy()
+
+    # contiguous True runs as [start, stop) positions of interior points; anchors at start-1, stop
+    edges = np.flatnonzero(np.diff(np.r_[0, is_collinear.astype(np.int8), 0]))
+    stack = [(i0 - 1, i1) for i0, i1 in zip(edges[::2], edges[1::2])]  # (anchor_a, anchor_b)
+    segments = []
+    while stack:
+        a, b = stack.pop()
+        n = b - a - 1
+        if n < min_points:
+            continue
+        y = values[a : b + 1]
+        dev = np.abs(y - (y[0] + (y[-1] - y[0]) * np.arange(n + 2) / (n + 1)))
+        if dev.max() > fit_tol:  # curvature hidden by loose tolerance -> split at worst point
+            m = a + int(dev.argmax())
+            stack.extend([(a, m), (m, b)])
+            continue
+        segments.append((a, b))
+
+    rows = []
+    for a, b in sorted(segments):
+        i0, i1, n = a + 1, b, b - a - 1
+        y = values[a : b + 1]
+        if np.abs(y).max() <= zero_tol:
+            continue  # flat at/near zero (night, idle)
+        is_flat = np.ptp(y) <= fit_tol
+        if not is_flat and np.abs(y).max() <= ramp_low_frac * scale:
+            continue  # low-amplitude ramp (e.g. dawn/dusk), not worth flagging
+        if is_flat and n * freq <= max_plateau_td:
+            pct_night = 0.0
+            if location_kwargs:
+                pct_night = 1 - _is_daylight(s.index[i0:i1], freq, location_kwargs).mean()
+            if pct_night <= night_pct_limit:
+                continue  # plausible clipping/curtailment plateau
+
+        rows.append(
+            dict(
+                start=s.index[i0],
+                end=s.index[i1 - 1],
+                n_points=n,
+                kind="flatline" if is_flat else "linear",
+                start_value=values[i0],
+                end_value=values[i1 - 1],
+            )
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _data_resolution(values: np.ndarray, max_decimals: int = 6):
+    """Returns the decimal resolution (e.g. 0.001) data was rounded to, or None if full precision."""
+    v = values[np.isfinite(values)][:100_000]
+    if v.size == 0:
+        return None
+    for k in range(max_decimals + 1):
+        if np.mean(np.abs(v - np.round(v, k)) < 1e-9 + 3e-7 * np.abs(v)) >= 0.99:
+            return 10.0**-k
+    return None
+
+
+def _is_daylight(index: pd.DatetimeIndex, freq, location_kwargs: dict) -> np.ndarray:
+    """Boolean array (dawn to dusk) for a regular datetime index, using local wall time."""
+    start_date = index[0].strftime("%Y-%m-%d")
+    end_date = (index[-1].normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    daylight = get_daylight_timestamps(start_date, end_date, freq=freq, **location_kwargs)
+    return index.tz_localize(None).isin(daylight)
 
 
 def clean_raw_data(df, location_kwargs):
@@ -603,59 +757,288 @@ def clean_raw_data(df, location_kwargs):
     return df, changes
 
 
+DAYLIGHT_TYPES = ("inverter", "meter", "irradiance")  # solar-driven; zero at night
+INTERPOLATION_SETTINGS = {  # per data group overrides for flag_interpolated_data
+    "meter": dict(min_duration="3h"),
+    "temperature": dict(min_duration="3h", max_plateau="12h"),
+    "wind": dict(min_duration="12h", max_plateau="24h"),
+}
+NEGATIVE_POLICY = {  # keep | clip (all negatives -> 0) | clip_small (small -> 0, large -> NaN)
+    "meter": "clip",
+    "inverter": "clip_small",
+    "irradiance": "clip_small",
+    "wind": "clip_small",
+    "temperature": "keep",  # negative values are legitimate
+    "unknown": "keep",
+}
+IQR_MULTIPLIER = {"temperature": 3.0, "wind": 3.0, "unknown": 3.0}  # default 1.5 otherwise
+DEFAULT_STEPS = [
+    "drop_empty_columns",
+    "flag_interpolated",
+    "handle_negatives",
+    "remove_spikes",
+    "remove_outliers",
+]
+
+
 class QCDataset(Dataset):
-    def __init__(self, dataframe: pd.DataFrame):
+    """Raw time series data -> cleaned time series data, with a record of every change.
+
+    Each cleaning step sets bad values to NaN (never silently edits good values), stores the removed
+    values in ``removed(col)``, and logs counts in ``summary()``. Steps return ``self`` for chaining:
+
+        qc = QCDataset(df, location_kwargs=dict(tz=..., lat=..., lon=...))
+        qc.run()                                   # default pipeline
+        qc.flag_interpolated().handle_negatives()  # or step-by-step
+        qc.data      # cleaned data      qc.raw  # original data      qc.summary()  # change log
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        Raw data with a DatetimeIndex; only numeric columns are used.
+    location_kwargs : dict, optional
+        Keys for ``get_daylight_timestamps`` (tz, lat, lon, ...). Enables daylight-aware logic.
+    column_types : dict, optional
+        Overrides the data group inferred from column names (see ``_data_group``).
+    is_solar : bool
+        Set False for wind/gas sites so daylight logic is never applied.
+    """
+
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        location_kwargs: dict = None,
+        column_types: dict = None,
+        is_solar: bool = True,
+    ):
         super().__init__()
-        self.data = dataframe.select_dtypes(include="number").copy()
-        self.columns = list(self.data.columns)
-        self._validate_dataframe()  # assigns other properties/attributes
-
-    def _validate_dataframe(self) -> None:
-        if not isinstance(self.data.index, pd.DatetimeIndex):
+        if not isinstance(dataframe.index, pd.DatetimeIndex):
             raise TypeError("Dataframe must have a datetime index.")
+        data = dataframe.select_dtypes(include="number")
+        if data.empty:
+            raise ValueError("No numeric columns found in dataset.")
 
-        # validate index (use smallest detected frequency/interval)
-        freq_timedelta = self.data.index.to_series().diff().min()
-        start_datetime = self.data.index.min()
-        end_datetime = self.data.index.max()
-        continuous_index = pd.date_range(start_datetime, end_datetime, freq=freq_timedelta)
-        if len(self.data.index) != len(continuous_index):
-            raise ValueError("Dataframe index must be continuous; found missing timestamp(s).")
+        self.raw = data.copy()
+        self.data = data.copy()
+        self.location_kwargs = location_kwargs
+        self.is_solar = bool(is_solar and location_kwargs)
+        overrides = column_types or {}
+        self.column_types = {c: overrides.get(c) or _data_group(c) for c in data.columns}
+        self.interpolated = {}  # col -> DataFrame of flagged ranges
+        self._log = []
+        self._removed = {}
+        self._daylight = None
+        self.regularize_index()
 
-        self.start = start_datetime
-        self.end = end_datetime
-        self.freq_timedelta = freq_timedelta
+    @property
+    def columns(self):
+        data = getattr(self, "data", None)
+        return [] if data is None else list(data.columns)
+
+    # ---- helpers --------------------------------------------------------------------------
+    def _uses_daylight(self, col) -> bool:
+        return self.is_solar and self.column_types[col] in DAYLIGHT_TYPES
+
+    def daylight(self) -> pd.Series:
+        """Boolean series (dawn to dusk, local wall time) aligned to the data index."""
+        if self._daylight is None or not self._daylight.index.equals(self.data.index):
+            mask = _is_daylight(self.data.index, self.freq_timedelta, self.location_kwargs)
+            self._daylight = pd.Series(mask, index=self.data.index)
+        return self._daylight
+
+    def _scale(self, col) -> float:
+        v = self.data[col].abs().quantile(0.99)
+        return v if pd.notna(v) and v > 0 else 1.0
+
+    def _columns(self, columns):
+        return self.columns if columns is None else list(columns)
+
+    def _log_step(self, step, col, n, detail=""):
+        self._log.append(dict(step=step, column=col, n_points=int(n), detail=detail))
+
+    def _remove(self, step, col, mask, detail="") -> int:
+        """Sets masked (non-NaN) points of ``col`` to NaN, recording their original values."""
+        mask = pd.Series(np.asarray(mask, dtype=bool), index=self.data.index)
+        mask &= self.data[col].notna()
+        n = int(mask.sum())
+        if n:
+            removed = pd.DataFrame({"value": self.data.loc[mask, col], "step": step})
+            self._removed[col] = pd.concat([self._removed.get(col, removed.iloc[:0]), removed])
+            self.data.loc[mask, col] = np.nan
+        self._log_step(step, col, n, detail)
+        return n
+
+    def removed(self, col) -> pd.DataFrame:
+        """Original values removed from ``col`` (index = timestamp; columns = value, step)."""
+        return self._removed.get(col, pd.DataFrame(columns=["value", "step"])).sort_index()
+
+    def summary(self) -> pd.DataFrame:
+        """Points changed per step (rows) and column (columns)."""
+        if not self._log:
+            return pd.DataFrame()
+        log = pd.DataFrame(self._log)
+        table = log.pivot_table(
+            index="step", columns="column", values="n_points", aggfunc="sum", sort=False
+        )
+        return table.fillna(0).astype(int)
+
+    # ---- steps: structure -----------------------------------------------------------------
+    def regularize_index(self):
+        """Sorts, drops duplicate timestamps (keeps first) and fills missing ones with NaN."""
+        d = self.data
+        dup = d.index.duplicated()
+        if dup.any():
+            self._log_step("duplicate_timestamps_dropped", "*", dup.sum())
+            d = d[~dup]
+        d = d.sort_index()
+        freq = infer_freq(d.index)
+        full = pd.date_range(d.index[0], d.index[-1], freq=freq)
+        if not d.index.isin(full).all():
+            raise ValueError("Timestamps are not aligned to a regular grid at the inferred interval.")
+        if len(full) > len(d):
+            self._log_step("missing_timestamps_filled", "*", len(full) - len(d))
+        self.data = d.reindex(full)
+        self.freq_timedelta = freq
+        return self
+
+    def drop_empty_columns(self):
+        empty = [c for c in self.columns if self.data[c].isna().all()]
+        for col in empty:
+            self._log_step("empty_column_dropped", col, 0)
+        self.data = self.data.drop(columns=empty)
+        return self
+
+    # ---- steps: cleaning ------------------------------------------------------------------
+    def flag_interpolated(self, columns=None, **kwargs):
+        """Removes interpolated (linear) and held (flatline) ranges; see flag_interpolated_data.
+        Should run first: later steps that insert NaNs would break the runs this step detects."""
+        for col in self._columns(columns):
+            ctype = self.column_types[col]
+            loc = self.location_kwargs if self._uses_daylight(col) else None
+            opts = {**INTERPOLATION_SETTINGS.get(ctype, {}), **kwargs}
+            ranges = flag_interpolated_data(self.data[col], location_kwargs=loc, **opts)
+            self.interpolated[col] = ranges
+            mask = pd.Series(False, index=self.data.index)
+            for r in ranges.itertuples():
+                mask.loc[r.start : r.end] = True
+            self._remove("interpolated", col, mask, f"{len(ranges)} range(s)")
+        return self
+
+    def handle_negatives(self, neg_tol_frac: float = 0.05, policy: dict = None, columns=None):
+        """Negative values by data group (see NEGATIVE_POLICY): temperature is left alone; power-like
+        data has small negatives (> -neg_tol_frac * scale) clipped to 0 and large ones removed."""
+        policy = {**NEGATIVE_POLICY, **(policy or {})}
+        for col in self._columns(columns):
+            how = policy.get(self.column_types[col], "keep")
+            x = self.data[col]
+            is_neg = x.lt(0)
+            if how == "keep" or not is_neg.any():
+                continue
+            if how == "clip":
+                small, large = is_neg, is_neg & False
+            else:  # clip_small
+                small = is_neg & x.ge(-neg_tol_frac * self._scale(col))
+                large = is_neg & ~small
+            self.data.loc[small, col] = 0.0
+            self._log_step("negatives_clipped", col, small.sum())
+            if large.any():
+                self._remove("negatives_removed", col, large)
+        return self
+
+    def remove_spikes(self, spike_frac: float = 0.5, columns=None):
+        """Removes isolated single-sample spikes: a point differing from BOTH neighbors, in the same
+        direction, by more than max(``spike_frac`` * scale, 8 x the column's typical sample-to-sample
+        noise) -- so naturally noisy columns (e.g. wind speed) need a much larger jump."""
+        for col in self._columns(columns):
+            x = self.data[col]
+            up, down = x - x.shift(1), x - x.shift(-1)
+            noise = 1.4826 * up.abs().median()
+            thr = max(spike_frac * self._scale(col), 8 * noise)
+            is_spike = (up.abs().gt(thr) & down.abs().gt(thr)) & (np.sign(up) == np.sign(down))
+            self._remove("spikes", col, is_spike)
+        return self
 
     def remove_outliers(
-        self, method: str, iqr_multiplier=1.5, z_threshold=3
-    ) -> dict[str, pd.DataFrame]:
-        """Removes outliers using either z-score or interquartile range method.
-
-        Parameters
-        ----------
-        method : str
-            Outlier detection method; either "z_score" or "iqr".
-
-        Returns
-        -------
-        dict[str, pd.DataFrame]
-            Dictionary of removed outliers by column. Updates self.data
+        self,
+        method: str = "auto",
+        iqr_multiplier: float = None,
+        columns=None,
+        hampel_k: float = 8.0,
+        hampel_window="1h",
+        hampel_min_frac: float = 0.05,
+    ):
+        """Outlier removal. Methods:
+        - "auto" (default): "hampel" for solar-driven columns, "iqr" for the rest.
+        - "hampel": point deviates from the rolling median by > hampel_k * scaled MAD AND by more
+          than ``hampel_min_frac`` * scale (so tiny wiggles on clear days are never flagged).
+          Daylight points only for solar-driven columns. Local, so real peaks are kept.
+        - "iqr": global fences (multiplier IQR_MULTIPLIER, default 1.5; 3.0 for temperature/wind).
+          Only appropriate for roughly stationary data. NOT for solar power: its daytime
+          distribution is skewed by every morning/evening/cloudy sample, so fences land below real
+          peak production (it removed 548 genuine near-nameplate points in the Maricopa sample).
         """
-        kwargs = dict(method=method)
-        if method == "iqr":
-            kwargs.update(dict(iqr_multiplier=iqr_multiplier))
-        else:
-            kwargs.update(dict(z_threshold=z_threshold))
+        if method not in ("auto", "iqr", "hampel"):
+            raise ValueError("method must be 'auto', 'iqr' or 'hampel'.")
+        for col in self._columns(columns):
+            x = self.data[col]
+            solar = self._uses_daylight(col)
+            day = self.daylight() if solar else pd.Series(True, index=x.index)
+            how = ("hampel" if solar else "iqr") if method == "auto" else method
+            if how == "iqr":
+                mult = iqr_multiplier or IQR_MULTIPLIER.get(self.column_types[col], 1.5)
+                lo, hi = get_iqr_bounds(x[day], mult)
+                is_outlier = day & (x.lt(lo) | x.gt(hi))
+                detail = f"fences [{lo:.4g}, {hi:.4g}]"
+            else:
+                win = max(5, int(pd.Timedelta(hampel_window) / self.freq_timedelta) // 2 * 2 + 1)
+                med = x.rolling(win, center=True, min_periods=win // 2).median()
+                mad = (x - med).abs().rolling(win, center=True, min_periods=win // 2).median()
+                thr = np.maximum(hampel_k * 1.4826 * mad, hampel_min_frac * self._scale(col))
+                is_outlier = day & ((x - med).abs() > thr)
+                detail = f"window={win}, k={hampel_k}"
+            self._remove(f"outliers_{how}", col, is_outlier, detail)
+        return self
 
-        outlier_dict = {}
-        series_list = []
-        for col in self.columns:
-            series = self.data[col].copy()
-            outliers = remove_outliers(series, **kwargs)
-            series_list.append(series)
-            if outliers.empty:
+    def flag_out_of_range(self, limits: dict, columns=None):
+        """Removes values outside physical limits. ``limits`` maps a column name or data group to
+        (low, high), e.g. {"irradiance": (0, 1500), "temperature": (-50, 60)}; None = no bound.
+        No defaults because units (W/m2 vs kW/m2, C vs F) are not known here."""
+        for col in self._columns(columns):
+            bounds = limits.get(col, limits.get(self.column_types[col]))
+            if bounds is None:
                 continue
-            outlier_dict.update({col: outliers})
+            lo, hi = bounds
+            bad = pd.Series(False, index=self.data.index)
+            if lo is not None:
+                bad |= self.data[col].lt(lo)
+            if hi is not None:
+                bad |= self.data[col].gt(hi)
+            self._remove("out_of_range", col, bad, f"limits={bounds}")
+        return self
 
-        self.data = pd.concat(series_list, axis=1)
-        return outlier_dict
+    def flag_nighttime_values(self, frac: float = 0.02, columns=None):
+        """Removes irradiance/inverter values above ``frac`` * scale outside dawn-dusk (opt-in)."""
+        for col in self._columns(columns):
+            if not self._uses_daylight(col) or self.column_types[col] == "meter":
+                continue
+            bad = ~self.daylight() & self.data[col].gt(frac * self._scale(col))
+            self._remove("nighttime_values", col, bad)
+        return self
+
+    def fill_gaps(self, max_gap="1h", columns=None):
+        """Time-interpolates NaN gaps up to ``max_gap`` (opt-in; filled points are logged, and are
+        interpolated data -- run flag_interpolated again if filled data should not be trusted)."""
+        limit = int(pd.Timedelta(max_gap) / self.freq_timedelta)
+        for col in self._columns(columns):
+            was_na = self.data[col].isna()
+            filled = self.data[col].interpolate(method="time", limit=limit, limit_area="inside")
+            self.data[col] = filled
+            self._log_step("gaps_filled", col, (was_na & filled.notna()).sum())
+        return self
+
+    def run(self, steps=None):
+        """Runs steps in order. ``steps`` = list of method names or (name, kwargs) tuples."""
+        for step in steps or DEFAULT_STEPS:
+            name, kwargs = (step, {}) if isinstance(step, str) else step
+            getattr(self, name)(**kwargs)
+        return self
