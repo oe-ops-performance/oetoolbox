@@ -73,21 +73,35 @@ class POAQCConfig:
     min_discrimination: float = 0.12  # geometries must differ by this fraction of clear-sky POA
     min_stow_ratio: float = 0.08  # windowed sensor/expected-tracking below this is "bad", not stow
     stow_transition_tol: float = 0.07  # sensor still this far BELOW tracking next to a stow = stow
-    stow_transition_max: Union[str, pd.Timedelta] = "2h"  # longest transition attached to a stow run
-    bad_min_peak_frac: float = 0.7  # 'bad' needs window clear-sky >= this x the day's peak (low sun)
-    stow_max_roughness: float = 0.006  # meter stow must be smooth: median 1-min step / level <= this
+    stow_transition_max: Union[str, pd.Timedelta] = (
+        "2h"  # longest transition attached to a stow run
+    )
+    bad_min_peak_frac: float = (
+        0.7  # 'bad' needs window clear-sky >= this x the day's peak (low sun)
+    )
+    stow_max_roughness: float = (
+        0.006  # meter stow must be smooth: median 1-min step / level <= this
+    )
     stow_requires_wind: bool = False  # if True, a plant-wide (meter) stow must coincide with wind
-    stow_min_wind: float = 8.0  # ...of at least this (hourly mean, m/s); always used to report windy
+    stow_min_wind: float = (
+        8.0  # ...of at least this (hourly mean, m/s); always used to report windy
+    )
     storm_min_precip: float = 0.1  # ...and no weather explaining the drop: precipitation >= this
     storm_max_sunshine: float = 45.0  # ...or sunshine below this (minutes per hour)
     storm_min_cloud: float = 60.0  # ...or cloud cover above this % (only if sunshine is absent)
     weather_lookaround: Union[str, pd.Timedelta] = "30min"  # weather is judged within this of a bin
-    shape_max_roughness: float = 0.02  # shape test needs a steady sky: sensor/clear-sky 5-min step <=
-    shape_max_rmse: float = 0.08  # best fixed geometry must fit the half-day this well (RMSE / mean POA)
+    shape_max_roughness: float = (
+        0.02  # shape test needs a steady sky: sensor/clear-sky 5-min step <=
+    )
+    shape_max_rmse: float = (
+        0.08  # best fixed geometry must fit the half-day this well (RMSE / mean POA)
+    )
     shape_max_ratio: float = 0.3  # ...and at most this x the tracking geometry's RMSE
     shape_min_track_rmse: float = 0.1  # ...which must itself clearly misfit (flat top vs bell)
     shape_min_hours: float = 2.0  # daylight hours needed for a half-day verdict
-    dtn_only_max_curvature: float = 0.02  # without the meter, windows rougher than this are not judged
+    dtn_only_max_curvature: float = (
+        0.02  # without the meter, windows rougher than this are not judged
+    )
     max_stow_score: float = 1.0  # a stow run must fit ONE geometry with mean score <= this
     stow_rotation_step: int = 15  # degrees between candidate stuck rotations
     max_zenith: float = 80.0
@@ -99,18 +113,30 @@ class POAQCConfig:
     gain_bounds: tuple = (0.8, 1.25)  # plausible sensor-vs-model gain when fitting
     flag_gain_bounds: Optional[tuple] = None  # if set, sensors whose gain is outside are flagged
     meter_envelope_quantile: float = 0.95
-    fill_max_gap: Union[str, pd.Timedelta, None] = "15min"  # interpolate gaps in Processed_POA up to this
+    fill_max_gap: Union[str, pd.Timedelta, None] = (
+        "15min"  # interpolate gaps in Processed_POA up to this
+    )
     anchor_min_bins: int = 36  # fewer trusted anchor bins than this -> use the sensors' own gain
     anchor_min_signal: float = 0.8  # backfill gain: only bins >= this x peak clear-sky POA count
     anchor_reach: Union[str, pd.Timedelta] = "1h"  # one-sided anchors fade to the default over this
     anchor_buffer: Union[str, pd.Timedelta] = "1h"  # ...and >= this far from removed data
     anchor_max_adjust: float = 0.05  # local backfill gain may differ from the default by this much
-    drop_removed_fraction: Optional[float] = 0.7  # sensor with this share of daylight removed is dropped
-    level_bounds: Optional[tuple] = None  # if set, sensors whose level vs. DTN POA is outside: "calibration"
+    drop_removed_fraction: Optional[float] = (
+        0.7  # sensor with this share of daylight removed is dropped
+    )
+    level_bounds: Optional[tuple] = (
+        None  # if set, sensors whose level vs. DTN POA is outside: "calibration"
+    )
     level_min_days: int = 5  # sunny days needed to judge a sensor's level
-    shape_trend_window: Union[str, pd.Timedelta, None] = "2h"  # meter slopes slower than this are not cloud shape
-    meter_level_tol: Optional[float] = 0.15  # meter level (vs DTN) is used where sensors agree within this
-    meter_level_reach: Union[str, pd.Timedelta] = "6h"  # ...and within this of such an agreeing hour
+    shape_trend_window: Union[str, pd.Timedelta, None] = (
+        "2h"  # meter slopes slower than this are not cloud shape
+    )
+    meter_level_tol: Optional[float] = (
+        0.15  # meter level (vs DTN) is used where sensors agree within this
+    )
+    meter_level_reach: Union[str, pd.Timedelta] = (
+        "6h"  # ...and within this of such an agreeing hour
+    )
 
     def __post_init__(self):
         for name in ("analysis_freq", "window", "smooth", "min_bad_duration", "min_stow_duration"):
@@ -278,7 +304,11 @@ def build_geometries(
     ghi = (dni * np.cos(np.radians(solpos["apparent_zenith"].to_numpy())).clip(min=0) + dhi).where(
         solpos["apparent_zenith"].to_numpy() < 90, 0.0
     )
-    return geoms, solpos, _transpose(orientations, solpos.set_axis(center), dni, ghi, dhi, dni_extra, index)
+    return (
+        geoms,
+        solpos,
+        _transpose(orientations, solpos.set_axis(center), dni, ghi, dhi, dni_extra, index),
+    )
 
 
 # ---- cloud-index references --------------------------------------------------------------------
@@ -348,7 +378,9 @@ def model_cloud_index(
     trusted = csi_meter.notna() & (clearsky > 0)
     weighted = (clearsky * csi_meter).where(trusted, 0.0).groupby(block).transform("sum")
     weight = clearsky.where(trusted, 0.0).groupby(block).transform("sum")
-    covered = weight / clearsky.where(clearsky > 0, 0.0).groupby(block).transform("sum").replace(0, np.nan)
+    covered = weight / clearsky.where(clearsky > 0, 0.0).groupby(block).transform("sum").replace(
+        0, np.nan
+    )
     mean_meter = weighted / weight.replace(0, np.nan)
     shape = (csi_meter / mean_meter.where(mean_meter > 0.05)).where(covered >= min_coverage)
     return (csi_dtn * shape.fillna(1.0)).clip(0.0, 1.3)
@@ -391,7 +423,9 @@ def meter_level_factor(
         return (n / d.replace(0, np.nan)).where(cover >= min_coverage)
 
     m_ok = csi_meter.notna() & strong
-    f_raw = hourly(clearsky * csi_meter, clearsky, m_ok) / hourly(clearsky * csi_dtn, clearsky, m_ok)
+    f_raw = hourly(clearsky * csi_meter, clearsky, m_ok) / hourly(
+        clearsky * csi_dtn, clearsky, m_ok
+    )
     # the meter index is normalised to its own clear-day envelope, DTN's carries the clear-sky model's
     # bias: on clear hours their ratio is not 1, so express it relative to that
     clear = hourly(clearsky * csi_dtn, clearsky, m_ok) > 0.93
@@ -402,7 +436,9 @@ def meter_level_factor(
     s_ok = kept.notna() & strong
     r_s = hourly(kept, clearsky * csi_dtn * default_gain, s_ok)
 
-    state = pd.Series(np.nan, index=index)  # 1 = sensors corroborate the meter's level, 0 = contradict
+    state = pd.Series(
+        np.nan, index=index
+    )  # 1 = sensors corroborate the meter's level, 0 = contradict
     known = f_m.notna() & r_s.notna()
     state[known] = ((r_s - f_m).abs() <= tol)[known].astype(float)
 
@@ -443,7 +479,8 @@ def sensor_level(x, ref, csi, clearsky, use, min_days=5, min_csi=0.93, min_peak=
 
     Only near-peak bins on days when the reference index says the sky is clear count, so clouds and
     sun-angle effects do not move it. ``x`` should hold trusted (tracking) data only. NaN when fewer
-    than ``min_days`` days qualify. Healthy sensors sit near 1 (DTN's transposition has its own bias)."""
+    than ``min_days`` days qualify. Healthy sensors sit near 1 (DTN's transposition has its own bias).
+    """
     sel = use & x.notna() & (ref > 0) & (csi > min_csi) & (clearsky > min_peak * clearsky.max())
     if not sel.any():
         return np.nan
@@ -511,7 +548,9 @@ def _fill_ambiguous(
     out[take] = cand[take]
     out[is_amb & ~take] = "ok"
     if tracking_fits is not None:
-        bounded = (prev_l == "stow") & (next_l == "stow") & (d_prev <= max_gap) & (d_next <= max_gap)
+        bounded = (
+            (prev_l == "stow") & (next_l == "stow") & (d_prev <= max_gap) & (d_next <= max_gap)
+        )
         behaving = is_amb & tracking_fits.reindex(lab.index, fill_value=False)
         out[behaving] = np.where(bounded[behaving], "stow", "ok")
     return out
@@ -582,9 +621,7 @@ def _enforce_single_geometry(
     return out, geometry
 
 
-def _trim_stow_transitions(
-    lab: pd.Series, geometry: pd.Series, deviates: pd.Series, max_bins: int
-):
+def _trim_stow_transitions(lab: pd.Series, geometry: pd.Series, deviates: pd.Series, max_bins: int):
     """Extend each stow run into adjacent 'ok' bins while the sensor still reads below tracking.
 
     A tracker entering or leaving stow takes a while to settle onto the tracking curve; sensor data
@@ -656,7 +693,9 @@ def _shape_stow_halves(
             fits[g] = (np.sqrt(((xv - k * e) ** 2).mean()) / ref, k)
         track = fits[TRACKER][0]
         fixed = {
-            g: v for g, v in fits.items() if g != TRACKER and cfg.gain_bounds[0] <= v[1] <= cfg.gain_bounds[1]
+            g: v
+            for g, v in fits.items()
+            if g != TRACKER and cfg.gain_bounds[0] <= v[1] <= cfg.gain_bounds[1]
         }
         if not fixed:
             continue
@@ -723,7 +762,9 @@ def classify_sensor(
     shape_day, shape_geom = _shape_stow_halves(x, geometries, use, cfg, afternoon)
     if shape_day.any() and score.shape[1] > 1:
         on = shape_day & use & x.notna()
-        score.loc[on, TRACKER] = np.maximum(score.loc[on, TRACKER].fillna(0.0), 2 * cfg.tracker_fail_score)
+        score.loc[on, TRACKER] = np.maximum(
+            score.loc[on, TRACKER].fillna(0.0), 2 * cfg.tracker_fail_score
+        )
         for g in shape_geom[on].dropna().unique():
             gon = on & shape_geom.eq(g)
             score.loc[gon, g] = np.minimum(score.loc[gon, g].fillna(0.0), 0.5)
@@ -834,11 +875,15 @@ def _to_grid(series: pd.Series, index: pd.DatetimeIndex, step: pd.Timedelta) -> 
     return series.reindex(index, method="ffill", tolerance=freq - pd.Timedelta(1, "ns"))
 
 
-def weather_on_grid(weather: pd.DataFrame, index: pd.DatetimeIndex, step: pd.Timedelta) -> pd.DataFrame:
+def weather_on_grid(
+    weather: pd.DataFrame, index: pd.DatetimeIndex, step: pd.Timedelta
+) -> pd.DataFrame:
     """Recognized weather columns on the analysis grid (see ``_to_grid``)."""
     cols = {k: c for k, c in WEATHER_COLUMNS.items() if c in weather.columns}
     if not cols:
-        raise ValueError(f"ref_weather has none of the expected columns {list(WEATHER_COLUMNS.values())}.")
+        raise ValueError(
+            f"ref_weather has none of the expected columns {list(WEATHER_COLUMNS.values())}."
+        )
     return pd.DataFrame({key: _to_grid(weather[col], index, step) for key, col in cols.items()})
 
 
@@ -851,8 +896,12 @@ def sky_ratios(weather: pd.DataFrame, index: pd.DatetimeIndex, step: pd.Timedelt
     for a meaningful ratio (low sun); the scalar cloud index is used there."""
     if weather is None or not all(c in weather.columns for c in SKY_COLUMNS):
         return None
-    dni = (weather["dtn_dni"] / weather["dni_clearsky"].where(weather["dni_clearsky"] > 20)).clip(0, 1.3)
-    dhi = (weather["dtn_dhi"] / weather["dhi_clearsky"].where(weather["dhi_clearsky"] > 5)).clip(0, 3.0)
+    dni = (weather["dtn_dni"] / weather["dni_clearsky"].where(weather["dni_clearsky"] > 20)).clip(
+        0, 1.3
+    )
+    dhi = (weather["dtn_dhi"] / weather["dhi_clearsky"].where(weather["dhi_clearsky"] > 5)).clip(
+        0, 3.0
+    )
     return pd.DataFrame({"dni": _to_grid(dni, index, step), "dhi": _to_grid(dhi, index, step)})
 
 
@@ -1272,8 +1321,8 @@ class POADataset:
         self.poa_columns = list(self.df_native.columns)
 
     def _clean_native_data(self, df_native):
-        df = df_native.dropna(axis=1, how="all").copy()
-        empty_cols = [c for c in df_native.columns if c not in df.columns]
+        df = df_native.copy()
+        empty_cols = [c for c in df.columns if df[c].isna().all()]
         zeroed_cols = [c for c in df.columns if df[c].abs().max() < 1e-5]
         remove_cols = empty_cols + zeroed_cols
         if remove_cols:
@@ -1349,7 +1398,11 @@ class POADataset:
         run_id = (ms != ms.shift()).cumsum()
         rows = []
         for _, idx in ms[ms].groupby(run_id[ms]).groups.items():
-            row = dict(start=idx[0], end=idx[-1] + self.analysis_freq, hours=len(idx) * self.analysis_freq / pd.Timedelta(hours=1))
+            row = dict(
+                start=idx[0],
+                end=idx[-1] + self.analysis_freq,
+                hours=len(idx) * self.analysis_freq / pd.Timedelta(hours=1),
+            )
             if "wx_wind" in a:
                 row["peak_wind"] = a.loc[idx, "wx_wind"].max()
                 row["windy"] = bool(a.loc[idx, "windy"].any())
@@ -1391,7 +1444,9 @@ class POADataset:
 
         removed = a["use"] & kept.isna()
         buffer = _to_bins(cfg.anchor_buffer, step)
-        near_removed = removed.astype(float).rolling(2 * buffer + 1, center=True, min_periods=1).max() > 0
+        near_removed = (
+            removed.astype(float).rolling(2 * buffer + 1, center=True, min_periods=1).max() > 0
+        )
         rough = pd.Series(False, index=a.index)
         if cfg.dtn_only_max_curvature is not None:
             # Where the cloud index is hourly DTN (no meter) a rough, cloudy window cannot calibrate
@@ -1399,7 +1454,9 @@ class POADataset:
             # With QC removing the smooth stowed days, such windows can be all that is left.
             win = _to_bins(cfg.window, step)
             r = (kept / cs.where(cs > 0)).where(a["use"])
-            curvature = r.diff().diff().abs().rolling(win, center=True, min_periods=max(1, win // 2)).mean()
+            curvature = (
+                r.diff().diff().abs().rolling(win, center=True, min_periods=max(1, win // 2)).mean()
+            )
             rough = curvature > cfg.dtn_only_max_curvature
 
         def level(base, trusted, fallback):
@@ -1434,15 +1491,29 @@ class POADataset:
         trusted = ~near_removed & ~(rough & from_dtn) & (base >= cfg.anchor_min_signal * cs.max())
         own = float(np.median(list(self.gains.values())))  # too few trusted bins: sensors' own gain
         default, gain = level(base, trusted, own)
-        if cfg.meter_level_tol is not None and "csi_meter" in a and "csi_dtn" in a and getattr(self, "ref_poa", None) is not None:
+        if (
+            cfg.meter_level_tol is not None
+            and "csi_meter" in a
+            and "csi_dtn" in a
+            and getattr(self, "ref_poa", None) is not None
+        ):
             # DTN cannot see every cloud: where the kept sensors agree with the meter's level, use it
             csi_meter = a["csi_meter"].where(~from_dtn)
             factor = meter_level_factor(
-                a["csi_dtn"], csi_meter, kept, cs, default, infer_freq(self.ref_poa.index), step,
-                cfg.meter_level_tol, pd.Timedelta(cfg.meter_level_reach),
+                a["csi_dtn"],
+                csi_meter,
+                kept,
+                cs,
+                default,
+                infer_freq(self.ref_poa.index),
+                step,
+                cfg.meter_level_tol,
+                pd.Timedelta(cfg.meter_level_reach),
             )
             base = base * factor
-            trusted = ~near_removed & ~(rough & from_dtn) & (base >= cfg.anchor_min_signal * cs.max())
+            trusted = (
+                ~near_removed & ~(rough & from_dtn) & (base >= cfg.anchor_min_signal * cs.max())
+            )
             default, gain = level(base, trusted, own)
         return base * gain
 
@@ -1497,7 +1568,9 @@ class POADataset:
         )
         # a short gap with good sensor data on both sides is bridged from the sensor itself, not
         # spliced with the model (OE.POA_average keeps the gap: it is not a calibration anchor)
-        bridged, interpolated = _fill_short_gaps(average, self.config.fill_max_gap, self.native_freq)
+        bridged, interpolated = _fill_short_gaps(
+            average, self.config.fill_max_gap, self.native_freq
+        )
         missing = bridged.isna()
         self.df_final["Processed_POA"] = bridged.where(~missing, modelled)
         self.poa_source = pd.Series(
@@ -1798,7 +1871,9 @@ class POADataset:
                     has = self.df_flags.eq(name).any(axis=1)
                     combined = combined.mask(has, name)
                 # only where nothing good is left; a backfilled bin with no flag is a data gap
-                combined = combined.where(backfilled, "").mask(backfilled & combined.eq(""), "missing")
+                combined = combined.where(backfilled, "").mask(
+                    backfilled & combined.eq(""), "missing"
+                )
                 extra["OE.POA_average"] = combined
             shapes = self._shapes(rows, flags=flags, opacity=0.2, extra=extra)
         fig.update_layout(
